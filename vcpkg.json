@@ -1,0 +1,14 @@
+{
+  "name": "latentspeed",
+  "version-string": "0.1.0",
+  "dependencies": [
+    "openssl",
+    "boost-asio",
+    "boost-beast",
+    "boost-smart-ptr",
+    "rapidjson",
+    "zlib",
+    "hffix",
+    "zeromq"
+  ]
+}

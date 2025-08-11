@@ -1,0 +1,49 @@
+{
+  "version": 4,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 20,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "wsl-debug",
+      "displayName": "WSL Debug (Ninja + vcpkg)",
+      "generator": "Ninja",
+      "binaryDir": "build/wsl-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/external/vcpkg/scripts/buildsystems/vcpkg.cmake",
+        "VCPKG_TARGET_TRIPLET": "x64-linux",
+        "CCAPI_COMPILE_DEFS": "CCAPI_ENABLE_SERVICE_MARKET_DATA;CCAPI_ENABLE_EXCHANGE_OKX",
+        "LATENTSPEED_WITH_ZLIB": "OFF"
+      }
+    },
+    {
+      "name": "wsl-release",
+      "displayName": "WSL Release (Ninja + vcpkg)",
+      "generator": "Ninja",
+      "binaryDir": "build/wsl-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/external/vcpkg/scripts/buildsystems/vcpkg.cmake",
+        "VCPKG_TARGET_TRIPLET": "x64-linux",
+        "CCAPI_COMPILE_DEFS": "CCAPI_ENABLE_SERVICE_MARKET_DATA;CCAPI_ENABLE_EXCHANGE_OKX",
+        "LATENTSPEED_WITH_ZLIB": "OFF"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "wsl-debug",
+      "displayName": "Build Debug (WSL)",
+      "configurePreset": "wsl-debug"
+    },
+    {
+      "name": "wsl-release",
+      "displayName": "Build Release (WSL)",
+      "configurePreset": "wsl-release"
+    }
+  ],
+  "testPresets": []
+}
