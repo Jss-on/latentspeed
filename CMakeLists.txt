@@ -14,6 +14,7 @@ option(LATENTSPEED_WITH_ZLIB "Link ZLIB (needed for some ccapi exchanges)" OFF)
 find_package(OpenSSL REQUIRED)
 find_package(Threads REQUIRED)
 find_package(ZLIB QUIET)
+find_package(CURL REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(ZMQ REQUIRED libzmq)
 
@@ -55,7 +56,7 @@ if(HFFIX_INCLUDE_DIR)
 endif()
 
 # Link libraries
-target_link_libraries(latentspeed_ccapi INTERFACE OpenSSL::SSL OpenSSL::Crypto Threads::Threads ${ZMQ_LIBRARIES})
+target_link_libraries(latentspeed_ccapi INTERFACE OpenSSL::SSL OpenSSL::Crypto Threads::Threads ${ZMQ_LIBRARIES} CURL::libcurl)
 
 if(WIN32)
   target_link_libraries(latentspeed_ccapi INTERFACE ws2_32)
