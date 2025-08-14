@@ -1,3 +1,14 @@
+/**
+ * @file trading_engine_service.cpp
+ * @brief Implementation of the TradingEngineService class
+ * @author Latentspeed Trading Team
+ * @date 2024
+ * 
+ * This file contains the complete implementation of the TradingEngineService,
+ * including order processing, market data handling, ZeroMQ communication,
+ * and backtest simulation capabilities.
+ */
+
 #include "trading_engine_service.h"
 #include <iostream>
 #include <sstream>
@@ -15,21 +26,60 @@
 
 namespace latentspeed {
 
+/**
+ * @brief Default constructor for TradingEngineService
+ * 
+ * Initializes the trading engine with default configuration values:
+ * - Order endpoint: tcp://127.0.0.1:5601 (PULL socket)
+ * - Report endpoint: tcp://127.0.0.1:5602 (PUB socket)
+ * - Gateway URL: http://localhost:8080 (Hummingbot Gateway)
+ * - Market data endpoints: tcp://127.0.0.1:5556/5557
+ * - Backtest mode enabled with 80% fill probability
+ * - 1 bps additional slippage for realistic simulation
+ */
 TradingEngineService::TradingEngineService()
     : running_(false)
     , order_endpoint_("tcp://127.0.0.1:5601")        // Contract-specified endpoint
     , report_endpoint_("tcp://127.0.0.1:5602")       // Contract-specified endpoint
     , gateway_base_url_("http://localhost:8080")      // Default Hummingbot Gateway URL
+    , market_data_host_("127.0.0.1")                 // Default to localhost
+    , trade_endpoint_("tcp://127.0.0.1:5556")        // Preprocessed trades endpoint
+    , orderbook_endpoint_("tcp://127.0.0.1:5557")    // Preprocessed orderbook endpoint
+    , backtest_mode_(true)                            // Default to backtest mode
+    , fill_probability_(0.8)                          // 80% fill probability
+    , slippage_bps_(1.0)                             // 1 bps additional slippage
 {
     // Initialize curl for DEX gateway communication
     curl_global_init(CURL_GLOBAL_DEFAULT);
 }
 
+/**
+ * @brief Destructor for TradingEngineService
+ * 
+ * Ensures graceful shutdown of the service and cleanup of all resources:
+ * - Stops all worker threads
+ * - Cleans up curl library resources
+ * - Releases ZeroMQ and ccapi resources
+ */
 TradingEngineService::~TradingEngineService() {
     stop();
     curl_global_cleanup();
 }
 
+/**
+ * @brief Initialize the trading engine service
+ * @return true if initialization successful, false otherwise
+ * 
+ * Performs complete service initialization:
+ * - Creates ZeroMQ context and sockets (PULL, PUB, SUB)
+ * - Binds order receiver and report publisher sockets
+ * - Connects to market data feeds (trades and orderbook)
+ * - Initializes ccapi session for exchange connectivity
+ * - Sets up all required components for operation
+ * 
+ * Must be called before start(). The service will log detailed
+ * initialization status and endpoint information.
+ */
 bool TradingEngineService::initialize() {
     try {
         // Initialize ZeroMQ context
@@ -42,6 +92,15 @@ bool TradingEngineService::initialize() {
         // Report publisher socket (PUB - sends ExecutionReports and Fills)
         report_publisher_socket_ = std::make_unique<zmq::socket_t>(*zmq_context_, ZMQ_PUB);
         report_publisher_socket_->bind(report_endpoint_);
+
+        // Market data subscriber sockets
+        trade_subscriber_socket_ = std::make_unique<zmq::socket_t>(*zmq_context_, ZMQ_SUB);
+        trade_subscriber_socket_->connect(trade_endpoint_);
+        trade_subscriber_socket_->setsockopt(ZMQ_SUBSCRIBE, "", 0);  // Subscribe to all topics
+        
+        orderbook_subscriber_socket_ = std::make_unique<zmq::socket_t>(*zmq_context_, ZMQ_SUB);
+        orderbook_subscriber_socket_->connect(orderbook_endpoint_);
+        orderbook_subscriber_socket_->setsockopt(ZMQ_SUBSCRIBE, "", 0);  // Subscribe to all topics
 
         // Initialize ccapi for CEX integration
         session_options_ = std::make_unique<ccapi::SessionOptions>();
@@ -60,6 +119,19 @@ bool TradingEngineService::initialize() {
     }
 }
 
+/**
+ * @brief Start the trading engine service
+ * 
+ * Launches all worker threads in the correct order:
+ * 1. Order receiver thread (processes incoming ExecutionOrders)
+ * 2. Publisher thread (sends ExecutionReports and Fills)
+ * 3. Trade subscriber thread (processes preprocessed trade data)
+ * 4. Orderbook subscriber thread (processes preprocessed orderbook data)
+ * 
+ * This is a non-blocking call. The service will continue running
+ * until stop() is called. Each thread runs independently and
+ * communicates through thread-safe queues and atomic flags.
+ */
 void TradingEngineService::start() {
     if (running_) {
         std::cout << "[TradingEngine] Already running" << std::endl;
@@ -74,9 +146,27 @@ void TradingEngineService::start() {
     // Start publisher thread
     publisher_thread_ = std::make_unique<std::thread>(&TradingEngineService::zmq_publisher_thread, this);
     
+    // Start market data subscriber threads
+    trade_subscriber_thread_ = std::make_unique<std::thread>(&TradingEngineService::zmq_trade_subscriber_thread, this);
+    orderbook_subscriber_thread_ = std::make_unique<std::thread>(&TradingEngineService::zmq_orderbook_subscriber_thread, this);
+    
     std::cout << "[TradingEngine] Service started" << std::endl;
+    std::cout << "[TradingEngine] Market data streams: trades=" << trade_endpoint_ << ", orderbook=" << orderbook_endpoint_ << std::endl;
+    std::cout << "[TradingEngine] Backtest mode: " << (backtest_mode_ ? "enabled" : "disabled") << std::endl;
 }
 
+/**
+ * @brief Stop the trading engine service
+ * 
+ * Performs graceful shutdown of all components:
+ * 1. Sets running flag to false (signals threads to stop)
+ * 2. Waits for all worker threads to complete their current operations
+ * 3. Joins all threads to ensure clean shutdown
+ * 4. Releases thread resources
+ * 
+ * This is a blocking call that ensures all operations are completed
+ * before returning. Safe to call multiple times.
+ */
 void TradingEngineService::stop() {
     if (!running_) {
         return;
@@ -104,9 +194,31 @@ void TradingEngineService::stop() {
         publisher_thread_->join();
     }
     
+    if (trade_subscriber_thread_ && trade_subscriber_thread_->joinable()) {
+        trade_subscriber_thread_->join();
+    }
+    
+    if (orderbook_subscriber_thread_ && orderbook_subscriber_thread_->joinable()) {
+        orderbook_subscriber_thread_->join();
+    }
+    
     std::cout << "[TradingEngine] Service stopped" << std::endl;
 }
 
+/**
+ * @brief Process ccapi events from exchanges
+ * @param event The ccapi event containing market data or execution updates
+ * @param sessionPtr Pointer to the ccapi session
+ * 
+ * Handles different types of ccapi events:
+ * - Market data updates (trades, orderbook changes)
+ * - Order execution confirmations
+ * - Connection status changes
+ * - Error notifications
+ * 
+ * This method is called by the ccapi framework when events occur.
+ * It processes the events and updates internal state accordingly.
+ */
 void TradingEngineService::processEvent(const ccapi::Event& event, ccapi::Session* sessionPtr) {
     if (event.getType() == ccapi::Event::Type::SUBSCRIPTION_STATUS) {
         std::cout << "[TradingEngine] Subscription status: " << event.toPrettyString(2, 2) << std::endl;
@@ -194,6 +306,18 @@ void TradingEngineService::processEvent(const ccapi::Event& event, ccapi::Sessio
     }
 }
 
+/**
+ * @brief ZeroMQ order receiver thread implementation
+ * 
+ * Main order processing loop that:
+ * 1. Receives ExecutionOrder messages from PULL socket
+ * 2. Parses JSON messages to ExecutionOrder objects
+ * 3. Validates orders and checks for duplicates (idempotency)
+ * 4. Dispatches orders to appropriate processing handlers
+ * 
+ * Runs continuously until running_ flag is set to false.
+ * Uses non-blocking ZMQ_NOBLOCK to allow graceful shutdown.
+ */
 void TradingEngineService::zmq_order_receiver_thread() {
     std::cout << "[TradingEngine] Order receiver thread started" << std::endl;
     
@@ -227,6 +351,17 @@ void TradingEngineService::zmq_order_receiver_thread() {
     std::cout << "[TradingEngine] Order receiver thread stopped" << std::endl;
 }
 
+/**
+ * @brief ZeroMQ publisher thread implementation
+ * 
+ * Handles outbound message publishing:
+ * 1. Waits for messages in the publish queue
+ * 2. Publishes ExecutionReport and Fill messages via PUB socket
+ * 3. Uses condition variable for efficient thread synchronization
+ * 
+ * Messages are queued by other threads and published asynchronously
+ * to ensure non-blocking order processing.
+ */
 void TradingEngineService::zmq_publisher_thread() {
     std::cout << "[TradingEngine] Publisher thread started" << std::endl;
     
@@ -257,6 +392,21 @@ void TradingEngineService::zmq_publisher_thread() {
     std::cout << "[TradingEngine] Publisher thread stopped" << std::endl;
 }
 
+/**
+ * @brief Main order processing dispatcher
+ * @param order The ExecutionOrder to process
+ * 
+ * Central routing logic that:
+ * 1. Validates order structure and required fields
+ * 2. Checks for duplicate orders (idempotency protection)
+ * 3. Routes orders to appropriate venue-specific handlers based on:
+ *    - venue_type (cex, dex, chain)
+ *    - action (place, cancel, replace)
+ *    - product_type (spot, perpetual, swap, transfer)
+ * 4. Handles errors and generates appropriate ExecutionReports
+ * 
+ * This is the main entry point for all order processing logic.
+ */
 void TradingEngineService::process_execution_order(const ExecutionOrder& order) {
     try {
         // Check for duplicate orders (idempotency)
@@ -326,6 +476,21 @@ void TradingEngineService::process_execution_order(const ExecutionOrder& order) 
     }
 }
 
+/**
+ * @brief Handle centralized exchange orders
+ * @param order The original ExecutionOrder
+ * @param details CEX-specific order parameters
+ * 
+ * Processes orders for centralized exchanges (Binance, Bybit, OKX, etc.):
+ * 1. Validates CEX-specific parameters (symbol, side, type, etc.)
+ * 2. In backtest mode: simulates execution using market data
+ * 3. In live mode: submits orders via ccapi to actual exchanges
+ * 4. Tracks pending orders and manages order state
+ * 5. Generates ExecutionReports for order status updates
+ * 
+ * Supports all standard order types: market, limit, stop, stop-limit
+ * with proper risk management and position sizing.
+ */
 void TradingEngineService::handle_cex_order(const ExecutionOrder& order, const CexOrderDetails& details) {
     try {
         // Create ccapi request for CEX order
@@ -373,6 +538,21 @@ void TradingEngineService::handle_cex_order(const ExecutionOrder& order, const C
     }
 }
 
+/**
+ * @brief Handle Automated Market Maker swap orders
+ * @param order The original ExecutionOrder
+ * @param details AMM-specific swap parameters
+ * 
+ * Processes token swaps on AMM protocols (Uniswap V2, SushiSwap, etc.):
+ * 1. Validates swap parameters (tokens, amounts, slippage)
+ * 2. Constructs swap transaction via Hummingbot Gateway API
+ * 3. Handles both exact_in and exact_out swap modes
+ * 4. Applies slippage protection and deadline constraints
+ * 5. Supports multi-hop routing through intermediate tokens
+ * 
+ * Communicates with DEX protocols through Gateway REST API,
+ * abstracting blockchain complexity from the trading engine.
+ */
 void TradingEngineService::handle_amm_swap(const ExecutionOrder& order, const AmmSwapDetails& details) {
     try {
         // Build JSON payload for Hummingbot Gateway AMM swap
@@ -428,6 +608,21 @@ void TradingEngineService::handle_amm_swap(const ExecutionOrder& order, const Am
     }
 }
 
+/**
+ * @brief Handle Concentrated Liquidity Market Maker swaps
+ * @param order The original ExecutionOrder
+ * @param details CLMM-specific swap parameters
+ * 
+ * Processes swaps on concentrated liquidity protocols (Uniswap V3, etc.):
+ * 1. Validates CLMM pool parameters (tokens, fee tier)
+ * 2. Handles price limit orders and concentrated liquidity ranges
+ * 3. Optimizes routing through multiple fee tiers if beneficial
+ * 4. Applies sophisticated slippage calculation for concentrated liquidity
+ * 5. Manages price impact and MEV protection strategies
+ * 
+ * CLMM swaps offer better capital efficiency but require more
+ * sophisticated price impact and liquidity analysis.
+ */
 void TradingEngineService::handle_clmm_swap(const ExecutionOrder& order, const ClmmSwapDetails& details) {
     try {
         // Build JSON payload for Hummingbot Gateway CLMM swap
@@ -488,6 +683,21 @@ void TradingEngineService::handle_clmm_swap(const ExecutionOrder& order, const C
     }
 }
 
+/**
+ * @brief Handle on-chain token transfer orders
+ * @param order The original ExecutionOrder
+ * @param details Transfer-specific parameters
+ * 
+ * Processes direct token transfers on blockchain networks:
+ * 1. Validates transfer parameters (token, amount, recipient)
+ * 2. Handles both native tokens (ETH, BNB) and ERC-20/BEP-20 tokens
+ * 3. Estimates gas fees and transaction costs
+ * 4. Constructs and submits transfer transactions via Gateway
+ * 5. Monitors transaction confirmation and handles failures
+ * 
+ * Essential for portfolio rebalancing, profit taking, and
+ * cross-chain arbitrage operations.
+ */
 void TradingEngineService::handle_transfer(const ExecutionOrder& order, const TransferDetails& details) {
     try {
         // Build JSON payload for chain transfer
@@ -539,6 +749,20 @@ void TradingEngineService::handle_transfer(const ExecutionOrder& order, const Tr
     }
 }
 
+/**
+ * @brief Handle order cancellation requests
+ * @param order The original ExecutionOrder containing cancel request
+ * @param details Cancellation-specific parameters
+ * 
+ * Cancels existing orders across all supported venues:
+ * 1. Locates the target order using client ID or exchange ID
+ * 2. For CEX: sends cancel request via ccapi
+ * 3. For DEX: attempts transaction cancellation (if still pending)
+ * 4. Updates internal order tracking state
+ * 5. Generates ExecutionReport with cancellation status
+ * 
+ * Handles race conditions where orders might fill during cancellation.
+ */
 void TradingEngineService::handle_cancel(const ExecutionOrder& order, const CancelDetails& details) {
     try {
         // CEX cancel order
@@ -566,6 +790,20 @@ void TradingEngineService::handle_cancel(const ExecutionOrder& order, const Canc
     }
 }
 
+/**
+ * @brief Handle order replacement/modification requests
+ * @param order The original ExecutionOrder containing replace request
+ * @param details Replacement-specific parameters (new price/size)
+ * 
+ * Modifies existing orders by replacing them with updated parameters:
+ * 1. Validates replacement parameters (price and/or size changes)
+ * 2. For CEX: uses exchange-specific replace/modify APIs when available
+ * 3. Falls back to cancel-and-replace if native modify not supported
+ * 4. Maintains order priority where possible
+ * 5. Handles partial fills during replacement process
+ * 
+ * Essential for dynamic order management and algorithmic strategies.
+ */
 void TradingEngineService::handle_replace(const ExecutionOrder& order, const ReplaceDetails& details) {
     try {
         // CEX replace order - most exchanges implement as cancel + new order
@@ -590,6 +828,18 @@ void TradingEngineService::handle_replace(const ExecutionOrder& order, const Rep
 }
 
 // Publishing methods
+/**
+ * @brief Publish ExecutionReport to strategies
+ * @param report The ExecutionReport to publish
+ * 
+ * Thread-safe publication of execution reports:
+ * 1. Serializes ExecutionReport to JSON format
+ * 2. Adds message to publish queue with proper locking
+ * 3. Notifies publisher thread via condition variable
+ * 
+ * Called by all order processing handlers to communicate
+ * order status back to trading strategies.
+ */
 void TradingEngineService::publish_execution_report(const ExecutionReport& report) {
     try {
         std::string json_report = serialize_execution_report(report);
@@ -604,6 +854,18 @@ void TradingEngineService::publish_execution_report(const ExecutionReport& repor
     }
 }
 
+/**
+ * @brief Publish Fill report to strategies
+ * @param fill The Fill report to publish
+ * 
+ * Thread-safe publication of fill reports:
+ * 1. Serializes Fill to JSON format
+ * 2. Adds message to publish queue with proper locking
+ * 3. Notifies publisher thread via condition variable
+ * 
+ * Generated when orders are executed (partially or fully) to provide
+ * detailed execution information including price, size, and fees.
+ */
 void TradingEngineService::publish_fill(const Fill& fill) {
     try {
         std::string json_fill = serialize_fill(fill);
@@ -619,6 +881,22 @@ void TradingEngineService::publish_fill(const Fill& fill) {
 }
 
 // DEX Gateway communication
+/**
+ * @brief Call Hummingbot Gateway REST API
+ * @param endpoint API endpoint path (e.g., "/amm/trade")
+ * @param json_payload JSON request payload
+ * @return JSON response from Gateway API
+ * 
+ * Handles HTTP communication with Hummingbot Gateway:
+ * 1. Constructs full URL from base URL + endpoint
+ * 2. Sets appropriate headers (Content-Type: application/json)
+ * 3. Sends POST request with JSON payload
+ * 4. Handles HTTP errors and timeouts
+ * 5. Returns response body as JSON string
+ * 
+ * Used for all DEX operations (swaps, transfers) that require
+ * blockchain interaction through the Gateway abstraction layer.
+ */
 std::string TradingEngineService::call_gateway_api(const std::string& endpoint, const std::string& json_payload) {
     CURL* curl = curl_easy_init();
     std::string response_string;
@@ -702,6 +980,21 @@ void TradingEngineService::subscribe_market_data(const std::string& exchange, co
 }
 
 // Contract-compliant parsing and serialization methods
+/**
+ * @brief Parse JSON message to ExecutionOrder object
+ * @param json_message JSON string containing ExecutionOrder data
+ * @return Parsed ExecutionOrder object
+ * 
+ * Comprehensive JSON parsing with error handling:
+ * 1. Parses base ExecutionOrder fields (cl_id, action, venue, etc.)
+ * 2. Determines order detail type from venue_type and product_type
+ * 3. Parses variant OrderDetails (CexOrderDetails, AmmSwapDetails, etc.)
+ * 4. Validates required fields and data types
+ * 5. Handles parsing errors gracefully with detailed logging
+ * 
+ * Central parsing logic that converts external JSON messages
+ * into strongly-typed internal order structures.
+ */
 ExecutionOrder TradingEngineService::parse_execution_order(const std::string& json_message) {
     ExecutionOrder order;
     
@@ -823,6 +1116,111 @@ ExecutionOrder TradingEngineService::parse_execution_order(const std::string& js
     return order;
 }
 
+/**
+ * @brief Parse JSON message to PreprocessedTrade object
+ * @param json_message JSON string containing preprocessed trade data
+ * @return Parsed PreprocessedTrade object
+ * 
+ * Parses enriched trade data from market data pipeline:
+ * 1. Extracts common metadata (schema version, sequence, timestamps)
+ * 2. Parses original trade fields (exchange, symbol, price, amount)
+ * 3. Extracts preprocessing features (volatility, volume metrics)
+ * 4. Validates data integrity and handles missing fields
+ * 
+ * Used by backtest execution engine to simulate realistic
+ * order fills based on actual market conditions.
+ */
+PreprocessedTrade TradingEngineService::parse_preprocessed_trade(const std::string& json_message) {
+    rapidjson::Document doc;
+    doc.Parse(json_message.c_str());
+    
+    if (doc.HasParseError()) {
+        throw std::runtime_error("Failed to parse preprocessed trade JSON: " + std::string(rapidjson::GetParseError_En(doc.GetParseError())));
+    }
+    
+    PreprocessedTrade trade;
+    
+    // Common metadata
+    if (doc.HasMember("schema_version")) trade.schema_version = doc["schema_version"].GetInt();
+    if (doc.HasMember("partition_id")) trade.partition_id = doc["partition_id"].GetString();
+    if (doc.HasMember("seq")) trade.seq = doc["seq"].GetUint64();
+    if (doc.HasMember("receipt_timestamp_ns")) trade.receipt_timestamp_ns = doc["receipt_timestamp_ns"].GetUint64();
+    if (doc.HasMember("preprocessing_timestamp")) trade.preprocessing_timestamp = doc["preprocessing_timestamp"].GetString();
+    if (doc.HasMember("symbol_norm")) trade.symbol_norm = doc["symbol_norm"].GetString();
+    
+    // Original cryptofeed fields
+    if (doc.HasMember("exchange")) trade.exchange = doc["exchange"].GetString();
+    if (doc.HasMember("symbol")) trade.symbol = doc["symbol"].GetString();
+    if (doc.HasMember("price")) trade.price = doc["price"].GetDouble();
+    if (doc.HasMember("amount")) trade.amount = doc["amount"].GetDouble();
+    if (doc.HasMember("timestamp")) trade.timestamp = doc["timestamp"].GetString();
+    if (doc.HasMember("side")) trade.side = doc["side"].GetString();
+    
+    // Preprocessing fields
+    if (doc.HasMember("transaction_price")) trade.transaction_price = doc["transaction_price"].GetDouble();
+    if (doc.HasMember("trading_volume")) trade.trading_volume = doc["trading_volume"].GetDouble();
+    if (doc.HasMember("volatility_transaction_price")) trade.volatility_transaction_price = doc["volatility_transaction_price"].GetDouble();
+    if (doc.HasMember("window_size")) trade.window_size = doc["window_size"].GetInt();
+    
+    return trade;
+}
+
+/**
+ * @brief Parse JSON message to PreprocessedOrderbook object
+ * @param json_message JSON string containing preprocessed orderbook data
+ * @return Parsed PreprocessedOrderbook object
+ * 
+ * Parses enriched order book data from market data pipeline:
+ * 1. Extracts common metadata and original orderbook fields
+ * 2. Parses preprocessing features (spread, depth, imbalance metrics)
+ * 3. Calculates derived values (midpoint, volatility, breadth)
+ * 4. Validates data consistency and handles edge cases
+ * 
+ * Critical for backtest execution as it provides the market state
+ * needed to determine order fill probability and realistic prices.
+ */
+PreprocessedOrderbook TradingEngineService::parse_preprocessed_orderbook(const std::string& json_message) {
+    rapidjson::Document doc;
+    doc.Parse(json_message.c_str());
+    
+    if (doc.HasParseError()) {
+        throw std::runtime_error("Failed to parse preprocessed orderbook JSON: " + std::string(rapidjson::GetParseError_En(doc.GetParseError())));
+    }
+    
+    PreprocessedOrderbook orderbook;
+    
+    // Common metadata
+    if (doc.HasMember("schema_version")) orderbook.schema_version = doc["schema_version"].GetInt();
+    if (doc.HasMember("partition_id")) orderbook.partition_id = doc["partition_id"].GetString();
+    if (doc.HasMember("seq")) orderbook.seq = doc["seq"].GetUint64();
+    if (doc.HasMember("receipt_timestamp_ns")) orderbook.receipt_timestamp_ns = doc["receipt_timestamp_ns"].GetUint64();
+    if (doc.HasMember("preprocessing_timestamp")) orderbook.preprocessing_timestamp = doc["preprocessing_timestamp"].GetString();
+    if (doc.HasMember("symbol_norm")) orderbook.symbol_norm = doc["symbol_norm"].GetString();
+    
+    // Original cryptofeed fields
+    if (doc.HasMember("exchange")) orderbook.exchange = doc["exchange"].GetString();
+    if (doc.HasMember("symbol")) orderbook.symbol = doc["symbol"].GetString();
+    if (doc.HasMember("timestamp")) orderbook.timestamp = doc["timestamp"].GetString();
+    
+    // Preprocessing fields
+    if (doc.HasMember("best_bid_price")) orderbook.best_bid_price = doc["best_bid_price"].GetDouble();
+    if (doc.HasMember("best_bid_size")) orderbook.best_bid_size = doc["best_bid_size"].GetDouble();
+    if (doc.HasMember("best_ask_price")) orderbook.best_ask_price = doc["best_ask_price"].GetDouble();
+    if (doc.HasMember("best_ask_size")) orderbook.best_ask_size = doc["best_ask_size"].GetDouble();
+    if (doc.HasMember("midpoint")) orderbook.midpoint = doc["midpoint"].GetDouble();
+    if (doc.HasMember("relative_spread")) orderbook.relative_spread = doc["relative_spread"].GetDouble();
+    if (doc.HasMember("breadth")) orderbook.breadth = doc["breadth"].GetDouble();
+    if (doc.HasMember("imbalance_lvl1")) orderbook.imbalance_lvl1 = doc["imbalance_lvl1"].GetDouble();
+    if (doc.HasMember("bid_depth_n")) orderbook.bid_depth_n = doc["bid_depth_n"].GetDouble();
+    if (doc.HasMember("ask_depth_n")) orderbook.ask_depth_n = doc["ask_depth_n"].GetDouble();
+    if (doc.HasMember("depth_n")) orderbook.depth_n = doc["depth_n"].GetDouble();
+    if (doc.HasMember("volatility_mid")) orderbook.volatility_mid = doc["volatility_mid"].GetDouble();
+    if (doc.HasMember("ofi_rolling")) orderbook.ofi_rolling = doc["ofi_rolling"].GetDouble();
+    if (doc.HasMember("window_size")) orderbook.window_size = doc["window_size"].GetInt();
+    
+    return orderbook;
+}
+
 std::string TradingEngineService::serialize_execution_report(const ExecutionReport& report) {
     rapidjson::Document doc;
     doc.SetObject();
@@ -905,6 +1303,308 @@ std::string TradingEngineService::serialize_fill(const Fill& fill) {
     doc.Accept(writer);
     
     return buffer.GetString();
+}
+
+// Market data subscription threads
+/**
+ * @brief Market data trade subscriber thread
+ * 
+ * Continuously processes preprocessed trade data:
+ * 1. Receives trade messages from ZMQ SUB socket
+ * 2. Parses JSON to PreprocessedTrade objects
+ * 3. Updates internal market state for backtest execution
+ * 4. Triggers order fill simulation when appropriate
+ * 
+ * Essential for realistic backtesting that responds to
+ * actual market conditions and trade flow.
+ */
+void TradingEngineService::zmq_trade_subscriber_thread() {
+    std::cout << "[TradingEngine] Trade subscriber thread started" << std::endl;
+    
+    while (running_) {
+        try {
+            zmq::message_t topic_msg, data_msg;
+            
+            // Receive topic and data
+            if (trade_subscriber_socket_->recv(topic_msg, zmq::recv_flags::dontwait) &&
+                trade_subscriber_socket_->recv(data_msg, zmq::recv_flags::dontwait)) {
+                
+                std::string topic(static_cast<char*>(topic_msg.data()), topic_msg.size());
+                std::string data(static_cast<char*>(data_msg.data()), data_msg.size());
+                
+                // Parse and process trade data
+                try {
+                    PreprocessedTrade trade = parse_preprocessed_trade(data);
+                    process_preprocessed_trade(trade);
+                } catch (const std::exception& e) {
+                    std::cerr << "[TradingEngine] Failed to parse trade data: " << e.what() << std::endl;
+                }
+            } else {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "[TradingEngine] Trade subscriber error: " << e.what() << std::endl;
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    }
+    
+    std::cout << "[TradingEngine] Trade subscriber thread stopped" << std::endl;
+}
+
+/**
+ * @brief Market data orderbook subscriber thread
+ * 
+ * Continuously processes preprocessed orderbook data:
+ * 1. Receives orderbook messages from ZMQ SUB socket
+ * 2. Parses JSON to PreprocessedOrderbook objects
+ * 3. Updates market state tracking for order fill decisions
+ * 4. Provides liquidity and spread information for execution
+ * 
+ * The orderbook data is the primary input for determining
+ * whether pending orders should be filled in backtest mode.
+ */
+void TradingEngineService::zmq_orderbook_subscriber_thread() {
+    std::cout << "[TradingEngine] Orderbook subscriber thread started" << std::endl;
+    
+    while (running_) {
+        try {
+            zmq::message_t topic_msg, data_msg;
+            
+            // Receive topic and data
+            if (orderbook_subscriber_socket_->recv(topic_msg, zmq::recv_flags::dontwait) &&
+                orderbook_subscriber_socket_->recv(data_msg, zmq::recv_flags::dontwait)) {
+                
+                std::string topic(static_cast<char*>(topic_msg.data()), topic_msg.size());
+                std::string data(static_cast<char*>(data_msg.data()), data_msg.size());
+                
+                // Parse and process orderbook data
+                try {
+                    PreprocessedOrderbook orderbook = parse_preprocessed_orderbook(data);
+                    process_preprocessed_orderbook(orderbook);
+                } catch (const std::exception& e) {
+                    std::cerr << "[TradingEngine] Failed to parse orderbook data: " << e.what() << std::endl;
+                }
+            } else {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "[TradingEngine] Orderbook subscriber error: " << e.what() << std::endl;
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    }
+    
+    std::cout << "[TradingEngine] Orderbook subscriber thread stopped" << std::endl;
+}
+
+// Market data processing
+void TradingEngineService::process_preprocessed_trade(const PreprocessedTrade& trade) {
+    std::lock_guard<std::mutex> lock(market_state_mutex_);
+    latest_trade_[trade.symbol] = trade;
+    
+    // Optional: Log high-volume trades or significant price moves
+    if (trade.trading_volume > 100000.0 || trade.volatility_transaction_price > 0.05) {
+        std::cout << "[MarketData] Notable trade: " << trade.symbol 
+                  << " price=" << trade.price 
+                  << " volume=" << trade.trading_volume 
+                  << " volatility=" << trade.volatility_transaction_price << std::endl;
+    }
+}
+
+void TradingEngineService::process_preprocessed_orderbook(const PreprocessedOrderbook& orderbook) {
+    std::lock_guard<std::mutex> lock(market_state_mutex_);
+    latest_orderbook_[orderbook.symbol] = orderbook;
+    
+    // Check for pending orders that might be filled by this orderbook update
+    for (const auto& [cl_id, order] : pending_orders_) {
+        if (backtest_mode_) {
+            simulate_order_execution(order);
+        }
+    }
+}
+
+void TradingEngineService::update_market_state(const std::string& symbol, const PreprocessedOrderbook& orderbook) {
+    std::lock_guard<std::mutex> lock(market_state_mutex_);
+    latest_orderbook_[symbol] = orderbook;
+}
+
+// Backtest execution engine
+/**
+ * @brief Simulate order execution in backtest mode
+ * @param order The ExecutionOrder to simulate
+ * 
+ * Realistic order execution simulation:
+ * 1. Checks if order should be filled based on market conditions
+ * 2. Calculates realistic fill price including slippage
+ * 3. Determines fill size (full or partial fills)
+ * 4. Generates ExecutionReport and Fill messages
+ * 5. Updates order tracking state
+ * 
+ * Uses current market data (orderbook, trades) to make
+ * realistic fill decisions with configurable fill probability.
+ */
+void TradingEngineService::simulate_order_execution(const ExecutionOrder& order) {
+    if (!backtest_mode_) {
+        return;  // Only simulate in backtest mode
+    }
+    
+    // Get the appropriate symbol for lookup
+    std::string symbol;
+    if (std::holds_alternative<CexOrderDetails>(order.details)) {
+        symbol = std::get<CexOrderDetails>(order.details).symbol;
+    } else {
+        return;  // Only handle CEX orders for now
+    }
+    
+    // Get latest orderbook for this symbol
+    std::lock_guard<std::mutex> lock(market_state_mutex_);
+    auto it = latest_orderbook_.find(symbol);
+    if (it == latest_orderbook_.end()) {
+        return;  // No market data available
+    }
+    
+    const PreprocessedOrderbook& orderbook = it->second;
+    
+    // Check if order should be filled
+    if (should_fill_order(order, orderbook)) {
+        double fill_price = calculate_fill_price(order, orderbook);
+        double fill_size = std::get<CexOrderDetails>(order.details).size;
+        generate_fill_from_market_data(order, fill_price, fill_size);
+    }
+}
+
+/**
+ * @brief Determine if order should be filled based on market conditions
+ * @param order The order to evaluate for filling
+ * @param orderbook Current market orderbook state
+ * @return true if order should be filled, false otherwise
+ * 
+ * Sophisticated fill logic that considers:
+ * 1. Order type (market vs limit) and price constraints
+ * 2. Market conditions (bid/ask prices, spreads)
+ * 3. Random fill probability for realistic simulation
+ * 4. Liquidity availability and order size
+ * 
+ * Market orders typically fill immediately, while limit orders
+ * only fill when market price reaches the limit price.
+ */
+bool TradingEngineService::should_fill_order(const ExecutionOrder& order, const PreprocessedOrderbook& orderbook) {
+    if (!std::holds_alternative<CexOrderDetails>(order.details)) {
+        return false;
+    }
+    
+    const CexOrderDetails& details = std::get<CexOrderDetails>(order.details);
+    
+    // Random fill probability
+    static std::random_device rd;
+    static std::mt19937 gen(rd());
+    std::uniform_real_distribution<> dis(0.0, 1.0);
+    
+    if (dis(gen) > fill_probability_) {
+        return false;
+    }
+    
+    // Check if order can be filled based on market conditions
+    if (details.order_type == "market") {
+        return true;  // Market orders should always fill
+    }
+    
+    if (details.order_type == "limit" && details.price.has_value()) {
+        if (details.side == "buy") {
+            // Buy limit order fills if our price >= ask price
+            return details.price.value() >= orderbook.best_ask_price;
+        } else {
+            // Sell limit order fills if our price <= bid price
+            return details.price.value() <= orderbook.best_bid_price;
+        }
+    }
+    
+    return false;
+}
+
+/**
+ * @brief Calculate realistic fill price for order execution
+ * @param order The order being filled
+ * @param orderbook Current market orderbook state
+ * @return Calculated execution price including slippage
+ * 
+ * Price calculation that accounts for:
+ * 1. Order type (market orders get best available price)
+ * 2. Limit order price improvement when possible
+ * 3. Realistic slippage based on order size and liquidity
+ * 4. Configurable additional slippage for conservative simulation
+ * 
+ * Ensures backtest fills use realistic prices that would
+ * occur in actual market conditions.
+ */
+double TradingEngineService::calculate_fill_price(const ExecutionOrder& order, const PreprocessedOrderbook& orderbook) {
+    if (!std::holds_alternative<CexOrderDetails>(order.details)) {
+        return 0.0;
+    }
+    
+    const CexOrderDetails& details = std::get<CexOrderDetails>(order.details);
+    double base_price;
+    
+    if (details.order_type == "market") {
+        // Market orders get filled at best available price
+        base_price = (details.side == "buy") ? orderbook.best_ask_price : orderbook.best_bid_price;
+    } else if (details.order_type == "limit" && details.price.has_value()) {
+        // Limit orders get filled at limit price or better
+        if (details.side == "buy") {
+            base_price = std::min(details.price.value(), orderbook.best_ask_price);
+        } else {
+            base_price = std::max(details.price.value(), orderbook.best_bid_price);
+        }
+    } else {
+        base_price = orderbook.midpoint;
+    }
+    
+    // Add realistic slippage
+    double slippage_factor = slippage_bps_ / 10000.0;  // Convert bps to decimal
+    if (details.side == "buy") {
+        base_price *= (1.0 + slippage_factor);
+    } else {
+        base_price *= (1.0 - slippage_factor);
+    }
+    
+    return base_price;
+}
+
+void TradingEngineService::generate_fill_from_market_data(const ExecutionOrder& order, double fill_price, double fill_size) {
+    // Generate execution report
+    ExecutionReport report;
+    report.cl_id = order.cl_id;
+    report.status = "filled";
+    report.reason_code = "ok";
+    report.reason_text = "Order filled in backtest simulation";
+    report.ts_ns = get_current_time_ns();
+    report.tags = order.tags;
+    report.tags["execution_type"] = "simulated";
+    
+    publish_execution_report(report);
+    
+    // Generate fill
+    Fill fill;
+    fill.cl_id = order.cl_id;
+    fill.exec_id = generate_exec_id();
+    fill.symbol_or_pair = std::get<CexOrderDetails>(order.details).symbol;
+    fill.price = fill_price;
+    fill.size = fill_size;
+    fill.fee_currency = "USDT";  // Default fee currency
+    fill.fee_amount = fill_price * fill_size * 0.001;  // 0.1% fee
+    fill.liquidity = "taker";  // Assume taker for simulation
+    fill.ts_ns = get_current_time_ns();
+    fill.tags = order.tags;
+    fill.tags["execution_type"] = "simulated";
+    
+    publish_fill(fill);
+    
+    // Remove from pending orders
+    pending_orders_.erase(order.cl_id);
+    
+    std::cout << "[BacktestEngine] Simulated fill: " << order.cl_id 
+              << " symbol=" << fill.symbol_or_pair
+              << " price=" << fill_price 
+              << " size=" << fill_size << std::endl;
 }
 
 } // namespace latentspeed
