@@ -8,6 +8,7 @@
  * - ZeroMQ-based order communication
  * - Basic backtest simulation
  * - Integration with Python strategies
+ * - Real-time market data publishing on port 5557
  */
 
 #pragma once
@@ -26,6 +27,19 @@
 #include <queue>
 #include <mutex>
 #include <condition_variable>
+#include <deque>
+#include <spdlog/spdlog.h>
+#include <spdlog/sinks/stdout_color_sinks.h>
+#include <spdlog/sinks/rotating_file_sink.h>
+
+// Convenient logging macros with automatic function name and location
+#define LOG_TRACE(...) SPDLOG_TRACE(__VA_ARGS__)
+#define LOG_DEBUG(...) SPDLOG_DEBUG(__VA_ARGS__)
+#define LOG_INFO(...) SPDLOG_INFO(__VA_ARGS__)
+#define LOG_WARN(...) SPDLOG_WARN(__VA_ARGS__)
+#define LOG_ERROR(...) SPDLOG_ERROR(__VA_ARGS__)
+#define LOG_CRITICAL(...) SPDLOG_CRITICAL(__VA_ARGS__)
+#include <array>
 
 // ZeroMQ
 #include <zmq.hpp>
@@ -34,6 +48,9 @@
 #include <rapidjson/document.h>
 #include <rapidjson/writer.h>
 #include <rapidjson/stringbuffer.h>
+
+// CCAPI includes
+#include "ccapi_cpp/ccapi_session.h"
 
 /**
  * @namespace latentspeed
@@ -101,6 +118,108 @@ struct Fill {
 };
 
 /**
+ * @struct TradeData
+ * @brief Trade execution data structure
+ */
+struct TradeData {
+    std::string exchange;
+    std::string symbol;
+    std::string side;           // "buy" or "sell"
+    double price;
+    double amount;
+    uint64_t timestamp_ns;
+    std::string trade_id;
+    
+    // Derived features
+    double transaction_price;
+    double trading_volume;
+    double volatility_transaction_price;
+    int window_size;
+    int transaction_price_window_size;  // Add missing field
+    
+    // Metadata
+    int seq = 0;
+    int sequence_number = 0;  // Add missing field
+    int schema_version = 1;
+    std::string preprocessing_timestamp;
+    uint64_t receipt_timestamp_ns;
+};
+
+/**
+ * @struct OrderBookData
+ * @brief Order book snapshot data structure
+ */
+struct OrderBookData {
+    std::string exchange;
+    std::string symbol;
+    uint64_t timestamp_ns;
+    
+    // Best bid/ask
+    double best_bid_price;
+    double best_bid_size;
+    double best_ask_price;
+    double best_ask_size;
+    
+    // Derived features
+    double midpoint;
+    double relative_spread;
+    double breadth;
+    double imbalance_lvl1;
+    double bid_depth_n;
+    double ask_depth_n;
+    double depth_n;
+    double volatility_mid;
+    double ofi_rolling;
+    
+    // Full book data (optional)
+    std::map<double, double> bids;  // price -> size
+    std::map<double, double> asks;  // price -> size
+    
+    // Metadata
+    int seq = 0;
+    int sequence_number = 0;  // Add missing field
+    int schema_version = 1;
+    std::string preprocessing_timestamp;
+    uint64_t receipt_timestamp_ns;
+    int window_size;
+    int midpoint_window_size;  // Add missing field
+};
+
+/**
+ * @class FastRollingStats
+ * @brief Fast rolling statistics calculation with circular buffer
+ */
+class FastRollingStats {
+public:
+    explicit FastRollingStats(size_t window_size = 20);
+    
+    struct TradeRollResult {
+        double volatility_transaction_price;
+        int transaction_price_window_size;
+    };
+    
+    struct BookRollResult {
+        double volatility_mid;
+        double ofi_rolling;
+        int midpoint_window_size;
+    };
+    
+    TradeRollResult update_trade(double transaction_price);
+    BookRollResult update_book(double midpoint, double best_bid_price, double best_bid_size, 
+                               double best_ask_price, double best_ask_size);
+
+private:
+    size_t window_size_;
+    std::deque<double> transaction_prices_;
+    std::deque<double> midpoints_;
+    std::deque<double> ofi_values_;
+    
+    double calculate_volatility(const std::deque<double>& values);
+    double calculate_ofi(double best_bid_price, double best_bid_size, 
+                        double best_ask_price, double best_ask_size);
+};
+
+/**
  * @class TradingEngineService
  * @brief Simplified trading engine for Python integration
  * 
@@ -108,8 +227,9 @@ struct Fill {
  * - ZeroMQ order communication 
  * - Basic backtest simulation
  * - ExecutionReport and Fill generation
+ * - Real-time market data publishing on port 5557
  */
-class TradingEngineService {
+class TradingEngineService : public ccapi::EventHandler {
 public:
     /**
      * @brief Simplified constructor
@@ -152,6 +272,13 @@ public:
      * @return true if service is running, false otherwise
      */
     bool is_running() const { return running_; }
+    
+    /**
+     * @brief CCAPI event handler override
+     * @param event CCAPI event containing market data
+     * @param session CCAPI session pointer
+     */
+    void processEvent(const ccapi::Event& event, ccapi::Session* session) override;
 
 private:
     /// @name ZeroMQ Communication Threads
@@ -171,6 +298,20 @@ private:
      * Runs on tcp://127.0.0.1:5602 as specified in the message contract.
      */
     void zmq_publisher_thread();
+    
+    /**
+     * @brief Trade data publisher thread
+     * 
+     * Publishes preprocessed trade data to subscribers on port 5556.
+     */
+    void trade_data_publisher_thread();
+    
+    /**
+     * @brief Orderbook data publisher thread
+     * 
+     * Publishes preprocessed orderbook data to subscribers on port 5557.
+     */
+    void orderbook_data_publisher_thread();
     /// @}
     
     /// @name Order Processing Methods
@@ -224,6 +365,75 @@ private:
      * @param fill Fill to publish
      */
     void publish_fill(const Fill& fill);
+    
+    /**
+     * @brief Process and publish trade data
+     * @param trade_data Raw trade data from CCAPI
+     */
+    void process_trade_data(const TradeData& trade_data);
+    
+    /**
+     * @brief Process and publish orderbook data
+     * @param book_data Raw orderbook data from CCAPI
+     */
+    void process_orderbook_data(const OrderBookData& book_data);
+    
+    /**
+     * @brief Publish trade data to ZMQ
+     * @param trade_data Trade data to publish
+     */
+    void publish_trade_data(const TradeData& trade_data);
+    
+    /**
+     * @brief Publish preprocessed trade data to separate endpoint
+     * @param trade_data Preprocessed trade data to publish
+     */
+    void publish_preprocessed_trade_data(const TradeData& trade_data);
+    
+    /**
+     * @brief Publish preprocessed orderbook data to separate endpoint
+     * @param book_data Preprocessed orderbook data to publish
+     */
+    void publish_preprocessed_orderbook_data(const OrderBookData& book_data);
+    /// @}
+    
+    /// @name Configuration Helpers
+    /// @{
+    /**
+     * @brief Get exchanges from environment variable or default
+     * @return Vector of exchange names
+     */
+    std::vector<std::string> getExchangesFromConfig() const;
+    
+    /**
+     * @brief Get symbols from environment variable or default
+     * @return Vector of symbol names
+     */
+    std::vector<std::string> getSymbolsFromConfig() const;
+    
+    /**
+     * @brief Parse comma-separated string into vector
+     * @param input Comma-separated string
+     * @return Vector of strings
+     */
+    std::vector<std::string> parseCommaSeparated(const std::string& input) const;
+    
+    /**
+     * @brief Validate exchange connectivity before starting subscriptions
+     * @param exchanges List of exchanges to validate
+     * @param symbols List of symbols to validate
+     * @return true if all exchanges are reachable, false otherwise
+     */
+    bool validateExchangeConnectivity(const std::vector<std::string>& exchanges, 
+                                    const std::vector<std::string>& symbols);
+    
+    /**
+     * @brief Test connection to a specific exchange
+     * @param exchange Exchange name to test
+     * @param symbol Symbol to test with
+     * @return true if connection successful, false otherwise
+     */
+    bool testExchangeConnection(const std::string& exchange, const std::string& symbol);
     /// @}
     
     /// @name Message Parsing and Serialization
@@ -248,6 +458,14 @@ private:
      * @return JSON string representation
      */
     std::string serialize_fill(const Fill& fill);
+    
+    /**
+     * @brief Serialize data to JSON or MessagePack
+     * @param data Data object to serialize
+     * @return Serialized bytes
+     */
+    template<typename T>
+    std::vector<uint8_t> serialize_data(const T& data);
     /// @}
     
     /// @name Utility Functions
@@ -276,20 +494,82 @@ private:
      * @param cl_id Client order ID to mark as processed
      */
     void mark_order_processed(const std::string& cl_id);
+    
+    /**
+     * @brief Normalize exchange name
+     * @param exchange Raw exchange name
+     * @return Normalized exchange name (uppercase)
+     */
+    std::string normalize_exchange(const std::string& exchange);
+    
+    /**
+     * @brief Normalize symbol
+     * @param symbol Raw symbol
+     * @return Normalized symbol (consistent dash separator)
+     */
+    std::string normalize_symbol(const std::string& symbol);
+    
+    /**
+     * @brief Get next sequence number for a stream
+     * @param partition_id Stream partition identifier (exchange:symbol:type)
+     * @return Next sequence number
+     */
+    int get_next_sequence(const std::string& partition_id);
+    
+    /**
+     * @brief Start market data subscriptions via CCAPI
+     */
+    void start_market_data_subscriptions();
+    
+    /**
+     * @brief Stop market data subscriptions
+     */
+    void stop_market_data_subscriptions();
+    
+    /**
+     * @brief Publish orderbook data to ZMQ
+     * @param book_data Orderbook data to publish
+     */
+    void publish_orderbook_data(const OrderBookData& book_data);
+    
+    /**
+     * @brief Serialize orderbook data to JSON
+     * @param book_data Orderbook data to serialize
+     * @return JSON string representation
+     */
+    std::string serialize_orderbook_data(const OrderBookData& book_data);
+    
+    /**
+     * @brief Serialize trade data to JSON
+     * @param trade_data Trade data to serialize
+     * @return JSON string representation
+     */
+    std::string serialize_trade_data(const TradeData& trade_data);
     /// @}
-
-private:
+    
     /// @name ZeroMQ Components
     /// @{
     std::unique_ptr<zmq::context_t> zmq_context_;               ///< ZeroMQ context for socket management
     std::unique_ptr<zmq::socket_t> order_receiver_socket_;      ///< PULL socket for receiving orders
     std::unique_ptr<zmq::socket_t> report_publisher_socket_;    ///< PUB socket for publishing reports/fills
+    std::unique_ptr<zmq::socket_t> trade_data_publisher_socket_; ///< PUB socket for publishing trade data on port 5556
+    std::unique_ptr<zmq::socket_t> orderbook_data_publisher_socket_; ///< PUB socket for publishing orderbook data on port 5557
+    /// @}
+    
+    /// @name CCAPI Components
+    /// @{
+    std::unique_ptr<ccapi::Session> ccapi_session_;             ///< CCAPI session for market data
+    ccapi::SessionOptions ccapi_session_options_;              ///< CCAPI session options
+    ccapi::SessionConfigs ccapi_session_configs_;              ///< CCAPI session configurations
+    std::vector<ccapi::Subscription> ccapi_subscriptions_;     ///< Active CCAPI subscriptions
     /// @}
     
     /// @name Threading Components
     /// @{
     std::unique_ptr<std::thread> order_receiver_thread_;        ///< Thread for order reception
     std::unique_ptr<std::thread> publisher_thread_;             ///< Thread for message publishing
+    std::unique_ptr<std::thread> trade_data_publisher_thread_;  ///< Thread for trade data publishing
+    std::unique_ptr<std::thread> orderbook_data_publisher_thread_; ///< Thread for orderbook data publishing
     std::atomic<bool> running_;                                 ///< Atomic flag for service state
     /// @}
     
@@ -297,6 +577,35 @@ private:
     /// @{
     std::string order_endpoint_;                                ///< Order receiver endpoint (tcp://127.0.0.1:5601)
     std::string report_endpoint_;                               ///< Report publisher endpoint (tcp://127.0.0.1:5602)
+    std::string trade_data_endpoint_;                           ///< Trade data publisher endpoint (tcp://127.0.0.1:5556)
+    std::string orderbook_data_endpoint_;                       ///< Orderbook data publisher endpoint (tcp://127.0.0.1:5557)
+    /// @}
+    
+    /// @name Market Data Configuration
+    /// @{
+    std::string serializer_type_;                               ///< Serializer: "json" or "msgpack"
+    int window_size_;                                           ///< Rolling statistics window size
+    int depth_levels_;                                          ///< Orderbook depth levels to process
+    bool snapshots_only_;                                       ///< Only process snapshots (not incremental updates)
+    int snapshot_interval_;                                     ///< Snapshot throttling interval
+    int sndhwm_;                                               ///< ZMQ send high water mark
+    int linger_ms_;                                            ///< ZMQ linger time in milliseconds
+    /// @}
+
+    /// @name Market Data State Management
+    /// @{
+    std::queue<TradeData> trade_data_queue_;                    ///< Queue of trade data to publish
+    std::queue<OrderBookData> book_data_queue_;                 ///< Queue of orderbook data to publish
+    std::queue<std::string> trade_data_message_queue_;          ///< Trade data message queue for publishing
+    std::queue<std::string> orderbook_data_message_queue_;      ///< Orderbook data message queue for publishing
+    std::mutex trade_data_mutex_;                               ///< Mutex protecting trade data queue
+    std::mutex orderbook_data_mutex_;                           ///< Mutex protecting orderbook data queue
+    std::condition_variable trade_data_cv_;                     ///< Condition variable for trade data publisher thread
+    std::condition_variable orderbook_data_cv_;                 ///< Condition variable for orderbook data publisher thread
+    
+    std::unordered_map<std::string, int> sequence_numbers_;     ///< Per-stream sequence numbers
+    std::unordered_map<std::string, FastRollingStats> symbol_stats_; ///< Per-symbol rolling statistics
+    std::unordered_map<std::string, int> snapshot_counts_;      ///< Per-symbol snapshot counts (for throttling)
     /// @}
     
     /// @name Order Tracking and State Management

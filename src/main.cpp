@@ -17,6 +17,8 @@
 #include <signal.h>
 #include <thread>
 #include <chrono>
+#include <spdlog/spdlog.h>
+#include <spdlog/sinks/stdout_color_sinks.h>
 
 /**
  * @brief Global pointer to trading engine instance for signal handling
@@ -39,7 +41,7 @@ latentspeed::TradingEngineService* g_trading_engine = nullptr;
  * pending orders are handled appropriately, and resources are cleaned up.
  */
 void signal_handler(int signal) {
-    std::cout << "\n[Main] Received signal " << signal << ", shutting down..." << std::endl;
+    spdlog::info("\n[Main] Received signal {}, shutting down...", signal);
     if (g_trading_engine) {
         g_trading_engine->stop();
     }
@@ -78,8 +80,35 @@ void signal_handler(int signal) {
  * The service returns non-zero exit codes on failure for proper system integration.
  */
 int main(int argc, char* argv[]) {
-    std::cout << "=== Latentspeed Trading Engine Service ===" << std::endl;
-    std::cout << "Starting up..." << std::endl;
+    // Initialize spdlog with enhanced formatting including timestamp, thread ID, function name
+    try {
+        // Create console sink with colors
+        auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+        console_sink->set_level(spdlog::level::trace);
+        
+        // Create rotating file sink for persistent logging
+        auto file_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
+            "logs/trading_engine.log", 1024*1024*5, 3);
+        file_sink->set_level(spdlog::level::trace);
+        
+        // Combine sinks
+        std::vector<spdlog::sink_ptr> sinks {console_sink, file_sink};
+        auto logger = std::make_shared<spdlog::logger>("multi_sink", sinks.begin(), sinks.end());
+        
+        // Enhanced pattern with timestamp, thread ID, process ID, source location, function name
+        logger->set_pattern("[%Y-%m-%d %H:%M:%S.%f] [PID:%P] [TID:%t] [%^%l%$] [%s:%#] [%!] %v");
+        logger->set_level(spdlog::level::info);
+        
+        spdlog::set_default_logger(logger);
+        spdlog::flush_every(std::chrono::seconds(1));
+        
+    } catch (const spdlog::spdlog_ex& ex) {
+        std::cerr << "Log initialization failed: " << ex.what() << std::endl;
+        return 1;
+    }
+    
+    spdlog::info("=== Latentspeed Trading Engine Service ===");
+    spdlog::info("Starting up...");
 
     // Set up signal handling for graceful shutdown
     signal(SIGINT, signal_handler);
@@ -91,30 +120,32 @@ int main(int argc, char* argv[]) {
         g_trading_engine = &trading_engine;
 
         if (!trading_engine.initialize()) {
-            std::cerr << "[Main] Failed to initialize trading engine" << std::endl;
+            spdlog::error("[Main] Failed to initialize trading engine");
             return 1;
         }
 
         // Start the service
         trading_engine.start();
 
-        std::cout << "[Main] Trading engine started successfully" << std::endl;
-        std::cout << "[Main] Listening for orders on tcp://127.0.0.1:5601" << std::endl;
-        std::cout << "[Main] Publishing reports on tcp://127.0.0.1:5602" << std::endl;
-        std::cout << "[Main] Press Ctrl+C to stop" << std::endl;
+        spdlog::info("[Main] Trading engine started successfully");
+        spdlog::info("[Main] Listening for orders on tcp://127.0.0.1:5601");
+        spdlog::info("[Main] Publishing reports on tcp://127.0.0.1:5602");
+        spdlog::info("[Main] Publishing trade data on tcp://127.0.0.1:5556 (preprocessed_trades)");
+        spdlog::info("[Main] Publishing orderbook data on tcp://127.0.0.1:5557 (preprocessed_book)");
+        spdlog::info("[Main] Press Ctrl+C to stop");
 
         // Main loop - keep the service running
         while (trading_engine.is_running()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
 
-        std::cout << "[Main] Trading engine stopped" << std::endl;
+        spdlog::info("[Main] Trading engine stopped");
 
     } catch (const std::exception& e) {
-        std::cerr << "[Main] Fatal error: " << e.what() << std::endl;
+        spdlog::error("[Main] Fatal error: {}", e.what());
         return 1;
     }
 
-    std::cout << "[Main] Shutdown complete" << std::endl;
+    spdlog::info("[Main] Shutdown complete");
     return 0;
 }

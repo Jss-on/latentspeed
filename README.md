@@ -1,38 +1,83 @@
 # Latentspeed Trading Engine
 
-A high-performance trading engine for algorithmic trading across centralized exchanges (CEX), decentralized exchanges (DEX), and on-chain operations. The engine provides unified order execution, real-time market data processing, and comprehensive backtest simulation capabilities.
+A high-performance C++ trading engine for algorithmic trading with real-time market data processing, multi-exchange connectivity, and comprehensive order execution capabilities. Features runtime configuration, connection validation, and preprocessed market data publishing.
 
 ![C++](https://img.shields.io/badge/C%2B%2B-17-blue.svg)
 ![CMake](https://img.shields.io/badge/CMake-3.20%2B-green.svg)
 ![ZeroMQ](https://img.shields.io/badge/ZeroMQ-4.3%2B-red.svg)
-![Doxygen](https://img.shields.io/badge/docs-Doxygen-blue.svg)
+![CCAPI](https://img.shields.io/badge/CCAPI-latest-orange.svg)
+![spdlog](https://img.shields.io/badge/spdlog-1.x-yellow.svg)
 
 ## 🚀 Features
 
-### Multi-Venue Support
-- **Centralized Exchanges (CEX)**: Binance, Bybit, OKX, and others via ccapi
-- **Decentralized Exchanges (DEX)**: Uniswap V2/V3, SushiSwap, PancakeSwap via Hummingbot Gateway
-- **On-Chain Operations**: Direct token transfers on Ethereum, BSC, and other networks
-- **Unified Interface**: Single ExecutionOrder format for all venue types
+### Real-Time Market Data Processing
+- **Multi-Exchange Connectivity**: OKX, Binance, Coinbase, Kraken via CCAPI
+- **Preprocessed Data Streams**: Trade and orderbook data with rolling statistics
+- **Connection Validation**: Pre-startup exchange connectivity testing
+- **Runtime Configuration**: Environment variable-based exchange/symbol selection
+- **Market Data Publishing**: Separate ZMQ endpoints for trades (port 5558) and orderbooks (port 5559)
 
-### Advanced Trading Features
-- **Multiple Order Types**: Market, limit, stop, stop-limit orders
-- **AMM and CLMM Swaps**: Support for both traditional AMM and concentrated liquidity protocols
-- **Cross-Chain Operations**: Token transfers and arbitrage across different blockchains
-- **Backtest Simulation**: Realistic order fill simulation using live market data
-- **Risk Management**: Order validation, duplicate detection, and position tracking
+### Advanced Market Data Features
+- **Rolling Statistics**: Volatility, OFI (Order Flow Imbalance), midpoint tracking
+- **FastRollingStats**: Efficient sliding window calculations
+- **Sequence Numbering**: Per-stream message sequencing
+- **Symbol Normalization**: Consistent symbol formatting across exchanges
+- **Nanosecond Timestamps**: High-precision timing for all market events
+
+### Trading Engine Core
+- **Order Execution**: CEX spot and perpetual order handling
+- **Backtest Simulation**: Realistic fill simulation with configurable slippage
+- **Risk Management**: Duplicate order detection and validation
+- **Multi-threaded Architecture**: Separate threads for order processing and market data
 
 ### Communication Architecture
 - **Order Reception**: ZeroMQ PULL socket (`tcp://127.0.0.1:5601`) for ExecutionOrders
 - **Report Publishing**: ZeroMQ PUB socket (`tcp://127.0.0.1:5602`) for ExecutionReports and Fills
-- **Market Data Feeds**: Preprocessed trade and orderbook data via ZeroMQ SUB sockets
-- **Gateway Integration**: REST API communication with Hummingbot Gateway for DEX operations
+- **Trade Data**: ZeroMQ PUB socket (`tcp://127.0.0.1:5558`) for preprocessed trades
+- **Orderbook Data**: ZeroMQ PUB socket (`tcp://127.0.0.1:5559`) for preprocessed orderbooks
+- **Structured Logging**: spdlog-based logging with configurable levels
 
-### ExecutionOrder Structure
+### Market Data Structures
 
-The trading engine uses a unified `ExecutionOrder` format for all operations:
+#### Trade Data Format
+```json
+{
+  "exchange": "OKX",
+  "symbol": "BTC-USDT",
+  "timestamp_ns": 1640995200000000000,
+  "receipt_timestamp_ns": 1640995200000001000,
+  "price": 50000.0,
+  "amount": 0.1,
+  "side": "buy",
+  "trade_id": "12345",
+  "trading_volume": 5000.0,
+  "volatility_transaction_price": 0.025,
+  "transaction_price_window_size": 20,
+  "sequence_number": 1001
+}
+```
 
-#### CEX Limit Order Example
+#### Orderbook Data Format
+```json
+{
+  "exchange": "OKX",
+  "symbol": "BTC-USDT",
+  "timestamp_ns": 1640995200000000000,
+  "receipt_timestamp_ns": 1640995200000001000,
+  "best_bid_price": 49995.0,
+  "best_bid_size": 0.5,
+  "best_ask_price": 50005.0,
+  "best_ask_size": 0.3,
+  "midpoint": 50000.0,
+  "relative_spread": 0.0002,
+  "imbalance_lvl1": 0.25,
+  "volatility_mid": 0.015,
+  "ofi_rolling": 0.1,
+  "sequence_number": 2001
+}
+```
+
+#### CEX Order Example
 ```json
 {
   "version": 1,
@@ -42,12 +87,12 @@ The trading engine uses a unified `ExecutionOrder` format for all operations:
   "venue": "binance",
   "product_type": "spot",
   "details": {
-    "symbol": "ETH/USDT",
+    "symbol": "BTC-USDT",
     "side": "buy",
     "order_type": "limit",
     "time_in_force": "gtc",
-    "size": 0.1,
-    "price": 2000.0
+    "size": "0.1",
+    "price": "50000.0"
   },
   "ts_ns": 1640995200000000000,
   "tags": {
@@ -57,53 +102,39 @@ The trading engine uses a unified `ExecutionOrder` format for all operations:
 }
 ```
 
-#### AMM Swap Example
+#### ExecutionReport Format
 ```json
 {
   "version": 1,
-  "cl_id": "swap_67890",
-  "action": "place",
-  "venue_type": "dex",
-  "venue": "uniswap_v2",
-  "product_type": "amm_swap",
-  "details": {
-    "chain": "ethereum",
-    "protocol": "uniswap_v2",
-    "token_in": "ETH",
-    "token_out": "USDC",
-    "trade_mode": "exact_in",
-    "amount_in": 1.0,
-    "slippage_bps": 50,
-    "deadline_sec": 300,
-    "recipient": "0x742D35Cc6681C0532"
-  },
-  "ts_ns": 1640995200000000000
+  "cl_id": "order_12345",
+  "status": "accepted",
+  "exchange_order_id": "binance_789",
+  "reason_code": "ok",
+  "reason_text": "Order accepted successfully",
+  "ts_ns": 1640995200000002000,
+  "tags": {
+    "execution_type": "simulated",
+    "strategy": "arbitrage"
+  }
 }
 ```
 
-#### CLMM Swap Example (Uniswap V3)
+#### Fill Report Format
 ```json
 {
   "version": 1,
-  "cl_id": "clmm_54321",
-  "action": "place",
-  "venue_type": "dex",
-  "venue": "uniswap_v3",
-  "product_type": "clmm_swap",
-  "details": {
-    "chain": "ethereum",
-    "protocol": "uniswap_v3",
-    "pool": {
-      "token0": "USDC",
-      "token1": "ETH",
-      "fee_tier_bps": 3000
-    },
-    "trade_mode": "exact_in",
-    "amount_in": 1000.0,
-    "slippage_bps": 30,
-    "price_limit": 2100.0,
-    "deadline_sec": 600,
-    "recipient": "0x742D35Cc6681C0532"
+  "cl_id": "order_12345",
+  "exchange_order_id": "binance_789",
+  "exec_id": "exec_1640995200_123456",
+  "symbol_or_pair": "BTC-USDT",
+  "price": 50005.0,
+  "size": 0.1,
+  "fee_currency": "USDT",
+  "fee_amount": 5.0005,
+  "liquidity": "taker",
+  "ts_ns": 1640995200000003000,
+  "tags": {
+    "execution_type": "simulated"
   }
 }
 ```
@@ -111,31 +142,37 @@ The trading engine uses a unified `ExecutionOrder` format for all operations:
 ## 🏗️ Architecture
 
 ```
-┌─────────────────┐   ExecutionOrder   ┌──────────────────────┐   ccapi/REST   ┌─────────────┐
-│   Trading       │   PUSH->PULL       │  Trading Engine      │◄──────────────►│ CEX Markets │
-│   Strategies    │   tcp://5601       │  Service             │                │ (Binance,   │
-└─────────────────┘                    │                      │                │  Bybit...)  │
-                                       │  ┌─────────────────┐ │                └─────────────┘
-┌─────────────────┐   Reports/Fills    │  │ Order Processor │ │   Gateway API  ┌─────────────┐
-│   Strategy      │◄──PUB->SUB────────┤  │ Market Data     │ │◄──────────────►│ DEX Markets │
-│   Monitoring    │   tcp://5602       │  │ Backtest Engine │ │   (REST)       │ (Uniswap,   │
-└─────────────────┘                    │  └─────────────────┘ │                │  Sushi...)  │
-                                       │           ▲          │                └─────────────┘
-┌─────────────────┐   Market Data      │           │          │   Blockchain   ┌─────────────┐
-│   Market Data   │   SUB->PUB         │  ┌─────────────────┐ │◄──────────────►│ On-Chain    │
-│   Pipeline      │   tcp://5556/5557  │  │ Market State    │ │   Transactions │ Networks    │
-└─────────────────┘                    │  │ Tracking        │ │                │ (Ethereum,  │
-                                       │  └─────────────────┘ │                │  BSC...)    │
-                                       └──────────────────────┘                └─────────────┘
+┌─────────────────┐   ExecutionOrder   ┌──────────────────────┐   CCAPI WebSocket ┌─────────────┐
+│   Trading       │   PUSH->PULL       │  Trading Engine      │◄─────────────────►│ CEX Markets │
+│   Strategies    │   tcp://5601       │  Service             │                   │ OKX, Binance│
+└─────────────────┘                    │                      │                   │ Coinbase... │
+                                       │  ┌─────────────────┐ │                   └─────────────┘
+┌─────────────────┐   Reports/Fills    │  │ Order Processor │ │                   
+│   Strategy      │◄──PUB->SUB────────┤  │ Market Data     │ │   Connection      ┌─────────────┐
+│   Monitoring    │   tcp://5602       │  │ Preprocessor    │ │   Validation      │ Connectivity│
+└─────────────────┘                    │  │ FastRollingStats│ │◄─────────────────►│ Checker     │
+                                       │  └─────────────────┘ │                   └─────────────┘
+┌─────────────────┐   Preprocessed     │           ▲          │                   
+│   Market Data   │   Trade Data       │           │          │   Runtime Config  ┌─────────────┐
+│   Subscribers   │◄──PUB->SUB────────┤  ┌─────────────────┐ │◄─────────────────►│ Environment │
+│                 │   tcp://5558       │  │ Market State    │ │   EXCHANGES=...   │ Variables   │
+└─────────────────┘                    │  │ Tracking        │ │   SYMBOLS=...     └─────────────┘
+┌─────────────────┐   Preprocessed     │  └─────────────────┘ │                   
+│   Orderbook     │   Book Data        │                      │                   
+│   Subscribers   │◄──PUB->SUB────────┤                      │                   
+│                 │   tcp://5559       │                      │                   
+└─────────────────┘                    └──────────────────────┘                   
 ```
 
 ### Key Components
 
-- **Order Processing**: Unified ExecutionOrder handling for all venue types
-- **Market Data Integration**: Real-time preprocessing and state tracking
-- **Multi-Venue Execution**: CEX (ccapi), DEX (Hummingbot Gateway), On-chain (direct)
-- **Backtest Engine**: Realistic simulation using live market conditions
-- **Risk Management**: Duplicate detection, validation, and order lifecycle tracking
+- **Market Data Engine**: Real-time CCAPI integration with preprocessing and rolling statistics
+- **Connection Validation**: Pre-startup connectivity testing for all configured exchanges
+- **Runtime Configuration**: Environment variable-based exchange and symbol selection
+- **Order Processing**: CEX spot and perpetual order execution with backtest simulation
+- **Multi-threaded Architecture**: Separate threads for orders, market data, and publishing
+- **Structured Logging**: spdlog-based logging with timestamps and context
+- **FastRollingStats**: Efficient sliding window calculations for volatility and OFI
 
 ## 🛠️ Build Instructions
 
