@@ -181,7 +181,7 @@ A high-performance C++ trading engine for algorithmic trading with real-time mar
 #### System Dependencies (Ubuntu/WSL)
 ```bash
 sudo apt-get update
-sudo apt-get install -y cmake ninja-build build-essential pkg-config git
+sudo apt-get install -y cmake ninja-build build-essential pkg-config git python3-dev python3-pip
 ```
 
 #### Clone Repository with Submodules
@@ -204,10 +204,26 @@ cd ../..
 #### Build the Project
 ```bash
 # Debug build
-./build.sh --debug
+./run.sh --debug
 
 # Release build  
-./build.sh --release
+./run.sh --release
+
+# Build with Python bindings (default enabled)
+./run.sh --release
+```
+
+### Python Bindings Build
+
+The Python bindings are built automatically when `LATENTSPEED_WITH_PYTHON=ON` (default). After building:
+
+```bash
+# Install the Python module (from build directory)
+cd build
+pip install --user .
+
+# Or use the module directly from build directory
+export PYTHONPATH="$PWD:$PYTHONPATH"
 ```
 
 ## 🚀 Running the Trading Engine
@@ -271,6 +287,206 @@ Starting up...
    # Run Hummingbot Gateway on http://localhost:8080
    # See Hummingbot documentation for setup
    ```
+
+## 🐍 Python Bindings
+
+### Overview
+
+The latentspeed Python bindings provide direct access to the C++ trading engine from Python, enabling:
+- **Direct C++ Integration**: Access TradingEngineService directly without ZMQ overhead
+- **Market Data Structures**: Native Python access to TradeData, OrderBookData, etc.
+- **High Performance**: C++ speed with Python convenience
+- **Rolling Statistics**: FastRollingStats for real-time calculations
+
+### Python API Usage
+
+#### Basic Trading Engine Control
+
+```python
+import latentspeed
+
+# Create and start trading engine
+engine = latentspeed.TradingEngineService()
+
+# Initialize and start
+if engine.initialize():
+    engine.start()
+    print("Trading engine started successfully")
+    
+    # Check status
+    print(f"Running: {engine.is_running()}")
+    
+    # Stop when done
+    engine.stop()
+```
+
+#### Working with Market Data Structures
+
+```python
+import latentspeed
+
+# Create trade data
+trade = latentspeed.TradeData()
+trade.exchange = "BYBIT"
+trade.symbol = "BTC-USDT"
+trade.price = 50000.0
+trade.amount = 0.1
+trade.side = "buy"
+trade.timestamp_ns = 1640995200000000000
+trade.trade_id = "12345"
+
+# Access computed fields
+print(f"Trading volume: {trade.trading_volume}")
+print(f"Volatility: {trade.volatility_transaction_price}")
+
+# Create orderbook data
+book = latentspeed.OrderBookData()
+book.exchange = "BYBIT"
+book.symbol = "BTC-USDT"
+book.best_bid_price = 49995.0
+book.best_bid_size = 0.5
+book.best_ask_price = 50005.0
+book.best_ask_size = 0.3
+book.timestamp_ns = 1640995200000000000
+
+# Access derived metrics
+print(f"Midpoint: {book.midpoint}")
+print(f"Spread: {book.relative_spread}")
+print(f"Imbalance: {book.imbalance_lvl1}")
+```
+
+#### Rolling Statistics
+
+```python
+import latentspeed
+
+# Create rolling stats calculator
+stats = latentspeed.FastRollingStats(window_size=20)
+
+# Process trade data
+for trade_price in [50000, 50100, 49900, 50200]:
+    result = stats.update_trade(trade_price)
+    print(f"Volatility: {result.volatility_transaction_price}")
+    print(f"Window size: {result.transaction_price_window_size}")
+
+# Process orderbook data
+book_result = stats.update_book(
+    midpoint=50050.0,
+    best_bid_price=50000.0, best_bid_size=0.5,
+    best_ask_price=50100.0, best_ask_size=0.3
+)
+print(f"Mid volatility: {book_result.volatility_mid}")
+print(f"OFI: {book_result.ofi_rolling}")
+```
+
+#### Order Structures
+
+```python
+import latentspeed
+import time
+
+# Create execution order
+order = latentspeed.ExecutionOrder()
+order.version = 1
+order.cl_id = f"py_order_{int(time.time())}"
+order.action = "place"
+order.venue_type = "cex"
+order.venue = "bybit"
+order.product_type = "spot"
+order.ts_ns = int(time.time() * 1e9)
+
+# Set order details
+order.details["symbol"] = "BTC-USDT"
+order.details["side"] = "buy"
+order.details["order_type"] = "limit"
+order.details["size"] = "0.1"
+order.details["price"] = "50000.0"
+
+# Set tags
+order.tags["strategy"] = "python_test"
+order.tags["session"] = "demo"
+
+print(f"Created order: {order.cl_id}")
+```
+
+### ZMQ Integration with Python Bindings
+
+You can combine the Python bindings with ZMQ for hybrid approaches:
+
+```python
+import latentspeed
+import zmq
+import json
+import threading
+import time
+
+class HybridTradingSystem:
+    def __init__(self):
+        # Direct C++ engine access
+        self.engine = latentspeed.TradingEngineService()
+        
+        # ZMQ for external communication
+        self.context = zmq.Context()
+        self.order_socket = self.context.socket(zmq.PUSH)
+        self.report_socket = self.context.socket(zmq.SUB)
+        
+    def start(self):
+        # Start C++ engine
+        if self.engine.initialize():
+            self.engine.start()
+            
+        # Connect ZMQ sockets
+        self.order_socket.connect("tcp://localhost:5601")
+        self.report_socket.connect("tcp://localhost:5602")
+        self.report_socket.setsockopt(zmq.SUBSCRIBE, b"")
+        
+        # Start report monitoring thread
+        self.monitor_thread = threading.Thread(target=self._monitor_reports)
+        self.monitor_thread.daemon = True
+        self.monitor_thread.start()
+        
+    def send_order_via_zmq(self, order_dict):
+        """Send order via ZMQ (external interface)"""
+        self.order_socket.send_string(json.dumps(order_dict))
+        
+    def create_order_direct(self):
+        """Create order directly via Python bindings"""
+        order = latentspeed.ExecutionOrder()
+        order.cl_id = f"direct_{int(time.time())}"
+        order.action = "place"
+        # ... configure order
+        return order
+        
+    def _monitor_reports(self):
+        """Monitor execution reports"""
+        while True:
+            try:
+                message = self.report_socket.recv_string(zmq.NOBLOCK)
+                report = json.loads(message)
+                print(f"Report: {report['cl_id']} -> {report['status']}")
+            except zmq.Again:
+                time.sleep(0.01)
+                
+    def stop(self):
+        self.engine.stop()
+        self.context.term()
+
+# Usage
+system = HybridTradingSystem()
+system.start()
+
+# Use both interfaces
+order_dict = {
+    "cl_id": "zmq_order_1",
+    "action": "place",
+    "venue_type": "cex"
+    # ... more fields
+}
+system.send_order_via_zmq(order_dict)
+
+direct_order = system.create_order_direct()
+# Process direct_order as needed
+```
 
 ### Python Client Examples
 

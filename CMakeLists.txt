@@ -9,6 +9,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Options
 option(LATENTSPEED_WITH_ZLIB "Link ZLIB (needed for some ccapi exchanges)" OFF)
+option(LATENTSPEED_WITH_PYTHON "Build Python bindings" ON)
 
 # Required packages - use vcpkg packages to avoid system conflicts
 find_package(OpenSSL REQUIRED)
@@ -20,6 +21,18 @@ find_package(Boost REQUIRED COMPONENTS system)
 find_package(RapidJSON REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(ZMQ REQUIRED libzmq)
+
+# Python bindings dependencies (optional)
+if(LATENTSPEED_WITH_PYTHON)
+  # Use system Python instead of vcpkg Python
+  find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
+  find_package(pybind11 REQUIRED)
+  
+  # Set Python variables for pybind11 compatibility
+  set(Python_EXECUTABLE ${Python3_EXECUTABLE})
+  set(Python_INCLUDE_DIRS ${Python3_INCLUDE_DIRS})
+  set(Python_LIBRARIES ${Python3_LIBRARIES})
+endif()
 
 # Optional only when enabling FIX API
 find_path(HFFIX_INCLUDE_DIR
@@ -83,3 +96,23 @@ add_executable(trading_engine_service
 
 target_include_directories(trading_engine_service PRIVATE include)
 target_link_libraries(trading_engine_service PRIVATE latentspeed_ccapi spdlog::spdlog)
+
+# Python bindings module (optional)
+if(LATENTSPEED_WITH_PYTHON)
+  pybind11_add_module(latentspeed_py 
+    src/python_bindings.cpp
+    src/trading_engine_service.cpp
+  )
+  
+  target_include_directories(latentspeed_py PRIVATE include)
+  target_link_libraries(latentspeed_py PRIVATE latentspeed_ccapi spdlog::spdlog)
+  
+  # Set module properties
+  target_compile_definitions(latentspeed_py PRIVATE VERSION_INFO=${PROJECT_VERSION})
+  set_target_properties(latentspeed_py PROPERTIES
+    OUTPUT_NAME "latentspeed"
+    SUFFIX ${PYTHON_MODULE_EXTENSION}
+  )
+  
+  message(STATUS "Python bindings enabled for latentspeed")
+endif()

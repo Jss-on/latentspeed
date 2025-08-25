@@ -100,12 +100,15 @@ bool TradingEngineService::initialize() {
         
         for (const auto& exchange : exchanges) {
             for (const auto& symbol : symbols) {
+                // Convert symbol to exchange-specific format
+                std::string exchange_symbol = convert_symbol_for_exchange(symbol, exchange);
+                
                 // Market depth subscription
-                ccapi::Subscription depth_subscription(exchange, symbol, "MARKET_DEPTH");
+                ccapi::Subscription depth_subscription(exchange, exchange_symbol, "MARKET_DEPTH");
                 ccapi_session_->subscribe(depth_subscription);
                 
                 // Trade data subscription  
-                ccapi::Subscription trade_subscription(exchange, symbol, "TRADE");
+                ccapi::Subscription trade_subscription(exchange, exchange_symbol, "TRADE");
                 ccapi_session_->subscribe(trade_subscription);
             }
         }
@@ -207,12 +210,15 @@ void TradingEngineService::start_market_data_subscriptions() {
         
         for (const auto& exchange : exchanges) {
             for (const auto& symbol : symbols) {
+                // Convert symbol to exchange-specific format
+                std::string exchange_symbol = convert_symbol_for_exchange(symbol, exchange);
+                
                 // Market depth subscription
-                ccapi::Subscription depth_subscription(exchange, symbol, "MARKET_DEPTH");
+                ccapi::Subscription depth_subscription(exchange, exchange_symbol, "MARKET_DEPTH");
                 ccapi_session_->subscribe(depth_subscription);
                 
                 // Trade data subscription  
-                ccapi::Subscription trade_subscription(exchange, symbol, "TRADE");
+                ccapi::Subscription trade_subscription(exchange, exchange_symbol, "TRADE");
                 ccapi_session_->subscribe(trade_subscription);
             }
         }
@@ -1342,6 +1348,36 @@ std::string TradingEngineService::normalize_symbol(const std::string& symbol) {
     std::replace(normalized.begin(), normalized.end(), '_', '-');
     std::transform(normalized.begin(), normalized.end(), normalized.begin(), ::toupper);
     return normalized;
+}
+
+/**
+ * @brief Convert symbol to exchange-specific format
+ * @param symbol Normalized symbol (e.g., "BTC-USDT")
+ * @param exchange Exchange name
+ * @return Exchange-specific symbol format
+ */
+std::string TradingEngineService::convert_symbol_for_exchange(const std::string& symbol, const std::string& exchange) {
+    std::string exchange_lower = exchange;
+    std::transform(exchange_lower.begin(), exchange_lower.end(), exchange_lower.begin(), ::tolower);
+    
+    if (exchange_lower == "bybit") {
+        // Bybit expects no separator: BTC-USDT -> BTCUSDT
+        std::string result = symbol;
+        result.erase(std::remove(result.begin(), result.end(), '-'), result.end());
+        result.erase(std::remove(result.begin(), result.end(), '/'), result.end());
+        result.erase(std::remove(result.begin(), result.end(), '_'), result.end());
+        return result;
+    } else if (exchange_lower == "binance") {
+        // Binance also expects no separator: BTC-USDT -> BTCUSDT
+        std::string result = symbol;
+        result.erase(std::remove(result.begin(), result.end(), '-'), result.end());
+        result.erase(std::remove(result.begin(), result.end(), '/'), result.end());
+        result.erase(std::remove(result.begin(), result.end(), '_'), result.end());
+        return result;
+    }
+    
+    // Default: return as-is for other exchanges
+    return symbol;
 }
 
 /**

@@ -510,6 +510,14 @@ private:
     std::string normalize_symbol(const std::string& symbol);
     
     /**
+     * @brief Convert symbol to exchange-specific format
+     * @param symbol Normalized symbol (e.g., "BTC-USDT")
+     * @param exchange Exchange name (e.g., "bybit", "binance")
+     * @return Exchange-specific symbol format
+     */
+    std::string convert_symbol_for_exchange(const std::string& symbol, const std::string& exchange);
+    
+    /**
      * @brief Get next sequence number for a stream
      * @param partition_id Stream partition identifier (exchange:symbol:type)
      * @return Next sequence number
