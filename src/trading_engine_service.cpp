@@ -44,7 +44,13 @@ TradingEngineService::TradingEngineService()
     , slippage_bps_(1.0)                             // 1 bps slippage
     , depth_levels_(5)                                // Number of levels for depth_n calculation
 {
-    spdlog::info("[TradingEngine] Simplified trading engine initialized");
+    // Configure basic CCAPI session options for better WebSocket connectivity
+    ccapi_session_options_.enableCheckHeartbeatFix = true;
+    
+    // CCAPI SessionConfigs are handled automatically by the library
+    // No manual configuration needed for standard exchanges like Bybit
+    
+    spdlog::info("[TradingEngine] Simplified trading engine initialized with CCAPI config");
     spdlog::info("[TradingEngine] Mode: Backtest only (DEX/live trading disabled)");
 }
 
@@ -411,13 +417,35 @@ void TradingEngineService::processEvent(const ccapi::Event& event, ccapi::Sessio
                     for (const auto& element : elementList) {
                         const auto& nameValueMap = element.getNameValueMap();
                         
+                        // DEBUG: Log all available fields (using info level to see output)
+                        spdlog::info("[CCAPI] Available trade fields:");
+                        for (const auto& [key, value] : nameValueMap) {
+                            spdlog::info("[CCAPI]   {}: {}", key, std::string(value));
+                        }
+                        
+                        // Try multiple possible field names for price
                         if (nameValueMap.find("PRICE") != nameValueMap.end()) {
                             trade_data.price = std::stod(std::string(nameValueMap.at("PRICE")));
                             trade_data.transaction_price = trade_data.price;
+                        } else if (nameValueMap.find("LAST_PRICE") != nameValueMap.end()) {
+                            trade_data.price = std::stod(std::string(nameValueMap.at("LAST_PRICE")));
+                            trade_data.transaction_price = trade_data.price;
+                        } else if (nameValueMap.find("TRADE_PRICE") != nameValueMap.end()) {
+                            trade_data.price = std::stod(std::string(nameValueMap.at("TRADE_PRICE")));
+                            trade_data.transaction_price = trade_data.price;
                         }
+                        
+                        // Try multiple possible field names for size/amount
                         if (nameValueMap.find("SIZE") != nameValueMap.end()) {
                             trade_data.amount = std::stod(std::string(nameValueMap.at("SIZE")));
+                        } else if (nameValueMap.find("QUANTITY") != nameValueMap.end()) {
+                            trade_data.amount = std::stod(std::string(nameValueMap.at("QUANTITY")));
+                        } else if (nameValueMap.find("TRADE_SIZE") != nameValueMap.end()) {
+                            trade_data.amount = std::stod(std::string(nameValueMap.at("TRADE_SIZE")));
+                        } else if (nameValueMap.find("AMOUNT") != nameValueMap.end()) {
+                            trade_data.amount = std::stod(std::string(nameValueMap.at("AMOUNT")));
                         }
+                        
                         if (nameValueMap.find("TRADE_ID") != nameValueMap.end()) {
                             trade_data.trade_id = std::string(nameValueMap.at("TRADE_ID"));
                         }
