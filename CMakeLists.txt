@@ -73,7 +73,6 @@ endif()
 # Default ccapi compile definitions (customize via -DCCAPI_COMPILE_DEFS=...)
 set(CCAPI_COMPILE_DEFS
   CCAPI_ENABLE_SERVICE_MARKET_DATA
-  CCAPI_ENABLE_EXCHANGE_OKX
   CCAPI_ENABLE_EXCHANGE_BYBIT
   CACHE STRING "List of ccapi macros to enable features/exchanges"
 )

@@ -72,6 +72,11 @@ if ! command -v ninja &> /dev/null; then
     MISSING_DEPS="$MISSING_DEPS ninja-build"
 fi
 
+# Check for ccache (optional but recommended)
+if ! command -v ccache &> /dev/null; then
+    MISSING_DEPS="$MISSING_DEPS ccache"
+fi
+
 # Check for pkg-config
 if ! command -v pkg-config &> /dev/null; then
     MISSING_DEPS="$MISSING_DEPS pkg-config"
@@ -136,10 +141,18 @@ mkdir -p "$BUILD_DIR"
 echo "Configuring with CMake..."
 cd "$BUILD_DIR"
 
+# Check if ccache is available and configure it
+CMAKE_CCACHE_ARGS=""
+if command -v ccache &> /dev/null; then
+    echo "Using ccache for faster compilation..."
+    CMAKE_CCACHE_ARGS="-DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_C_COMPILER_LAUNCHER=ccache"
+fi
+
 cmake .. \
     -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
     -DCMAKE_TOOLCHAIN_FILE="$VCPKG_DIR/scripts/buildsystems/vcpkg.cmake" \
     -DVCPKG_TARGET_TRIPLET="$VCPKG_TRIPLET" \
+    $CMAKE_CCACHE_ARGS \
     -G Ninja || exit 1
 
 # ---- build ----
