@@ -153,12 +153,19 @@ struct OrderBookData {
     std::string exchange;
     std::string symbol;
     uint64_t timestamp_ns;
+    uint64_t receipt_timestamp_ns;
     
-    // Best bid/ask
-    double best_bid_price;
-    double best_bid_size;
-    double best_ask_price;
-    double best_ask_size;
+    // Best bid/ask with high precision
+    long double best_bid_price;
+    long double best_bid_size;
+    long double best_ask_price;
+    long double best_ask_size;
+    
+    // Original string values for maximum precision preservation
+    std::string best_bid_price_str;
+    std::string best_bid_size_str;
+    std::string best_ask_price_str;
+    std::string best_ask_size_str;
     
     // Derived features
     double midpoint;
@@ -180,7 +187,6 @@ struct OrderBookData {
     int sequence_number = 0;  // Add missing field
     int schema_version = 1;
     std::string preprocessing_timestamp;
-    uint64_t receipt_timestamp_ns;
     int window_size;
     int midpoint_window_size;  // Add missing field
 };
@@ -279,8 +285,40 @@ public:
      * @param session CCAPI session pointer
      */
     void processEvent(const ccapi::Event& event, ccapi::Session* session) override;
+    
+    // Market data handlers (now async with queues)
+    void handle_orderbook_message(const ccapi::Message& message, const std::string& exchange, const std::string& symbol, uint64_t timestamp_ns);
+    void handle_trade_message(const ccapi::Message& message, const std::string& exchange, const std::string& symbol, uint64_t timestamp_ns);
+    
+    // Async message processing threads
+    void orderbook_processor_thread();
+    void trade_processor_thread();
 
 private:
+    /// @name Market Data Message Queue Structures
+    /// @{
+    struct OrderBookMessage {
+        ccapi::Message message;
+        std::string exchange;
+        std::string symbol; 
+        uint64_t timestamp_ns;
+    };
+    
+    struct TradeMessage {
+        ccapi::Message message;
+        std::string exchange;
+        std::string symbol;
+        uint64_t timestamp_ns;
+    };
+    
+    std::queue<OrderBookMessage> orderbook_message_queue_;
+    std::queue<TradeMessage> trade_message_queue_;
+    std::mutex orderbook_queue_mutex_;
+    std::mutex trade_queue_mutex_;
+    std::condition_variable orderbook_queue_cv_;
+    std::condition_variable trade_queue_cv_;
+    /// @}
+
     /// @name ZeroMQ Communication Threads
     /// @{
     /**
@@ -578,6 +616,8 @@ private:
     std::unique_ptr<std::thread> publisher_thread_;             ///< Thread for message publishing
     std::unique_ptr<std::thread> trade_data_publisher_thread_;  ///< Thread for trade data publishing
     std::unique_ptr<std::thread> orderbook_data_publisher_thread_; ///< Thread for orderbook data publishing
+    std::unique_ptr<std::thread> orderbook_processor_thread_;   ///< Thread for orderbook message processing
+    std::unique_ptr<std::thread> trade_processor_thread_;       ///< Thread for trade message processing
     std::atomic<bool> running_;                                 ///< Atomic flag for service state
     /// @}
     

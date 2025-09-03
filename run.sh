@@ -6,6 +6,7 @@
 
 # ---- defaults ----
 BUILD_TYPE="Debug"
+PRESET_NAME="wsl-debug"
 CLEAN=""
 BUILD_DOCS=""
 
@@ -14,10 +15,12 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         --debug)
             BUILD_TYPE="Debug"
+            PRESET_NAME="wsl-debug"
             shift
             ;;
         --release)
             BUILD_TYPE="Release"
+            PRESET_NAME="wsl-release"
             shift
             ;;
         --clean)
@@ -130,34 +133,19 @@ VCPKG_TRIPLET="x64-linux"
 
 # ---- optional clean ----
 if [ -n "$CLEAN" ]; then
-    echo "Cleaning $BUILD_DIR ..."
-    rm -rf "$BUILD_DIR"
+    echo "Cleaning build directory for preset $PRESET_NAME..."
+    rm -rf "$SCRIPT_DIR/build"
 fi
 
-# ---- create build directory ----
-mkdir -p "$BUILD_DIR"
+# ---- configure with CMake preset ----
+echo "Configuring with CMake preset: $PRESET_NAME..."
+cd "$SCRIPT_DIR"
 
-# ---- configure with CMake ----
-echo "Configuring with CMake..."
-cd "$BUILD_DIR"
+cmake --preset="$PRESET_NAME" || exit 1
 
-# Check if ccache is available and configure it
-CMAKE_CCACHE_ARGS=""
-if command -v ccache &> /dev/null; then
-    echo "Using ccache for faster compilation..."
-    CMAKE_CCACHE_ARGS="-DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_C_COMPILER_LAUNCHER=ccache"
-fi
-
-cmake .. \
-    -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
-    -DCMAKE_TOOLCHAIN_FILE="$VCPKG_DIR/scripts/buildsystems/vcpkg.cmake" \
-    -DVCPKG_TARGET_TRIPLET="$VCPKG_TRIPLET" \
-    $CMAKE_CCACHE_ARGS \
-    -G Ninja || exit 1
-
-# ---- build ----
-echo "Building with Ninja..."
-ninja || exit 1
+# ---- build with CMake preset ----
+echo "Building with CMake preset: $PRESET_NAME..."
+cmake --build --preset="$PRESET_NAME" || exit 1
 
 # ---- build docs if requested ----
 if [ -n "$BUILD_DOCS" ]; then
@@ -168,9 +156,10 @@ fi
 
 echo
 echo "Build completed successfully!"
-echo "Executable location: $BUILD_DIR/trading_engine_service"
+echo "Preset used: $PRESET_NAME"
+echo "Executable location: $SCRIPT_DIR/build/$PRESET_NAME/trading_engine_service"
 echo
 echo "To run the trading engine service:"
-echo "  cd $BUILD_DIR"
+echo "  cd $SCRIPT_DIR/build/$PRESET_NAME"
 echo "  ./trading_engine_service"
 echo

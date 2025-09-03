@@ -153,6 +153,10 @@ void TradingEngineService::start() {
     // Start orderbook data publisher thread
     orderbook_data_publisher_thread_ = std::make_unique<std::thread>(&TradingEngineService::orderbook_data_publisher_thread, this);
     
+    // Start message processor threads
+    orderbook_processor_thread_ = std::make_unique<std::thread>(&TradingEngineService::orderbook_processor_thread, this);
+    trade_processor_thread_ = std::make_unique<std::thread>(&TradingEngineService::trade_processor_thread, this);
+    
     // Start CCAPI market data subscriptions
     start_market_data_subscriptions();
     
@@ -185,6 +189,17 @@ void TradingEngineService::stop() {
         orderbook_data_cv_.notify_all();
     }
     
+    // Notify message processor threads
+    {
+        std::lock_guard<std::mutex> lock(orderbook_queue_mutex_);
+        orderbook_queue_cv_.notify_all();
+    }
+    
+    {
+        std::lock_guard<std::mutex> lock(trade_queue_mutex_);
+        trade_queue_cv_.notify_all();
+    }
+    
     // Wait for all threads
     if (order_receiver_thread_ && order_receiver_thread_->joinable()) {
         order_receiver_thread_->join();
@@ -200,6 +215,14 @@ void TradingEngineService::stop() {
     
     if (orderbook_data_publisher_thread_ && orderbook_data_publisher_thread_->joinable()) {
         orderbook_data_publisher_thread_->join();
+    }
+    
+    if (orderbook_processor_thread_ && orderbook_processor_thread_->joinable()) {
+        orderbook_processor_thread_->join();
+    }
+    
+    if (trade_processor_thread_ && trade_processor_thread_->joinable()) {
+        trade_processor_thread_->join();
     }
     
     spdlog::info("[TradingEngine] Enhanced service stopped");
@@ -297,7 +320,7 @@ void TradingEngineService::processEvent(const ccapi::Event& event, ccapi::Sessio
             // Fallback: use default values if correlation ID parsing fails
             if (exchange.empty() || symbol.empty()) {
                 exchange = "bybit";  // Default exchange
-                symbol = "BTC-USDT";  // Default symbol
+                symbol = "ETHUSDT";  // Default symbol
             }
             
             exchange = normalize_exchange(exchange);
@@ -307,351 +330,398 @@ void TradingEngineService::processEvent(const ccapi::Event& event, ccapi::Sessio
                 message.getTime().time_since_epoch()).count();
             
             if (message.getType() == ccapi::Message::Type::MARKET_DATA_EVENTS_MARKET_DEPTH) {
-                // Process orderbook data
-                OrderBookData book_data;
-                book_data.exchange = exchange;
-                book_data.symbol = symbol;
-                book_data.timestamp_ns = timestamp_ns;
-                book_data.receipt_timestamp_ns = get_current_time_ns();
-                
-                // Parse market depth from CCAPI message
-                const auto& elementList = message.getElementList();
-                if (!elementList.empty()) {
-                    double best_bid_price = 0.0, best_bid_size = 0.0;
-                    double best_ask_price = 0.0, best_ask_size = 0.0;
-                    
-                    // Parse all bid and ask levels
-                    std::vector<std::pair<double, double>> bid_levels;
-                    std::vector<std::pair<double, double>> ask_levels;
-                    
-                    for (const auto& element : elementList) {
-                        const auto& nameValueMap = element.getNameValueMap();
-                        
-                        // DEBUG: Log all available fields to understand CCAPI structure
-                        spdlog::info("[CCAPI-DEBUG] Orderbook message for {}-{} has {} fields:", exchange, symbol, nameValueMap.size());
-                        for (const auto& [key, value] : nameValueMap) {
-                            spdlog::info("[CCAPI-DEBUG]   {}: '{}'", key, std::string(value));
-                        }
-                        
-                        // Parse top levels from CCAPI - try multiple field name patterns
-                        for (int i = 0; i < depth_levels_; ++i) {
-                            // Try different bid/ask field naming conventions
-                            std::vector<std::string> bid_price_patterns = {
-                                "BID_PRICE_" + std::to_string(i),
-                                "bidPrice" + std::to_string(i),
-                                "bp" + std::to_string(i),
-                                "b" + std::to_string(i) + "p"
-                            };
-                            std::vector<std::string> bid_size_patterns = {
-                                "BID_SIZE_" + std::to_string(i),
-                                "bidSize" + std::to_string(i),
-                                "bs" + std::to_string(i),
-                                "b" + std::to_string(i) + "s"
-                            };
-                            std::vector<std::string> ask_price_patterns = {
-                                "ASK_PRICE_" + std::to_string(i),
-                                "askPrice" + std::to_string(i),
-                                "ap" + std::to_string(i),
-                                "a" + std::to_string(i) + "p"
-                            };
-                            std::vector<std::string> ask_size_patterns = {
-                                "ASK_SIZE_" + std::to_string(i),
-                                "askSize" + std::to_string(i),
-                                "as" + std::to_string(i),
-                                "a" + std::to_string(i) + "s"
-                            };
-                            
-                            // Try to find bid data
-                            for (const auto& price_pattern : bid_price_patterns) {
-                                for (const auto& size_pattern : bid_size_patterns) {
-                                    if (nameValueMap.find(price_pattern) != nameValueMap.end() &&
-                                        nameValueMap.find(size_pattern) != nameValueMap.end()) {
-                                        try {
-                                            double price = std::stod(std::string(nameValueMap.at(price_pattern)));
-                                            double size = std::stod(std::string(nameValueMap.at(size_pattern)));
-                                            if (price > 0 && size > 0) {
-                                                bid_levels.emplace_back(price, size);
-                                                if (i == 0) {
-                                                    best_bid_price = price;
-                                                    best_bid_size = size;
-                                                }
-                                                spdlog::info("[CCAPI-DEBUG] Found bid level {}: price={} ({}), size={} ({})", 
-                                                           i, price, price_pattern, size, size_pattern);
-                                                goto next_bid_level;
-                                            }
-                                        } catch (const std::exception& e) {
-                                            spdlog::warn("[CCAPI-DEBUG] Failed to parse bid level {}: {}", i, e.what());
-                                        }
-                                    }
-                                }
-                            }
-                            next_bid_level:
-                            
-                            // Try to find ask data
-                            for (const auto& price_pattern : ask_price_patterns) {
-                                for (const auto& size_pattern : ask_size_patterns) {
-                                    if (nameValueMap.find(price_pattern) != nameValueMap.end() &&
-                                        nameValueMap.find(size_pattern) != nameValueMap.end()) {
-                                        try {
-                                            double price = std::stod(std::string(nameValueMap.at(price_pattern)));
-                                            double size = std::stod(std::string(nameValueMap.at(size_pattern)));
-                                            if (price > 0 && size > 0) {
-                                                ask_levels.emplace_back(price, size);
-                                                if (i == 0) {
-                                                    best_ask_price = price;
-                                                    best_ask_size = size;
-                                                }
-                                                spdlog::info("[CCAPI-DEBUG] Found ask level {}: price={} ({}), size={} ({})", 
-                                                           i, price, price_pattern, size, size_pattern);
-                                                goto next_ask_level;
-                                            }
-                                        } catch (const std::exception& e) {
-                                            spdlog::warn("[CCAPI-DEBUG] Failed to parse ask level {}: {}", i, e.what());
-                                        }
-                                    }
-                                }
-                            }
-                            next_ask_level:;
-                        }
-                        
-                        if (bid_levels.empty() || ask_levels.empty()) {
-                            spdlog::error("[CCAPI-DEBUG] No valid bid/ask levels found for {}-{}", exchange, symbol);
-                        }
-                    }
-                    book_data.best_bid_price = best_bid_price;
-                    book_data.best_bid_size = best_bid_size;
-                    book_data.best_ask_price = best_ask_price;
-                    book_data.best_ask_size = best_ask_size;
-                    
-                    // Calculate derived features
-                    if (best_bid_price > 0 && best_ask_price > 0) {
-                        book_data.midpoint = (best_bid_price + best_ask_price) / 2.0;
-                        book_data.relative_spread = ((best_ask_price - best_bid_price) / book_data.midpoint);
-                        book_data.breadth = best_bid_price * best_bid_size + best_ask_price * best_ask_size;
-                        
-                        double total_vol = best_bid_size + best_ask_size;
-                        book_data.imbalance_lvl1 = total_vol > 0 ? (best_bid_size - best_ask_size) / total_vol : 0.0;
-                        
-                        // Calculate depth_n like Python reference (sum price * size across top N levels)
-                        book_data.bid_depth_n = 0.0;
-                        book_data.ask_depth_n = 0.0;
-                        
-                        // Sort bids by price descending (highest prices first)
-                        std::sort(bid_levels.begin(), bid_levels.end(), 
-                                [](const auto& a, const auto& b) { return a.first > b.first; });
-                        
-                        // Sort asks by price ascending (lowest prices first)
-                        std::sort(ask_levels.begin(), ask_levels.end(), 
-                                [](const auto& a, const auto& b) { return a.first < b.first; });
-                        
-                        // Calculate bid depth_n (top N levels)
-                        int bid_count = std::min(static_cast<int>(bid_levels.size()), depth_levels_);
-                        for (int i = 0; i < bid_count; ++i) {
-                            book_data.bid_depth_n += bid_levels[i].first * bid_levels[i].second;
-                        }
-                        
-                        // Calculate ask depth_n (top N levels)
-                        int ask_count = std::min(static_cast<int>(ask_levels.size()), depth_levels_);
-                        for (int i = 0; i < ask_count; ++i) {
-                            book_data.ask_depth_n += ask_levels[i].first * ask_levels[i].second;
-                        }
-                        
-                        book_data.depth_n = book_data.bid_depth_n + book_data.ask_depth_n;
-                        
-                        // Store full book data for serialization if available
-                        for (const auto& [price, size] : bid_levels) {
-                            book_data.bids[price] = size;
-                        }
-                        for (const auto& [price, size] : ask_levels) {
-                            book_data.asks[price] = size;
-                        }
-                        
-                        process_orderbook_data(book_data);
-                    }
+                // Queue orderbook message for async processing
+                {
+                    std::lock_guard<std::mutex> lock(orderbook_queue_mutex_);
+                    orderbook_message_queue_.push({message, exchange, symbol, timestamp_ns});
+                    orderbook_queue_cv_.notify_one();
                 }
-                
             } else if (message.getType() == ccapi::Message::Type::MARKET_DATA_EVENTS_TRADE) {
-                // Process trade data
-                TradeData trade_data;
-                trade_data.exchange = exchange;
-                trade_data.symbol = symbol;
-                trade_data.timestamp_ns = timestamp_ns;
-                trade_data.receipt_timestamp_ns = get_current_time_ns();
-                
-                // Initialize with default values to prevent garbage data
-                trade_data.price = 0.0;
-                trade_data.amount = 0.0;
-                trade_data.transaction_price = 0.0;
-                trade_data.trading_volume = 0.0;
-                trade_data.side = "unknown";
-                trade_data.trade_id = "N/A";
-                trade_data.volatility_transaction_price = 0.0;
-                trade_data.transaction_price_window_size = 0;
-                trade_data.sequence_number = 0;
-                
-                // Parse trade from CCAPI message
-                const auto& elementList = message.getElementList();
-                if (!elementList.empty()) {
-                    for (const auto& element : elementList) {
-                        const auto& nameValueMap = element.getNameValueMap();
-                        
-                        // DEBUG: Log all available fields to understand CCAPI structure
-                        spdlog::info("[CCAPI-DEBUG] Trade message for {}-{} has {} fields:", exchange, symbol, nameValueMap.size());
-                        for (const auto& [key, value] : nameValueMap) {
-                            spdlog::info("[CCAPI-DEBUG]   {}: '{}'", key, std::string(value));
-                        }
-                        
-                        // Also log the raw message for debugging
-                        spdlog::info("[CCAPI-DEBUG] Raw message type: {}", static_cast<int>(message.getType()));
-                        spdlog::info("[CCAPI-DEBUG] Raw message time: {}", message.getTime().time_since_epoch().count());
-                        
-                        // Parse CCAPI trade data - try all possible field names
-                        bool price_found = false, size_found = false;
-                        
-                        // Price field variations
-                        std::vector<std::string> price_fields = {"PRICE", "LAST_PRICE", "TRADE_PRICE", "p", "price"};
-                        for (const auto& field : price_fields) {
-                            if (nameValueMap.find(field) != nameValueMap.end()) {
-                                try {
-                                    trade_data.price = std::stod(std::string(nameValueMap.at(field)));
-                                    trade_data.transaction_price = trade_data.price;
-                                    price_found = true;
-                                    spdlog::info("[CCAPI-DEBUG] Found price in field '{}': {}", field, trade_data.price);
-                                    break;
-                                } catch (const std::exception& e) {
-                                    spdlog::warn("[CCAPI-DEBUG] Failed to parse price from field '{}': {}", field, e.what());
-                                }
-                            }
-                        }
-                        
-                        // Size/quantity field variations - expanded list
-                        std::vector<std::string> size_fields = {
-                            "SIZE", "QUANTITY", "TRADE_SIZE", "AMOUNT", "q", "size", "qty", 
-                            "QTY", "VOLUME", "vol", "v", "amount", "baseQty", "quoteQty"
-                        };
-                        for (const auto& field : size_fields) {
-                            if (nameValueMap.find(field) != nameValueMap.end()) {
-                                try {
-                                    std::string size_str = std::string(nameValueMap.at(field));
-                                    if (!size_str.empty() && size_str != "0" && size_str != "null") {
-                                        trade_data.amount = std::stod(size_str);
-                                        size_found = true;
-                                        spdlog::info("[CCAPI-DEBUG] Found size in field '{}': {}", field, trade_data.amount);
-                                        break;
-                                    }
-                                } catch (const std::exception& e) {
-                                    spdlog::warn("[CCAPI-DEBUG] Failed to parse size from field '{}': {}", field, e.what());
-                                }
-                            }
-                        }
-                        
-                        // If no size found, check if we can extract from any field containing numbers
-                        if (!size_found) {
-                            spdlog::warn("[CCAPI-DEBUG] No size field found, checking all numeric fields...");
-                            for (const auto& [key, value] : nameValueMap) {
-                                std::string val_str = std::string(value);
-                                try {
-                                    double val = std::stod(val_str);
-                                    if (val > 0 && val != trade_data.price && key != "PRICE" && key != "price") {
-                                        trade_data.amount = val;
-                                        size_found = true;
-                                        spdlog::info("[CCAPI-DEBUG] Using field '{}' as size: {}", key, val);
-                                        break;
-                                    }
-                                } catch (...) {
-                                    // Not a number, skip
-                                }
-                            }
-                        }
-                        
-                        // Trade ID field variations - expanded list
-                        std::vector<std::string> id_fields = {
-                            "TRADE_ID", "ID", "i", "id", "tradeId", "execId", "exec_id", 
-                            "transactionId", "txId", "tid", "T"
-                        };
-                        for (const auto& field : id_fields) {
-                            if (nameValueMap.find(field) != nameValueMap.end()) {
-                                std::string id_str = std::string(nameValueMap.at(field));
-                                if (!id_str.empty() && id_str != "null" && id_str != "0") {
-                                    trade_data.trade_id = id_str;
-                                    spdlog::info("[CCAPI-DEBUG] Found trade ID in field '{}': {}", field, trade_data.trade_id);
-                                    break;
-                                }
-                            }
-                        }
-                        
-                        // Generate fallback ID if none found
-                        if (trade_data.trade_id == "N/A") {
-                            static std::atomic<uint64_t> fallback_id{1000000000};
-                            trade_data.trade_id = std::to_string(++fallback_id);
-                            spdlog::info("[CCAPI-DEBUG] Generated fallback trade ID: {}", trade_data.trade_id);
-                        }
-                        
-                        // Side field variations
-                        std::vector<std::string> side_fields = {"IS_BUYER_MAKER", "SIDE", "s", "side", "m"};
-                        for (const auto& field : side_fields) {
-                            if (nameValueMap.find(field) != nameValueMap.end()) {
-                                std::string side_value = std::string(nameValueMap.at(field));
-                                if (field == "IS_BUYER_MAKER") {
-                                    trade_data.side = (side_value == "1" || side_value == "true") ? "sell" : "buy";
-                                } else if (field == "SIDE") {
-                                    trade_data.side = (side_value == "1" || side_value == "buy" || side_value == "BUY") ? "buy" : "sell";
-                                } else {
-                                    trade_data.side = side_value;
-                                }
-                                spdlog::info("[CCAPI-DEBUG] Found side in field '{}': {} -> {}", field, side_value, trade_data.side);
-                                break;
-                            }
-                        }
-                        
-                        if (!price_found || !size_found) {
-                            spdlog::error("[CCAPI-DEBUG] Missing critical trade data - price_found: {}, size_found: {}", price_found, size_found);
-                            // Skip processing if we don't have essential data
-                            continue;
-                        }
-                        
-                        // Extract timestamp from message - try multiple approaches
-                        auto timestamp = message.getTime();
-                        trade_data.timestamp_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                            timestamp.time_since_epoch()
-                        ).count();
-                        
-                        // If timestamp is 0, try to find it in the message fields
-                        if (trade_data.timestamp_ns == 0) {
-                            std::vector<std::string> time_fields = {"TIME", "TIMESTAMP", "t", "ts", "time", "timestamp", "T"};
-                            for (const auto& field : time_fields) {
-                                if (nameValueMap.find(field) != nameValueMap.end()) {
-                                    try {
-                                        std::string time_str = std::string(nameValueMap.at(field));
-                                        // Convert to nanoseconds (assume input is milliseconds)
-                                        trade_data.timestamp_ns = std::stoll(time_str) * 1000000;
-                                        spdlog::info("[CCAPI-DEBUG] Found timestamp in field '{}': {}", field, trade_data.timestamp_ns);
-                                        break;
-                                    } catch (const std::exception& e) {
-                                        spdlog::warn("[CCAPI-DEBUG] Failed to parse timestamp from field '{}': {}", field, e.what());
-                                    }
-                                }
-                            }
-                        }
-                        
-                        // If still no timestamp, use current time
-                        if (trade_data.timestamp_ns == 0) {
-                            trade_data.timestamp_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                std::chrono::system_clock::now().time_since_epoch()
-                            ).count();
-                            spdlog::info("[CCAPI-DEBUG] Using current time as timestamp: {}", trade_data.timestamp_ns);
-                        }
-                        
-                        trade_data.trading_volume = trade_data.price * trade_data.amount;
-                        
-                        process_trade_data(trade_data);
-                    }
+                // Queue trade message for async processing
+                {
+                    std::lock_guard<std::mutex> lock(trade_queue_mutex_);
+                    trade_message_queue_.push({message, exchange, symbol, timestamp_ns});
+                    trade_queue_cv_.notify_one();
                 }
             }
         }
         
     } catch (const std::exception& e) {
         spdlog::error("[MarketData] Error processing CCAPI event: {}", e.what());
+    }
+}
+
+/**
+ * @brief Orderbook message processor thread
+ */
+void TradingEngineService::orderbook_processor_thread() {
+    spdlog::info("[OrderbookProcessor] Thread started");
+    
+    while (running_) {
+        std::unique_lock<std::mutex> lock(orderbook_queue_mutex_);
+        
+        // Wait for messages or shutdown signal
+        orderbook_queue_cv_.wait(lock, [this] {
+            return !orderbook_message_queue_.empty() || !running_;
+        });
+        
+        // Process all queued messages
+        while (!orderbook_message_queue_.empty() && running_) {
+            OrderBookMessage msg = std::move(orderbook_message_queue_.front());
+            orderbook_message_queue_.pop();
+            lock.unlock();
+            
+            // Process the message
+            handle_orderbook_message(msg.message, msg.exchange, msg.symbol, msg.timestamp_ns);
+            
+            lock.lock();
+        }
+    }
+    
+    spdlog::info("[OrderbookProcessor] Thread stopped");
+}
+
+/**
+ * @brief Trade message processor thread
+ */
+void TradingEngineService::trade_processor_thread() {
+    spdlog::info("[TradeProcessor] Thread started");
+    
+    while (running_) {
+        std::unique_lock<std::mutex> lock(trade_queue_mutex_);
+        
+        // Wait for messages or shutdown signal
+        trade_queue_cv_.wait(lock, [this] {
+            return !trade_message_queue_.empty() || !running_;
+        });
+        
+        // Process all queued messages
+        while (!trade_message_queue_.empty() && running_) {
+            TradeMessage msg = std::move(trade_message_queue_.front());
+            trade_message_queue_.pop();
+            lock.unlock();
+            
+            // Process the message
+            handle_trade_message(msg.message, msg.exchange, msg.symbol, msg.timestamp_ns);
+            
+            lock.lock();
+        }
+    }
+    
+    spdlog::info("[TradeProcessor] Thread stopped");
+}
+
+/**
+ * @brief Handle orderbook messages from CCAPI
+ */
+void TradingEngineService::handle_orderbook_message(const ccapi::Message& message, const std::string& exchange, const std::string& symbol, uint64_t timestamp_ns) {
+    OrderBookData book_data;
+    book_data.exchange = exchange;
+    book_data.symbol = symbol;
+    book_data.timestamp_ns = timestamp_ns;
+    book_data.receipt_timestamp_ns = get_current_time_ns();
+    
+    // Parse market depth from CCAPI message
+    const auto& elementList = message.getElementList();
+    if (!elementList.empty()) {
+        long double best_bid_price = 0.0L, best_bid_size = 0.0L;
+        long double best_ask_price = 0.0L, best_ask_size = 0.0L;
+        std::string best_bid_price_str, best_bid_size_str, best_ask_price_str, best_ask_size_str;
+        
+        // Parse all bid and ask levels with higher precision
+        std::vector<std::pair<long double, long double>> bid_levels;
+        std::vector<std::pair<long double, long double>> ask_levels;
+        
+        for (const auto& element : elementList) {
+            const auto& nameValueMap = element.getNameValueMap();
+            
+            // DEBUG: Log all available fields to understand CCAPI structure
+            spdlog::info("[CCAPI-DEBUG] Orderbook message for {}-{} has {} fields:", exchange, symbol, nameValueMap.size());
+            for (const auto& [key, value] : nameValueMap) {
+                spdlog::info("[CCAPI-DEBUG]   {}: '{}'", key, std::string(value));
+            }
+            
+            // Parse Bybit format with maximum precision preservation
+            if (nameValueMap.find("BID_PRICE") != nameValueMap.end() &&
+                nameValueMap.find("BID_SIZE") != nameValueMap.end()) {
+                try {
+                    std::string price_str = std::string(nameValueMap.at("BID_PRICE"));
+                    std::string size_str = std::string(nameValueMap.at("BID_SIZE"));
+                    long double price = std::stold(price_str);
+                    long double size = std::stold(size_str);
+                    if (price > 0 && size > 0) {
+                        bid_levels.emplace_back(price, size);
+                        best_bid_price = price;
+                        best_bid_size = size;
+                        best_bid_price_str = price_str;
+                        best_bid_size_str = size_str;
+                        spdlog::info("[CCAPI-DEBUG] Found bid: price={:.12Lf} ({}), size={:.12Lf} ({})", 
+                                   price, price_str, size, size_str);
+                    }
+                } catch (const std::exception& e) {
+                    spdlog::warn("[CCAPI-DEBUG] Failed to parse bid data: {}", e.what());
+                }
+            }
+            
+            if (nameValueMap.find("ASK_PRICE") != nameValueMap.end() &&
+                nameValueMap.find("ASK_SIZE") != nameValueMap.end()) {
+                try {
+                    std::string price_str = std::string(nameValueMap.at("ASK_PRICE"));
+                    std::string size_str = std::string(nameValueMap.at("ASK_SIZE"));
+                    long double price = std::stold(price_str);
+                    long double size = std::stold(size_str);
+                    if (price > 0 && size > 0) {
+                        ask_levels.emplace_back(price, size);
+                        best_ask_price = price;
+                        best_ask_size = size;
+                        best_ask_price_str = price_str;
+                        best_ask_size_str = size_str;
+                        spdlog::info("[CCAPI-DEBUG] Found ask: price={:.12Lf} ({}), size={:.12Lf} ({})", 
+                                   price, price_str, size, size_str);
+                    }
+                } catch (const std::exception& e) {
+                    spdlog::warn("[CCAPI-DEBUG] Failed to parse ask data: {}", e.what());
+                }
+            }
+            
+            // Note: Bybit sends separate messages for bids and asks, so it's normal for one side to be empty
+        }
+        
+        book_data.best_bid_price = best_bid_price;
+        book_data.best_bid_size = best_bid_size;
+        book_data.best_ask_price = best_ask_price;
+        book_data.best_ask_size = best_ask_size;
+        book_data.best_bid_price_str = best_bid_price_str;
+        book_data.best_bid_size_str = best_bid_size_str;
+        book_data.best_ask_price_str = best_ask_price_str;
+        book_data.best_ask_size_str = best_ask_size_str;
+        
+        // Calculate derived features
+        if (best_bid_price > 0 && best_ask_price > 0) {
+            book_data.midpoint = (best_bid_price + best_ask_price) / 2.0;
+            book_data.relative_spread = ((best_ask_price - best_bid_price) / book_data.midpoint);
+            book_data.breadth = best_bid_price * best_bid_size + best_ask_price * best_ask_size;
+            
+            double total_vol = best_bid_size + best_ask_size;
+            book_data.imbalance_lvl1 = total_vol > 0 ? (best_bid_size - best_ask_size) / total_vol : 0.0;
+            
+            // Calculate depth_n like Python reference (sum price * size across top N levels)
+            book_data.bid_depth_n = 0.0;
+            book_data.ask_depth_n = 0.0;
+            
+            // Sort bids by price descending (highest prices first)
+            std::sort(bid_levels.begin(), bid_levels.end(), 
+                    [](const auto& a, const auto& b) { return a.first > b.first; });
+            
+            // Sort asks by price ascending (lowest prices first)
+            std::sort(ask_levels.begin(), ask_levels.end(), 
+                    [](const auto& a, const auto& b) { return a.first < b.first; });
+            
+            // Calculate bid depth_n (top N levels)
+            int bid_count = std::min(static_cast<int>(bid_levels.size()), depth_levels_);
+            for (int i = 0; i < bid_count; ++i) {
+                book_data.bid_depth_n += bid_levels[i].first * bid_levels[i].second;
+            }
+            
+            // Calculate ask depth_n (top N levels)
+            int ask_count = std::min(static_cast<int>(ask_levels.size()), depth_levels_);
+            for (int i = 0; i < ask_count; ++i) {
+                book_data.ask_depth_n += ask_levels[i].first * ask_levels[i].second;
+            }
+            
+            book_data.depth_n = book_data.bid_depth_n + book_data.ask_depth_n;
+            
+            // Store full book data for serialization if available
+            for (const auto& [price, size] : bid_levels) {
+                book_data.bids[price] = size;
+            }
+            for (const auto& [price, size] : ask_levels) {
+                book_data.asks[price] = size;
+            }
+            
+            process_orderbook_data(book_data);
+        }
+    }
+}
+
+/**
+ * @brief Handle trade messages from CCAPI
+ */
+void TradingEngineService::handle_trade_message(const ccapi::Message& message, const std::string& exchange, const std::string& symbol, uint64_t timestamp_ns) {
+    TradeData trade_data;
+    trade_data.exchange = exchange;
+    trade_data.symbol = symbol;
+    trade_data.timestamp_ns = timestamp_ns;
+    trade_data.receipt_timestamp_ns = get_current_time_ns();
+    
+    // Initialize with default values to prevent garbage data
+    trade_data.price = 0.0;
+    trade_data.amount = 0.0;
+    trade_data.transaction_price = 0.0;
+    trade_data.trading_volume = 0.0;
+    trade_data.side = "unknown";
+    trade_data.trade_id = "N/A";
+    trade_data.volatility_transaction_price = 0.0;
+    trade_data.transaction_price_window_size = 0;
+    trade_data.sequence_number = 0;
+    
+    // Parse trade from CCAPI message
+    const auto& elementList = message.getElementList();
+    if (!elementList.empty()) {
+        for (const auto& element : elementList) {
+            const auto& nameValueMap = element.getNameValueMap();
+            
+            // DEBUG: Log all available fields to understand CCAPI structure
+            spdlog::info("[CCAPI-DEBUG] Trade message for {}-{} has {} fields:", exchange, symbol, nameValueMap.size());
+            for (const auto& [key, value] : nameValueMap) {
+                spdlog::info("[CCAPI-DEBUG]   {}: '{}'", key, std::string(value));
+            }
+            
+            // Also log the raw message for debugging
+            spdlog::info("[CCAPI-DEBUG] Raw message type: {}", static_cast<int>(message.getType()));
+            spdlog::info("[CCAPI-DEBUG] Raw message time: {}", message.getTime().time_since_epoch().count());
+            
+            // Parse CCAPI trade data - try all possible field names
+            bool price_found = false, size_found = false;
+            
+            // Price field variations
+            std::vector<std::string> price_fields = {"PRICE", "LAST_PRICE", "TRADE_PRICE", "p", "price"};
+            for (const auto& field : price_fields) {
+                if (nameValueMap.find(field) != nameValueMap.end()) {
+                    try {
+                        trade_data.price = std::stod(std::string(nameValueMap.at(field)));
+                        trade_data.transaction_price = trade_data.price;
+                        price_found = true;
+                        spdlog::info("[CCAPI-DEBUG] Found price in field '{}': {}", field, trade_data.price);
+                        break;
+                    } catch (const std::exception& e) {
+                        spdlog::warn("[CCAPI-DEBUG] Failed to parse price from field '{}': {}", field, e.what());
+                    }
+                }
+            }
+            
+            // Size/quantity field variations - expanded list
+            std::vector<std::string> size_fields = {
+                "SIZE", "QUANTITY", "TRADE_SIZE", "AMOUNT", "q", "size", "qty", 
+                "QTY", "VOLUME", "vol", "v", "amount", "baseQty", "quoteQty"
+            };
+            for (const auto& field : size_fields) {
+                if (nameValueMap.find(field) != nameValueMap.end()) {
+                    try {
+                        std::string size_str = std::string(nameValueMap.at(field));
+                        if (!size_str.empty() && size_str != "0" && size_str != "null") {
+                            trade_data.amount = std::stod(size_str);
+                            size_found = true;
+                            spdlog::info("[CCAPI-DEBUG] Found size in field '{}': {}", field, trade_data.amount);
+                            break;
+                        }
+                    } catch (const std::exception& e) {
+                        spdlog::warn("[CCAPI-DEBUG] Failed to parse size from field '{}': {}", field, e.what());
+                    }
+                }
+            }
+            
+            // If no size found, check if we can extract from any field containing numbers
+            if (!size_found) {
+                spdlog::warn("[CCAPI-DEBUG] No size field found, checking all numeric fields...");
+                for (const auto& [key, value] : nameValueMap) {
+                    std::string val_str = std::string(value);
+                    try {
+                        double val = std::stod(val_str);
+                        if (val > 0 && val != trade_data.price && key != "PRICE" && key != "price") {
+                            trade_data.amount = val;
+                            size_found = true;
+                            spdlog::info("[CCAPI-DEBUG] Using field '{}' as size: {}", key, val);
+                            break;
+                        }
+                    } catch (...) {
+                        // Not a number, skip
+                    }
+                }
+            }
+            
+            // Trade ID field variations - expanded list
+            std::vector<std::string> id_fields = {
+                "TRADE_ID", "ID", "i", "id", "tradeId", "execId", "exec_id", 
+                "transactionId", "txId", "tid", "T"
+            };
+            for (const auto& field : id_fields) {
+                if (nameValueMap.find(field) != nameValueMap.end()) {
+                    std::string id_str = std::string(nameValueMap.at(field));
+                    if (!id_str.empty() && id_str != "null" && id_str != "0") {
+                        trade_data.trade_id = id_str;
+                        spdlog::info("[CCAPI-DEBUG] Found trade ID in field '{}': {}", field, trade_data.trade_id);
+                        break;
+                    }
+                }
+            }
+            
+            // Generate fallback ID if none found
+            if (trade_data.trade_id == "N/A") {
+                static std::atomic<uint64_t> fallback_id{1000000000};
+                trade_data.trade_id = std::to_string(++fallback_id);
+                spdlog::info("[CCAPI-DEBUG] Generated fallback trade ID: {}", trade_data.trade_id);
+            }
+            
+            // Side field variations
+            std::vector<std::string> side_fields = {"IS_BUYER_MAKER", "SIDE", "s", "side", "m"};
+            for (const auto& field : side_fields) {
+                if (nameValueMap.find(field) != nameValueMap.end()) {
+                    std::string side_value = std::string(nameValueMap.at(field));
+                    if (field == "IS_BUYER_MAKER") {
+                        trade_data.side = (side_value == "1" || side_value == "true") ? "sell" : "buy";
+                    } else if (field == "SIDE") {
+                        trade_data.side = (side_value == "1" || side_value == "buy" || side_value == "BUY") ? "buy" : "sell";
+                    } else {
+                        trade_data.side = side_value;
+                    }
+                    spdlog::info("[CCAPI-DEBUG] Found side in field '{}': {} -> {}", field, side_value, trade_data.side);
+                    break;
+                }
+            }
+            
+            if (!price_found || !size_found) {
+                spdlog::error("[CCAPI-DEBUG] Missing critical trade data - price_found: {}, size_found: {}", price_found, size_found);
+                // Skip processing if we don't have essential data
+                continue;
+            }
+            
+            // Extract timestamp from message - try multiple approaches
+            auto timestamp = message.getTime();
+            trade_data.timestamp_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                timestamp.time_since_epoch()
+            ).count();
+            
+            // If timestamp is 0, try to find it in the message fields
+            if (trade_data.timestamp_ns == 0) {
+                std::vector<std::string> time_fields = {"TIME", "TIMESTAMP", "t", "ts", "time", "timestamp", "T"};
+                for (const auto& field : time_fields) {
+                    if (nameValueMap.find(field) != nameValueMap.end()) {
+                        try {
+                            std::string time_str = std::string(nameValueMap.at(field));
+                            // Convert to nanoseconds (assume input is milliseconds)
+                            trade_data.timestamp_ns = std::stoll(time_str) * 1000000;
+                            spdlog::info("[CCAPI-DEBUG] Found timestamp in field '{}': {}", field, trade_data.timestamp_ns);
+                            break;
+                        } catch (const std::exception& e) {
+                            spdlog::warn("[CCAPI-DEBUG] Failed to parse timestamp from field '{}': {}", field, e.what());
+                        }
+                    }
+                }
+            }
+            
+            // If still no timestamp, use current time
+            if (trade_data.timestamp_ns == 0) {
+                trade_data.timestamp_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()
+                ).count();
+                spdlog::info("[CCAPI-DEBUG] Using current time as timestamp: {}", trade_data.timestamp_ns);
+            }
+            
+            trade_data.trading_volume = trade_data.price * trade_data.amount;
+            
+            process_trade_data(trade_data);
+        }
     }
 }
 
@@ -1514,10 +1584,10 @@ std::string TradingEngineService::serialize_orderbook_data(const OrderBookData& 
     doc.AddMember("symbol", rapidjson::Value(book_data.symbol.c_str(), allocator), allocator);
     doc.AddMember("timestamp_ns", rapidjson::Value(book_data.timestamp_ns), allocator);
     doc.AddMember("receipt_timestamp_ns", rapidjson::Value(book_data.receipt_timestamp_ns), allocator);
-    doc.AddMember("best_bid_price", rapidjson::Value(book_data.best_bid_price), allocator);
-    doc.AddMember("best_bid_size", rapidjson::Value(book_data.best_bid_size), allocator);
-    doc.AddMember("best_ask_price", rapidjson::Value(book_data.best_ask_price), allocator);
-    doc.AddMember("best_ask_size", rapidjson::Value(book_data.best_ask_size), allocator);
+    doc.AddMember("best_bid_price", rapidjson::Value(static_cast<double>(book_data.best_bid_price)), allocator);
+    doc.AddMember("best_bid_size", rapidjson::Value(static_cast<double>(book_data.best_bid_size)), allocator);
+    doc.AddMember("best_ask_price", rapidjson::Value(static_cast<double>(book_data.best_ask_price)), allocator);
+    doc.AddMember("best_ask_size", rapidjson::Value(static_cast<double>(book_data.best_ask_size)), allocator);
     doc.AddMember("midpoint", rapidjson::Value(book_data.midpoint), allocator);
     doc.AddMember("relative_spread", rapidjson::Value(book_data.relative_spread), allocator);
     doc.AddMember("breadth", rapidjson::Value(book_data.breadth), allocator);
@@ -1733,36 +1803,36 @@ std::vector<std::string> TradingEngineService::getSymbolsFromConfig() const {
     }
     
     // Comprehensive Bybit trading pairs - organized by market cap and liquidity
-    return {
-        // Tier 1: Major cryptocurrencies (highest liquidity)
-        "BTC-USDT", "ETH-USDT", "BNB-USDT", "XRP-USDT", "SOL-USDT", "ADA-USDT", "DOGE-USDT", "AVAX-USDT",
-        "DOT-USDT", "MATIC-USDT", "LTC-USDT", "LINK-USDT", "UNI-USDT", "ATOM-USDT", "BCH-USDT", "ALGO-USDT",
+    return { "ETH-USDT"};
+    //     // Tier 1: Major cryptocurrencies (highest liquidity)
+    //     "BTC-USDT", "ETH-USDT", "BNB-USDT", "XRP-USDT", "SOL-USDT", "ADA-USDT", "DOGE-USDT", "AVAX-USDT",
+    //     "DOT-USDT", "MATIC-USDT", "LTC-USDT", "LINK-USDT", "UNI-USDT", "ATOM-USDT", "BCH-USDT", "ALGO-USDT",
         
-        // Tier 2: Popular altcoins
-        "FIL-USDT", "ICP-USDT", "ETC-USDT", "XLM-USDT", "VET-USDT", "MANA-USDT", "SAND-USDT", "CRO-USDT",
-        "LUNA-USDT", "SFP-USDT", "SHIB-USDT", "GALA-USDT", "ENJ-USDT", "CHZ-USDT", "THETA-USDT", "AXS-USDT",
+    //     // Tier 2: Popular altcoins
+    //     "FIL-USDT", "ICP-USDT", "ETC-USDT", "XLM-USDT", "VET-USDT", "MANA-USDT", "SAND-USDT", "CRO-USDT",
+    //     "LUNA-USDT", "SFP-USDT", "SHIB-USDT", "GALA-USDT", "ENJ-USDT", "CHZ-USDT", "THETA-USDT", "AXS-USDT",
         
-        // Tier 3: Mid-cap tokens
-        "FTM-USDT", "NEAR-USDT", "HBAR-USDT", "FLOW-USDT", "EGLD-USDT", "XTZ-USDT", "KLAY-USDT",
-        "RUNE-USDT", "WAVES-USDT", "ZIL-USDT", "BAT-USDT", "ZEC-USDT", "DASH-USDT", "NEO-USDT", "QTUM-USDT",
+    //     // Tier 3: Mid-cap tokens
+    //     "FTM-USDT", "NEAR-USDT", "HBAR-USDT", "FLOW-USDT", "EGLD-USDT", "XTZ-USDT", "KLAY-USDT",
+    //     "RUNE-USDT", "WAVES-USDT", "ZIL-USDT", "BAT-USDT", "ZEC-USDT", "DASH-USDT", "NEO-USDT", "QTUM-USDT",
         
-        // Tier 4: DeFi tokens
-        "AAVE-USDT", "COMP-USDT", "MKR-USDT", "SNX-USDT", "YFI-USDT", "SUSHI-USDT", "1INCH-USDT", "CRV-USDT",
-        "BAL-USDT", "REN-USDT", "KNC-USDT", "LRC-USDT", "ZRX-USDT", "BAND-USDT", "RSR-USDT", "STORJ-USDT",
+    //     // Tier 4: DeFi tokens
+    //     "AAVE-USDT", "COMP-USDT", "MKR-USDT", "SNX-USDT", "YFI-USDT", "SUSHI-USDT", "1INCH-USDT", "CRV-USDT",
+    //     "BAL-USDT", "REN-USDT", "KNC-USDT", "LRC-USDT", "ZRX-USDT", "BAND-USDT", "RSR-USDT", "STORJ-USDT",
         
-        // Tier 5: Gaming and NFT tokens
-        "IMX-USDT", "GMT-USDT", "GST-USDT", "APE-USDT", "LOOKS-USDT", "DYDX-USDT", "GMX-USDT",
-        "MAGIC-USDT", "TRX-USDT", "JST-USDT", "WIN-USDT", "BTT-USDT", "SUN-USDT", "ALICE-USDT",
+    //     // Tier 5: Gaming and NFT tokens
+    //     "IMX-USDT", "GMT-USDT", "GST-USDT", "APE-USDT", "LOOKS-USDT", "DYDX-USDT", "GMX-USDT",
+    //     "MAGIC-USDT", "TRX-USDT", "JST-USDT", "WIN-USDT", "BTT-USDT", "SUN-USDT", "ALICE-USDT",
         
-        // Tier 6: Layer 2 and scaling solutions
-        "ARB-USDT", "OP-USDT", "METIS-USDT", "BOBA-USDT", "LPT-USDT", "STRK-USDT", "MINA-USDT", "ROSE-USDT",
+    //     // Tier 6: Layer 2 and scaling solutions
+    //     "ARB-USDT", "OP-USDT", "METIS-USDT", "BOBA-USDT", "LPT-USDT", "STRK-USDT", "MINA-USDT", "ROSE-USDT",
         
-        // Tier 7: Meme coins and community tokens
-        "PEPE-USDT", "FLOKI-USDT", "BABYDOGE-USDT", "ELON-USDT", "AKITA-USDT", "KISHU-USDT", "SAFEMOON-USDT",
+    //     // Tier 7: Meme coins and community tokens
+    //     "PEPE-USDT", "FLOKI-USDT", "BABYDOGE-USDT", "ELON-USDT", "AKITA-USDT", "KISHU-USDT", "SAFEMOON-USDT",
         
-        // Tier 8: Stablecoins and wrapped assets
-        "USDC-USDT", "DAI-USDT", "TUSD-USDT", "BUSD-USDT", "WBTC-USDT", "WETH-USDT", "STETH-USDT"
-    };
+    //     // Tier 8: Stablecoins and wrapped assets
+    //     "USDC-USDT", "DAI-USDT", "TUSD-USDT", "BUSD-USDT", "WBTC-USDT", "WETH-USDT", "STETH-USDT"
+    // };
 }
 
 /**
