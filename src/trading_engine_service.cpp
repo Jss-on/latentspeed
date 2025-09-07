@@ -45,6 +45,8 @@ TradingEngineService::TradingEngineService()
     , fill_probability_(0.9)                          // High fill probability for testing
     , slippage_bps_(1.0)                             // 1 bps slippage
     , depth_levels_(5)                                // Number of levels for depth_n calculation
+    , sndhwm_(1000)                                   // ZMQ send high water mark
+    , linger_ms_(0)                                   // ZMQ linger timeout
 {
     // Configure basic CCAPI session options for better WebSocket connectivity
     ccapi_session_options_.enableCheckHeartbeatFix = true;
@@ -448,11 +450,12 @@ void TradingEngineService::trade_processor_thread() {
  * @brief Handle orderbook messages from CCAPI
  */
 void TradingEngineService::handle_orderbook_message(const ccapi::Message& message, const std::string& exchange, const std::string& symbol, uint64_t timestamp_ns) {
-    OrderBookData book_data;
-    book_data.exchange = exchange;
-    book_data.symbol = symbol;
-    book_data.timestamp_ns = timestamp_ns;
-    book_data.receipt_timestamp_ns = get_current_time_ns();
+    try {
+        OrderBookData book_data;
+        book_data.exchange = exchange;
+        book_data.symbol = symbol;
+        book_data.timestamp_ns = timestamp_ns;
+        book_data.receipt_timestamp_ns = get_current_time_ns();
     
     // Parse market depth from CCAPI message
     const auto& elementList = message.getElementList();
@@ -577,17 +580,23 @@ void TradingEngineService::handle_orderbook_message(const ccapi::Message& messag
             process_orderbook_data(book_data);
         }
     }
+    } catch (const std::out_of_range& e) {
+        spdlog::error("[OrderbookHandler] Map access error for {}-{}: {}", exchange, symbol, e.what());
+    } catch (const std::exception& e) {
+        spdlog::error("[OrderbookHandler] Error processing orderbook for {}-{}: {}", exchange, symbol, e.what());
+    }
 }
 
 /**
  * @brief Handle trade messages from CCAPI
  */
 void TradingEngineService::handle_trade_message(const ccapi::Message& message, const std::string& exchange, const std::string& symbol, uint64_t timestamp_ns) {
-    TradeData trade_data;
-    trade_data.exchange = exchange;
-    trade_data.symbol = symbol;
-    trade_data.timestamp_ns = timestamp_ns;
-    trade_data.receipt_timestamp_ns = get_current_time_ns();
+    try {
+        TradeData trade_data;
+        trade_data.exchange = exchange;
+        trade_data.symbol = symbol;
+        trade_data.timestamp_ns = timestamp_ns;
+        trade_data.receipt_timestamp_ns = get_current_time_ns();
     
     // Initialize with default values to prevent garbage data
     trade_data.price = 0.0;
@@ -762,6 +771,11 @@ void TradingEngineService::handle_trade_message(const ccapi::Message& message, c
             
             process_trade_data(trade_data);
         }
+    }
+    } catch (const std::out_of_range& e) {
+        spdlog::error("[TradeHandler] Map access error for {}-{}: {}", exchange, symbol, e.what());
+    } catch (const std::exception& e) {
+        spdlog::error("[TradeHandler] Error processing trade for {}-{}: {}", exchange, symbol, e.what());
     }
 }
 
