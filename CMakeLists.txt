@@ -91,6 +91,7 @@ message(STATUS "Configured latentspeed_ccapi. CCAPI_COMPILE_DEFS=${CCAPI_COMPILE
 add_executable(trading_engine_service
   src/main.cpp
   src/trading_engine_service.cpp
+  src/symbol_fetcher.cpp
 )
 
 target_include_directories(trading_engine_service PRIVATE include)
@@ -101,6 +102,7 @@ if(LATENTSPEED_WITH_PYTHON)
   pybind11_add_module(latentspeed_py 
     src/python_bindings.cpp
     src/trading_engine_service.cpp
+    src/symbol_fetcher.cpp
   )
   
   target_include_directories(latentspeed_py PRIVATE include)

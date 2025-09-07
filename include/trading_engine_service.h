@@ -52,6 +52,9 @@
 // CCAPI includes
 #include "ccapi_cpp/ccapi_session.h"
 
+// Dynamic symbol fetching
+#include "symbol_fetcher.h"
+
 /**
  * @namespace latentspeed
  * @brief Main namespace for Latentspeed trading infrastructure
@@ -369,12 +372,6 @@ private:
     void simulate_order_execution(const ExecutionOrder& order);
     
     /**
-     * @brief Simplified simulation implementation
-     * @param order The order to simulate
-     */
-    void simulate_order_execution_simplified(const ExecutionOrder& order);
-    
-    /**
      * @brief Calculate realistic fill price for order execution
      * @param order The order being filled
      * @return Calculated execution price including slippage
@@ -448,6 +445,18 @@ private:
      * @return Vector of symbol names
      */
     std::vector<std::string> getSymbolsFromConfig() const;
+
+    /**
+     * @brief Get symbols dynamically from exchange APIs
+     * @param exchange_name Exchange to fetch symbols from
+     * @param top_n Number of top symbols to fetch (default: 500)
+     * @param quote_currency Preferred quote currency (default: "USDT")
+     * @return Vector of symbol names in normalized format
+     */
+    std::vector<std::string> getDynamicSymbolsFromExchange(
+        const std::string& exchange_name,
+        int top_n = 500,
+        const std::string& quote_currency = "USDT") const;
     
     /**
      * @brief Parse comma-separated string into vector
@@ -674,6 +683,11 @@ private:
     bool backtest_mode_;                                        ///< Always true in simplified version
     double fill_probability_;                                   ///< Order fill probability (0.0-1.0)
     double slippage_bps_;                                       ///< Additional execution slippage (basis points)
+    /// @}
+    
+    /// @name Dynamic Symbol Management  
+    /// @{
+    mutable std::unique_ptr<DynamicSymbolManager> symbol_manager_; ///< Dynamic symbol fetching manager
     /// @}
 };
 

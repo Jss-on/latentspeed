@@ -11,18 +11,20 @@
  */
 
 #include "trading_engine_service.h"
+#include "symbol_fetcher.h"
+#include <chrono>
+#include <iomanip>
+#include <sstream>
+#include <thread>
+#include <random>
+#include <algorithm>
+#include <cstdlib>
+#include <cstring>
+#include <iostream>
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/sinks/rotating_file_sink.h>
-#include <cstdlib>
-#include <sstream>
-#include <chrono>
-#include <thread>
-#include <mutex>
-#include <condition_variable>
-#include <queue>
 #include <unordered_set>
-#include <random>
 #include <rapidjson/document.h>
 #include <rapidjson/writer.h>
 #include <rapidjson/stringbuffer.h>
@@ -92,32 +94,52 @@ bool TradingEngineService::initialize() {
         // Create subscriptions for each exchange-symbol pair
         std::vector<std::string> exchanges = getExchangesFromConfig();
         std::vector<std::string> symbols = getSymbolsFromConfig();
-        
+
         // Validate exchange connectivity before proceeding
         spdlog::info("[TradingEngine] Validating connectivity to {} exchanges with {} symbols", 
                      exchanges.size(), symbols.size());
         
-        // if (!validateExchangeConnectivity(exchanges, symbols)) {
-        //     spdlog::error("[TradingEngine] Exchange connectivity validation failed");
-        //     return false;
-        // }
-        
-        spdlog::info("[TradingEngine] All exchange connections validated successfully");
+        spdlog::info("[TradingEngine] Starting market data subscriptions for {} exchanges and {} symbols", 
+                     exchanges.size(), symbols.size());
         
         for (const auto& exchange : exchanges) {
+            spdlog::info("[TradingEngine] Processing subscriptions for exchange: {}", exchange);
+            
             for (const auto& symbol : symbols) {
+                spdlog::debug("[TradingEngine] Processing symbol: {} on exchange: {}", symbol, exchange);
+                
                 // Convert symbol to exchange-specific format
                 std::string exchange_symbol = convert_symbol_for_exchange(symbol, exchange);
+                spdlog::debug("[TradingEngine] Symbol conversion: {} -> {} (exchange: {})", 
+                             symbol, exchange_symbol, exchange);
                 
-                // Market depth subscription
-                ccapi::Subscription depth_subscription(exchange, exchange_symbol, "MARKET_DEPTH");
-                ccapi_session_->subscribe(depth_subscription);
-                
-                // Trade data subscription  
-                ccapi::Subscription trade_subscription(exchange, exchange_symbol, "TRADE");
-                ccapi_session_->subscribe(trade_subscription);
+                try {
+                    // Market depth subscription
+                    ccapi::Subscription depth_subscription(exchange, exchange_symbol, "MARKET_DEPTH");
+                    ccapi_session_->subscribe(depth_subscription);
+                    spdlog::info("[TradingEngine] ✓ Subscribed to MARKET_DEPTH for {}-{}", 
+                                exchange, exchange_symbol);
+                    
+                    // Trade data subscription  
+                    ccapi::Subscription trade_subscription(exchange, exchange_symbol, "TRADE");
+                    ccapi_session_->subscribe(trade_subscription);
+                    spdlog::info("[TradingEngine] ✓ Subscribed to TRADE for {}-{}", 
+                                exchange, exchange_symbol);
+                    
+                    // Small delay between subscriptions to avoid overwhelming exchanges
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                    
+                } catch (const std::exception& e) {
+                    spdlog::error("[TradingEngine] ✗ Failed to subscribe to {}-{}: {}", 
+                                 exchange, exchange_symbol, e.what());
+                }
             }
+            
+            spdlog::info("[TradingEngine] Completed subscriptions for exchange: {}", exchange);
         }
+        
+        spdlog::info("[TradingEngine] Market data subscription setup completed. Total subscriptions attempted: {}", 
+                     exchanges.size() * symbols.size() * 2);
         
         spdlog::info("[TradingEngine] Enhanced initialization complete");
         spdlog::info("[TradingEngine] Order endpoint: {}", order_endpoint_);
@@ -236,6 +258,17 @@ void TradingEngineService::start_market_data_subscriptions() {
         // Create subscriptions for each exchange-symbol pair
         std::vector<std::string> exchanges = getExchangesFromConfig();
         std::vector<std::string> symbols = getSymbolsFromConfig();
+        
+        // Log symbols in a readable format
+        if (!symbols.empty()) {
+            std::ostringstream oss;
+            for (size_t i = 0; i < std::min(symbols.size(), size_t(10)); ++i) {
+                if (i > 0) oss << ", ";
+                oss << symbols[i];
+            }
+            if (symbols.size() > 10) oss << " ...";
+            spdlog::info("[TradingEngine] Loaded {} symbols: {}", symbols.size(), oss.str());
+        }
         
         spdlog::info("[TradingEngine] Starting subscriptions for {} exchanges and {} symbols", exchanges.size(), symbols.size());
         
@@ -442,11 +475,12 @@ void TradingEngineService::handle_orderbook_message(const ccapi::Message& messag
             }
             
             // Parse Bybit format with maximum precision preservation
-            if (nameValueMap.find("BID_PRICE") != nameValueMap.end() &&
-                nameValueMap.find("BID_SIZE") != nameValueMap.end()) {
+            auto bid_price_it = nameValueMap.find("BID_PRICE");
+            auto bid_size_it = nameValueMap.find("BID_SIZE");
+            if (bid_price_it != nameValueMap.end() && bid_size_it != nameValueMap.end()) {
                 try {
-                    std::string price_str = std::string(nameValueMap.at("BID_PRICE"));
-                    std::string size_str = std::string(nameValueMap.at("BID_SIZE"));
+                    std::string price_str = std::string(bid_price_it->second);
+                    std::string size_str = std::string(bid_size_it->second);
                     long double price = std::stold(price_str);
                     long double size = std::stold(size_str);
                     if (price > 0 && size > 0) {
@@ -463,11 +497,12 @@ void TradingEngineService::handle_orderbook_message(const ccapi::Message& messag
                 }
             }
             
-            if (nameValueMap.find("ASK_PRICE") != nameValueMap.end() &&
-                nameValueMap.find("ASK_SIZE") != nameValueMap.end()) {
+            auto ask_price_it = nameValueMap.find("ASK_PRICE");
+            auto ask_size_it = nameValueMap.find("ASK_SIZE");
+            if (ask_price_it != nameValueMap.end() && ask_size_it != nameValueMap.end()) {
                 try {
-                    std::string price_str = std::string(nameValueMap.at("ASK_PRICE"));
-                    std::string size_str = std::string(nameValueMap.at("ASK_SIZE"));
+                    std::string price_str = std::string(ask_price_it->second);
+                    std::string size_str = std::string(ask_size_it->second);
                     long double price = std::stold(price_str);
                     long double size = std::stold(size_str);
                     if (price > 0 && size > 0) {
@@ -587,9 +622,10 @@ void TradingEngineService::handle_trade_message(const ccapi::Message& message, c
             // Price field variations
             std::vector<std::string> price_fields = {"PRICE", "LAST_PRICE", "TRADE_PRICE", "p", "price"};
             for (const auto& field : price_fields) {
-                if (nameValueMap.find(field) != nameValueMap.end()) {
+                auto field_it = nameValueMap.find(field);
+                if (field_it != nameValueMap.end()) {
                     try {
-                        trade_data.price = std::stod(std::string(nameValueMap.at(field)));
+                        trade_data.price = std::stod(std::string(field_it->second));
                         trade_data.transaction_price = trade_data.price;
                         price_found = true;
                         spdlog::info("[CCAPI-DEBUG] Found price in field '{}': {}", field, trade_data.price);
@@ -606,9 +642,10 @@ void TradingEngineService::handle_trade_message(const ccapi::Message& message, c
                 "QTY", "VOLUME", "vol", "v", "amount", "baseQty", "quoteQty"
             };
             for (const auto& field : size_fields) {
-                if (nameValueMap.find(field) != nameValueMap.end()) {
+                auto field_it = nameValueMap.find(field);
+                if (field_it != nameValueMap.end()) {
                     try {
-                        std::string size_str = std::string(nameValueMap.at(field));
+                        std::string size_str = std::string(field_it->second);
                         if (!size_str.empty() && size_str != "0" && size_str != "null") {
                             trade_data.amount = std::stod(size_str);
                             size_found = true;
@@ -646,8 +683,9 @@ void TradingEngineService::handle_trade_message(const ccapi::Message& message, c
                 "transactionId", "txId", "tid", "T"
             };
             for (const auto& field : id_fields) {
-                if (nameValueMap.find(field) != nameValueMap.end()) {
-                    std::string id_str = std::string(nameValueMap.at(field));
+                auto field_it = nameValueMap.find(field);
+                if (field_it != nameValueMap.end()) {
+                    std::string id_str = std::string(field_it->second);
                     if (!id_str.empty() && id_str != "null" && id_str != "0") {
                         trade_data.trade_id = id_str;
                         spdlog::info("[CCAPI-DEBUG] Found trade ID in field '{}': {}", field, trade_data.trade_id);
@@ -666,8 +704,9 @@ void TradingEngineService::handle_trade_message(const ccapi::Message& message, c
             // Side field variations
             std::vector<std::string> side_fields = {"IS_BUYER_MAKER", "SIDE", "s", "side", "m"};
             for (const auto& field : side_fields) {
-                if (nameValueMap.find(field) != nameValueMap.end()) {
-                    std::string side_value = std::string(nameValueMap.at(field));
+                auto field_it = nameValueMap.find(field);
+                if (field_it != nameValueMap.end()) {
+                    std::string side_value = std::string(field_it->second);
                     if (field == "IS_BUYER_MAKER") {
                         trade_data.side = (side_value == "1" || side_value == "true") ? "sell" : "buy";
                     } else if (field == "SIDE") {
@@ -696,9 +735,10 @@ void TradingEngineService::handle_trade_message(const ccapi::Message& message, c
             if (trade_data.timestamp_ns == 0) {
                 std::vector<std::string> time_fields = {"TIME", "TIMESTAMP", "t", "ts", "time", "timestamp", "T"};
                 for (const auto& field : time_fields) {
-                    if (nameValueMap.find(field) != nameValueMap.end()) {
+                    auto field_it = nameValueMap.find(field);
+                    if (field_it != nameValueMap.end()) {
                         try {
-                            std::string time_str = std::string(nameValueMap.at(field));
+                            std::string time_str = std::string(field_it->second);
                             // Convert to nanoseconds (assume input is milliseconds)
                             trade_data.timestamp_ns = std::stoll(time_str) * 1000000;
                             spdlog::info("[CCAPI-DEBUG] Found timestamp in field '{}': {}", field, trade_data.timestamp_ns);
@@ -984,7 +1024,7 @@ void TradingEngineService::process_execution_order(const ExecutionOrder& order) 
             if (order.venue_type == "cex") {
                 if (order.product_type == "spot" || order.product_type == "perpetual") {
                     // In simplified version, just simulate the order directly
-                    simulate_order_execution_simplified(order);
+                    spdlog::info("running execution");
                 }
             } else {
                 spdlog::warn("[TradingEngine] Non-CEX orders not supported in simplified mode: {}", 
@@ -1045,57 +1085,6 @@ void TradingEngineService::process_execution_order(const ExecutionOrder& order) 
     }
 }
 
-/**
- * @brief Handle CEX orders in simplified mode
- * @param order The original ExecutionOrder
- * 
- * Simulates CEX order execution in simplified mode:
- * 1. Validates order parameters (symbol, side, type, etc.)
- * 2. Simulates execution using market data
- * 3. Generates ExecutionReport and Fill messages
- * 
- * Simplified version of CEX order handling that focuses on
- * basic order simulation without actual exchange interactions.
- */
-void TradingEngineService::simulate_order_execution_simplified(const ExecutionOrder& order) {
-    try {
-        // Check if we're in backtest mode - if so, simulate execution
-        if (backtest_mode_) {
-            // Validate required order fields exist before accessing
-            if (order.details.find("symbol") == order.details.end() ||
-                order.details.find("side") == order.details.end() ||
-                order.details.find("size") == order.details.end()) {
-                throw std::runtime_error("Missing required order fields (symbol, side, or size)");
-            }
-            
-            // Get order details from the map - now safe to use .at()
-            std::string symbol = order.details.at("symbol");
-            std::string side = order.details.at("side");
-            double size = std::stod(order.details.at("size"));
-            std::string price_str = order.details.count("price") ? order.details.at("price") : "market";
-            
-            spdlog::info("[TradingEngine] Simulating CEX order: {} {} {} @ {}", 
-                         symbol, side, size, price_str);
-            
-            // Simulate order execution
-            double fill_price = calculate_fill_price(order);
-            double fill_size = size;
-            generate_fill_from_market_data(order, fill_price, fill_size);
-        }
-        
-    } catch (const std::exception& e) {
-        // Send rejection report
-        ExecutionReport report;
-        report.version = 1;
-        report.cl_id = order.cl_id;
-        report.status = "rejected";
-        report.reason_code = "network_error";
-        report.reason_text = std::string("Simulation error: ") + e.what();
-        report.ts_ns = get_current_time_ns();
-        
-        publish_execution_report(report);
-    }
-}
 
 /**
  * @brief Calculate realistic fill price for order execution
@@ -1114,14 +1103,18 @@ void TradingEngineService::simulate_order_execution_simplified(const ExecutionOr
 double TradingEngineService::calculate_fill_price(const ExecutionOrder& order) {
     double base_price;
     
-    if (order.details.count("order_type") && order.details.find("order_type") != order.details.end() && order.details.at("order_type") == "market") {
+    auto order_type_it = order.details.find("order_type");
+    if (order_type_it != order.details.end() && order_type_it->second == "market") {
         // Market orders get filled at best available price
         base_price = 50000.0;  // Default mid price
-    } else if (order.details.count("order_type") && order.details.find("order_type") != order.details.end() && 
-               order.details.at("order_type") == "limit" && order.details.count("price") && 
-               order.details.find("price") != order.details.end()) {
-        // Limit orders get filled at limit price or better
-        base_price = std::stod(order.details.at("price"));
+    } else if (order_type_it != order.details.end() && order_type_it->second == "limit") {
+        auto price_it = order.details.find("price");
+        if (price_it != order.details.end()) {
+            // Limit orders get filled at limit price or better
+            base_price = std::stod(price_it->second);
+        } else {
+            base_price = 50000.0;
+        }
     } else {
         base_price = 50000.0;
     }
@@ -1130,8 +1123,9 @@ double TradingEngineService::calculate_fill_price(const ExecutionOrder& order) {
     double slippage_factor = slippage_bps_ / 10000.0;  // Convert bps to decimal
     
     // Safely check for side field before accessing
-    if (order.details.find("side") != order.details.end()) {
-        if (order.details.at("side") == "buy") {
+    auto side_it = order.details.find("side");
+    if (side_it != order.details.end()) {
+        if (side_it->second == "buy") {
             base_price *= (1.0 + slippage_factor);
         } else {
             base_price *= (1.0 - slippage_factor);
@@ -1178,7 +1172,13 @@ void TradingEngineService::generate_fill_from_market_data(const ExecutionOrder& 
     fill.exec_id = generate_exec_id();
     
     // Extract symbol from order details based on type
-    fill.symbol_or_pair = order.details.at("symbol");
+    auto symbol_it = order.details.find("symbol");
+    if (symbol_it != order.details.end()) {
+        fill.symbol_or_pair = symbol_it->second;
+    } else {
+        spdlog::error("[TradingEngine] Missing symbol in order details");
+        fill.symbol_or_pair = "UNKNOWN";
+    }
     
     fill.price = fill_price;
     fill.size = fill_size;
@@ -1696,16 +1696,24 @@ void TradingEngineService::process_orderbook_data(const OrderBookData& book_data
         processed_book.preprocessing_timestamp = std::to_string(get_current_time_ns());
         processed_book.receipt_timestamp_ns = get_current_time_ns();
         
-        // Update rolling statistics
+        // Update rolling statistics with thread safety
         std::string symbol_key = processed_book.exchange + ":" + processed_book.symbol;
-        if (symbol_stats_.find(symbol_key) == symbol_stats_.end()) {
-            symbol_stats_[symbol_key] = FastRollingStats(20);
-        }
         
-        auto& stats = symbol_stats_[symbol_key];
-        auto book_result = stats.update_book(processed_book.midpoint, 
-                                           processed_book.best_bid_price, processed_book.best_bid_size,
-                                           processed_book.best_ask_price, processed_book.best_ask_size);
+        FastRollingStats::BookRollResult book_result;
+        {
+            std::lock_guard<std::mutex> stats_lock(trade_data_mutex_);
+            
+            // Safe access to symbol stats - create if doesn't exist
+            auto stats_it = symbol_stats_.find(symbol_key);
+            if (stats_it == symbol_stats_.end()) {
+                symbol_stats_[symbol_key] = FastRollingStats();
+                stats_it = symbol_stats_.find(symbol_key);
+            }
+            
+            book_result = stats_it->second.update_book(processed_book.midpoint, 
+                                               processed_book.best_bid_price, processed_book.best_bid_size,
+                                               processed_book.best_ask_price, processed_book.best_ask_size);
+        }
         
         // Add rolling statistics to processed data
         processed_book.volatility_mid = book_result.volatility_mid;
@@ -1737,14 +1745,22 @@ void TradingEngineService::process_trade_data(const TradeData& trade_data) {
         processed_trade.preprocessing_timestamp = std::to_string(get_current_time_ns());
         processed_trade.receipt_timestamp_ns = get_current_time_ns();
         
-        // Update rolling statistics
+        // Update rolling statistics with thread safety
         std::string symbol_key = processed_trade.exchange + ":" + processed_trade.symbol;
-        if (symbol_stats_.find(symbol_key) == symbol_stats_.end()) {
-            symbol_stats_[symbol_key] = FastRollingStats(20);
-        }
         
-        auto& stats = symbol_stats_[symbol_key];
-        auto trade_result = stats.update_trade(processed_trade.transaction_price);
+        FastRollingStats::TradeRollResult trade_result;
+        {
+            std::lock_guard<std::mutex> stats_lock(trade_data_mutex_);
+            
+            // Safe access to symbol stats - create if doesn't exist
+            auto stats_it = symbol_stats_.find(symbol_key);
+            if (stats_it == symbol_stats_.end()) {
+                symbol_stats_[symbol_key] = FastRollingStats();
+                stats_it = symbol_stats_.find(symbol_key);
+            }
+            
+            trade_result = stats_it->second.update_trade(processed_trade.transaction_price);
+        }
         
         // Add rolling statistics to processed data
         processed_trade.volatility_transaction_price = trade_result.volatility_transaction_price;
@@ -1769,7 +1785,15 @@ void TradingEngineService::process_trade_data(const TradeData& trade_data) {
  */
 int TradingEngineService::get_next_sequence(const std::string& partition_id) {
     std::lock_guard<std::mutex> lock(trade_data_mutex_);
-    return ++sequence_numbers_[partition_id];
+    
+    // Safe access to sequence numbers - initialize to 0 if doesn't exist
+    auto seq_it = sequence_numbers_.find(partition_id);
+    if (seq_it == sequence_numbers_.end()) {
+        sequence_numbers_[partition_id] = 0;
+        seq_it = sequence_numbers_.find(partition_id);
+    }
+    
+    return ++seq_it->second;
 }
 
 /**
@@ -1794,45 +1818,79 @@ std::vector<std::string> TradingEngineService::getExchangesFromConfig() const {
  * @return Vector of symbol names
  */
 std::vector<std::string> TradingEngineService::getSymbolsFromConfig() const {
-    const char* env_symbols = std::getenv("SYMBOLS");
-    if (env_symbols) {
-        std::string symbols_str(env_symbols);
-        if (!symbols_str.empty()) {
-            return parseCommaSeparated(symbols_str);
+    // Try to get symbols dynamically from exchanges first
+    std::vector<std::string> exchanges = getExchangesFromConfig();
+    if (!exchanges.empty()) {
+        try {
+            // Get top 500 symbols dynamically from the first exchange
+            auto dynamic_symbols = getDynamicSymbolsFromExchange(exchanges[0], 10, "USDT");
+            if (!dynamic_symbols.empty()) {
+                spdlog::info("[TradingEngine] Using {} dynamic symbols from {}", 
+                           dynamic_symbols.size(), exchanges[0]);
+                return dynamic_symbols;
+            }
+        } catch (const std::exception& e) {
+            spdlog::warn("[TradingEngine] Failed to fetch dynamic symbols, falling back to static: {}", e.what());
         }
     }
+    // Fallback to static symbols
+    spdlog::info("[TradingEngine] Using static symbol list as fallback");
+    return { "ETH-USDT", "BTC-USDT", "1INCH-USDT", "AAVE-USDT", "COMP-USDT", "CRV-USDT", "SUSHI-USDT", "YFI-USDT",
+    "UMA-USDT", "BAL-USDT", "MKR-USDT", "SNX-USDT", "ALPHA-USDT", "CREAM-USDT"
+    };
+}
+
+/**
+ * @brief Get symbols dynamically from exchange APIs
+ */
+std::vector<std::string> TradingEngineService::getDynamicSymbolsFromExchange(
+    const std::string& exchange_name,
+    int top_n,
+    const std::string& quote_currency) const {
     
-    // Comprehensive Bybit trading pairs - organized by market cap and liquidity
-    return { "ETH-USDT"};
-    //     // Tier 1: Major cryptocurrencies (highest liquidity)
-    //     "BTC-USDT", "ETH-USDT", "BNB-USDT", "XRP-USDT", "SOL-USDT", "ADA-USDT", "DOGE-USDT", "AVAX-USDT",
-    //     "DOT-USDT", "MATIC-USDT", "LTC-USDT", "LINK-USDT", "UNI-USDT", "ATOM-USDT", "BCH-USDT", "ALGO-USDT",
+    // Initialize symbol manager if not already done
+    if (!symbol_manager_) {
+        symbol_manager_ = std::make_unique<DynamicSymbolManager>();
+    }
+    
+    // Configure fetcher
+    FetcherConfig config;
+    config.top_n = top_n;
+    config.quote_currency = quote_currency;
+    config.include_leveraged = false;  // Exclude leveraged tokens by default
+    config.min_turnover = 0.0;         // No minimum turnover
+    config.timeout = std::chrono::seconds{30};
+    
+    try {
+        auto symbols = symbol_manager_->fetch_symbols_for_exchange(exchange_name, config);
         
-    //     // Tier 2: Popular altcoins
-    //     "FIL-USDT", "ICP-USDT", "ETC-USDT", "XLM-USDT", "VET-USDT", "MANA-USDT", "SAND-USDT", "CRO-USDT",
-    //     "LUNA-USDT", "SFP-USDT", "SHIB-USDT", "GALA-USDT", "ENJ-USDT", "CHZ-USDT", "THETA-USDT", "AXS-USDT",
+        if (symbols.empty()) {
+            spdlog::warn("[TradingEngine] No symbols fetched from {}", exchange_name);
+            return {};
+        }
         
-    //     // Tier 3: Mid-cap tokens
-    //     "FTM-USDT", "NEAR-USDT", "HBAR-USDT", "FLOW-USDT", "EGLD-USDT", "XTZ-USDT", "KLAY-USDT",
-    //     "RUNE-USDT", "WAVES-USDT", "ZIL-USDT", "BAT-USDT", "ZEC-USDT", "DASH-USDT", "NEO-USDT", "QTUM-USDT",
+        spdlog::info("[TradingEngine] Fetched {} symbols from {} (top {} {})", 
+                    symbols.size(), exchange_name, top_n, quote_currency);
         
-    //     // Tier 4: DeFi tokens
-    //     "AAVE-USDT", "COMP-USDT", "MKR-USDT", "SNX-USDT", "YFI-USDT", "SUSHI-USDT", "1INCH-USDT", "CRV-USDT",
-    //     "BAL-USDT", "REN-USDT", "KNC-USDT", "LRC-USDT", "ZRX-USDT", "BAND-USDT", "RSR-USDT", "STORJ-USDT",
+        // Log first few symbols for debugging
+        if (symbols.size() >= 10) {
+            std::ostringstream oss;
+            for (size_t i = 0; i < 10; ++i) {
+                if (i > 0) oss << ", ";
+                oss << symbols[i];
+            }
+            if (symbols.size() > 10) {
+                oss << " ...";
+            }
+            spdlog::info("[TradingEngine] Sample symbols: {}", oss.str());
+        }
         
-    //     // Tier 5: Gaming and NFT tokens
-    //     "IMX-USDT", "GMT-USDT", "GST-USDT", "APE-USDT", "LOOKS-USDT", "DYDX-USDT", "GMX-USDT",
-    //     "MAGIC-USDT", "TRX-USDT", "JST-USDT", "WIN-USDT", "BTT-USDT", "SUN-USDT", "ALICE-USDT",
+        return symbols;
         
-    //     // Tier 6: Layer 2 and scaling solutions
-    //     "ARB-USDT", "OP-USDT", "METIS-USDT", "BOBA-USDT", "LPT-USDT", "STRK-USDT", "MINA-USDT", "ROSE-USDT",
-        
-    //     // Tier 7: Meme coins and community tokens
-    //     "PEPE-USDT", "FLOKI-USDT", "BABYDOGE-USDT", "ELON-USDT", "AKITA-USDT", "KISHU-USDT", "SAFEMOON-USDT",
-        
-    //     // Tier 8: Stablecoins and wrapped assets
-    //     "USDC-USDT", "DAI-USDT", "TUSD-USDT", "BUSD-USDT", "WBTC-USDT", "WETH-USDT", "STETH-USDT"
-    // };
+    } catch (const std::exception& e) {
+        spdlog::error("[TradingEngine] Failed to fetch symbols from {}: {}", exchange_name, e.what());
+        return {};
+    }
 }
 
 /**
@@ -1857,96 +1915,6 @@ std::vector<std::string> TradingEngineService::parseCommaSeparated(const std::st
     
     return result;
 }
-
-/**
- * @brief Validate exchange connectivity before starting subscriptions
- * @param exchanges List of exchanges to validate
- * @param symbols List of symbols to validate
- * @return true if all exchanges are reachable, false otherwise
- */
-bool TradingEngineService::validateExchangeConnectivity(const std::vector<std::string>& exchanges, 
-                                                       const std::vector<std::string>& symbols) {
-    if (exchanges.empty() || symbols.empty()) {
-        spdlog::error("[ConnectivityCheck] No exchanges or symbols configured");
-        return false;
-    }
-    
-    bool all_connections_valid = true;
-    int total_tests = 0;
-    int successful_tests = 0;
-    
-    // Test connectivity for each exchange with the first symbol
-    std::string test_symbol = symbols[0]; // Use first symbol for testing
-    
-    for (const auto& exchange : exchanges) {
-        total_tests++;
-        spdlog::info("[ConnectivityCheck] Testing connection to {} with symbol {}", exchange, test_symbol);
-        
-        if (testExchangeConnection(exchange, test_symbol)) {
-            successful_tests++;
-            spdlog::info("[ConnectivityCheck] {} connection successful", exchange);
-        } else {
-            all_connections_valid = false;
-            spdlog::error("[ConnectivityCheck] {} connection failed", exchange);
-        }
-    }
-    
-    spdlog::info("[ConnectivityCheck] Connection validation complete: {}/{} exchanges successful", 
-                 successful_tests, total_tests);
-    
-    return all_connections_valid;
-}
-
-/**
- * @brief Test connection to a specific exchange
- * @param exchange Exchange name to test
- * @param symbol Symbol to test with
- * @return true if connection successful, false otherwise
- */
-bool TradingEngineService::testExchangeConnection(const std::string& exchange, const std::string& symbol) {
-    try {
-        // For now, implement a simplified connectivity test
-        // This avoids complex CCAPI session management during validation
-        
-        // Basic exchange name validation
-        std::string normalized_exchange = exchange;
-        std::transform(normalized_exchange.begin(), normalized_exchange.end(), 
-                      normalized_exchange.begin(), ::tolower);
-        
-        // Check if exchange is in our supported list
-        std::vector<std::string> supported_exchanges = {"bybit"};
-        bool exchange_supported = std::find(supported_exchanges.begin(), 
-                                           supported_exchanges.end(), 
-                                           normalized_exchange) != supported_exchanges.end();
-        
-        if (!exchange_supported) {
-            spdlog::warn("[ConnectivityCheck] Exchange {} not in supported list", exchange);
-            return false;
-        }
-        
-        // Basic symbol validation
-        if (symbol.empty() || symbol.find('-') == std::string::npos) {
-            spdlog::warn("[ConnectivityCheck] Invalid symbol format: {}", symbol);
-            return false;
-        }
-        
-        // Simulate connection test delay
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        
-        // For now, assume connection is successful if exchange is supported
-        // Real connectivity testing would require proper CCAPI session setup
-        spdlog::debug("[ConnectivityCheck] Simulated connection test for {} passed", exchange);
-        return true;
-        
-    } catch (const std::exception& e) {
-        spdlog::error("[ConnectivityCheck] Exception testing {} connection: {}", exchange, e.what());
-        return false;
-    }
-}
-
-} // namespace latentspeed
-
-namespace latentspeed {
 
 /**
  * @brief FastRollingStats constructor
