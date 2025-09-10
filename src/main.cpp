@@ -1,8 +1,8 @@
 /**
  * @file main.cpp
  * @brief Main entry point for the Latentspeed Trading Engine Service
- * @author Latentspeed Trading Team
- * @date 2024
+ * @author Jession Diwangan
+ * @date 2025
  * 
  * This file contains the main function and service lifecycle management
  * for the trading engine. It handles:
@@ -130,8 +130,6 @@ int main(int argc, char* argv[]) {
         spdlog::info("[Main] Trading engine started successfully");
         spdlog::info("[Main] Listening for orders on tcp://127.0.0.1:5601");
         spdlog::info("[Main] Publishing reports on tcp://127.0.0.1:5602");
-        spdlog::info("[Main] Publishing trade data on tcp://127.0.0.1:5556 (preprocessed_trades)");
-        spdlog::info("[Main] Publishing orderbook data on tcp://127.0.0.1:5557 (preprocessed_book)");
         spdlog::info("[Main] Press Ctrl+C to stop");
 
         // Main loop - keep the service running
