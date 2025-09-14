@@ -1,13 +1,14 @@
 /**
  * @file trading_engine_service.cpp
- * @brief Simplified implementation focused on Python example integration
+ * @brief Live trading engine service with CCAPI integration
  * @author jessiondiwangan@gmail.com
  * @date 2025
  * 
- * SIMPLIFIED VERSION - Only includes functionality needed for:
- * - Basic ZeroMQ order communication  
- * - CEX order handling in backtest mode
- * - Integration with Python run_exec_example.py
+ * LIVE TRADING VERSION - Includes functionality for:
+ * - Real exchange connectivity via CCAPI
+ * - Live order placement and management
+ * - Real-time execution reports and fills
+ * - Integration with Python strategies
  */
 
 #include "trading_engine_service.h"
@@ -30,18 +31,26 @@
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/error/en.h>
 
+// CCAPI includes
+#include "ccapi_cpp/ccapi_session.h"
+
+// Required CCAPI logger initialization
+namespace ccapi {
+    Logger* Logger::logger = nullptr;
+}
+
 namespace latentspeed {
 
 /**
- * @brief Simplified constructor - focuses only on essential order processing
+ * @brief Live trading constructor - sets up CCAPI and exchange connectivity
  */
 TradingEngineService::TradingEngineService()
     : running_(false)
     , order_endpoint_("tcp://127.0.0.1:5601")        // Contract-specified endpoint
     , report_endpoint_("tcp://127.0.0.1:5602")       // Contract-specified endpoint
 {
-    spdlog::info("[TradingEngine] Simplified trading engine initialized");
-    spdlog::info("[TradingEngine] Mode: Order processing only");
+    spdlog::info("[TradingEngine] Live trading engine initialized");
+    spdlog::info("[TradingEngine] Mode: Live exchange connectivity");
 }
 
 TradingEngineService::~TradingEngineService() {
@@ -49,24 +58,75 @@ TradingEngineService::~TradingEngineService() {
 }
 
 /**
- * @brief Simplified initialization for order processing only
+ * @brief Initialize live trading engine with CCAPI
  */
 bool TradingEngineService::initialize() {
     try {
+        spdlog::info("[TradingEngine] Starting initialization...");
+        
         // Initialize ZeroMQ context
+        spdlog::info("[TradingEngine] Creating ZeroMQ context...");
         zmq_context_ = std::make_unique<zmq::context_t>(1);
+        spdlog::info("[TradingEngine] ZeroMQ context created successfully");
         
         // Order receiver socket (PULL - receives ExecutionOrders from Python)
+        spdlog::info("[TradingEngine] Creating order receiver socket...");
         order_receiver_socket_ = std::make_unique<zmq::socket_t>(*zmq_context_, ZMQ_PULL);
         order_receiver_socket_->bind(order_endpoint_);
+        spdlog::info("[TradingEngine] Order receiver socket bound to {}", order_endpoint_);
         
         // Report publisher socket (PUB - sends ExecutionReports and Fills to Python)
+        spdlog::info("[TradingEngine] Creating report publisher socket...");
         report_publisher_socket_ = std::make_unique<zmq::socket_t>(*zmq_context_, ZMQ_PUB);
         report_publisher_socket_->bind(report_endpoint_);
+        spdlog::info("[TradingEngine] Report publisher socket bound to {}", report_endpoint_);
         
-        spdlog::info("[TradingEngine] Simplified initialization complete");
+        // Initialize CCAPI session with Bybit demo configuration
+        spdlog::info("[TradingEngine] Initializing CCAPI session options and configs...");
+        ::ccapi::SessionOptions sessionOptions;
+        ::ccapi::SessionConfigs sessionConfigs;
+        spdlog::info("[TradingEngine] CCAPI session options and configs created");
+        
+        // Configure Bybit demo credentials (arkpad-test account)
+        spdlog::info("[TradingEngine] Setting environment variables for Bybit demo credentials...");
+        // CCAPI reads credentials from environment variables
+        setenv("BYBIT_API_KEY", "xgI7ixEhDcOZ5Sr0Sb", 1);
+        setenv("BYBIT_API_SECRET", "JHi232e3CHDbRRZuYe0EnbLYdYtTi7NF9n82", 1);
+        spdlog::info("[TradingEngine] Environment credentials set successfully");
+        
+        // Configure Bybit demo endpoints  
+        spdlog::info("[TradingEngine] Setting CCAPI demo URLs...");
+        sessionConfigs.setUrlRestBase({
+            {"bybit", "https://api-demo.bybit.com"}
+        });
+        sessionConfigs.setUrlWebsocketBase({
+            {"bybit", "wss://stream-demo.bybit.com"}
+        });
+        spdlog::info("[TradingEngine] CCAPI demo URLs configured");
+        
+        spdlog::info("[TradingEngine] Creating CCAPI session...");
+        try {
+            ccapi_session_ = std::make_unique<::ccapi::Session>(sessionOptions, sessionConfigs, this);
+            spdlog::info("[TradingEngine] CCAPI session created successfully");
+            
+            // Subscribe to Bybit execution management events (order updates, fills)
+            spdlog::info("[TradingEngine] Setting up Bybit execution management subscription...");
+            ::ccapi::Subscription subscription("bybit", "", "ORDER_UPDATE");
+            ccapi_session_->subscribe(subscription);
+            spdlog::info("[TradingEngine] Subscribed to Bybit ORDER_UPDATE events");
+            
+        } catch (const std::exception& e) {
+            spdlog::error("[TradingEngine] CCAPI session creation failed: {}", e.what());
+            throw;
+        }
+        
+        spdlog::info("[TradingEngine] CCAPI initialized for Bybit demo environment");
+        spdlog::info("[TradingEngine] Subscribed to Bybit execution management events");
+        
+        spdlog::info("[TradingEngine] Live trading initialization complete");
         spdlog::info("[TradingEngine] Order endpoint: {}", order_endpoint_);
         spdlog::info("[TradingEngine] Report endpoint: {}", report_endpoint_);
+        spdlog::info("[TradingEngine] CCAPI session initialized");
         
         return true;
     } catch (const std::exception& e) {
@@ -90,7 +150,7 @@ void TradingEngineService::start() {
     order_receiver_thread_ = std::make_unique<std::thread>(&TradingEngineService::zmq_order_receiver_thread, this);
     publisher_thread_ = std::make_unique<std::thread>(&TradingEngineService::zmq_publisher_thread, this);
     
-    spdlog::info("[TradingEngine] Simplified service started (order processing only)");
+    spdlog::info("[TradingEngine] Live trading service started");
 }
 
 void TradingEngineService::stop() {
@@ -115,7 +175,7 @@ void TradingEngineService::stop() {
         publisher_thread_->join();
     }
     
-    spdlog::info("[TradingEngine] Simplified service stopped");
+    spdlog::info("[TradingEngine] Live trading service stopped");
 }
 
 // ZeroMQ Communication Threads
@@ -225,19 +285,14 @@ void TradingEngineService::zmq_publisher_thread() {
 }
 
 /**
- * @brief Main order processing dispatcher
+ * @brief Main order processing dispatcher for live trading
  * @param order The ExecutionOrder to process
  * 
  * Central routing logic that:
  * 1. Validates order structure and required fields
  * 2. Checks for duplicate orders (idempotency protection)
- * 3. Routes orders to appropriate venue-specific handlers based on:
- *    - venue_type (cex, dex, chain)
- *    - action (place, cancel, replace)
- *    - product_type (spot, perpetual, swap, transfer)
+ * 3. Routes orders to appropriate exchange via CCAPI
  * 4. Handles errors and generates appropriate ExecutionReports
- * 
- * This is the main entry point for all order processing logic.
  */
 void TradingEngineService::process_execution_order(const ExecutionOrder& order) {
     try {
@@ -260,178 +315,360 @@ void TradingEngineService::process_execution_order(const ExecutionOrder& order) 
         if (order.action == "place") {
             if (order.venue_type == "cex") {
                 if (order.product_type == "spot" || order.product_type == "perpetual") {
-                    // In simplified version, just simulate the order directly
-                    spdlog::info("running execution");
+                    place_cex_order(order);
+                } else {
+                    send_rejection_report(order, "unsupported_product", 
+                                        "Product type not supported: " + order.product_type);
                 }
             } else {
-                spdlog::warn("[TradingEngine] Non-CEX orders not supported in simplified mode: {}", 
-                             order.venue_type);
-                
-                // Send rejection report
-                ExecutionReport report;
-                report.version = 1;
-                report.cl_id = order.cl_id;
-                report.status = "rejected";
-                report.reason_code = "unsupported_venue";
-                report.reason_text = "Only CEX orders supported in simplified mode";
-                report.ts_ns = get_current_time_ns();
-                
-                publish_execution_report(report);
+                send_rejection_report(order, "unsupported_venue", 
+                                    "Only CEX orders supported currently: " + order.venue_type);
             }
         } else if (order.action == "cancel") {
-            spdlog::warn("[TradingEngine] Cancel orders not implemented in simplified mode");
-            
-            // Send rejection report
-            ExecutionReport report;
-            report.version = 1;
-            report.cl_id = order.cl_id;
-            report.status = "rejected";
-            report.reason_code = "unsupported_action";
-            report.reason_text = "Cancel orders not supported in simplified mode";
-            report.ts_ns = get_current_time_ns();
-            
-            publish_execution_report(report);
+            cancel_cex_order(order);
+        } else if (order.action == "replace") {
+            replace_cex_order(order);
         } else {
-            spdlog::warn("[TradingEngine] Unknown action: {}", order.action);
-            
-            // Send rejection report
-            ExecutionReport report;
-            report.version = 1;
-            report.cl_id = order.cl_id;
-            report.status = "rejected";
-            report.reason_code = "invalid_action";
-            report.reason_text = "Unknown action: " + order.action;
-            report.ts_ns = get_current_time_ns();
-            
-            publish_execution_report(report);
+            send_rejection_report(order, "invalid_action", "Unknown action: " + order.action);
         }
         
     } catch (const std::exception& e) {
-        // Send rejection report
-        ExecutionReport report;
-        report.version = 1;
-        report.cl_id = order.cl_id;
-        report.status = "rejected";
-        report.reason_code = "invalid_params";
-        report.reason_text = std::string("Processing error: ") + e.what();
-        report.ts_ns = get_current_time_ns();
-        
-        publish_execution_report(report);
-        
+        send_rejection_report(order, "processing_error", 
+                            std::string("Processing error: ") + e.what());
         spdlog::error("[TradingEngine] Order processing error: {}", e.what());
     }
 }
 
 /**
- * @brief Calculate realistic fill price for order execution
- * @param order The order being filled
- * @return Calculated execution price including slippage
- * 
- * Price calculation that accounts for:
- * 1. Order type (market orders get best available price)
- * 2. Limit order price improvement when possible
- * 3. Realistic slippage based on order size and liquidity
- * 4. Configurable additional slippage for conservative simulation
- * 
- * Ensures backtest fills use realistic prices that would
- * occur in actual market conditions.
+ * @brief Place CEX order via CCAPI
+ * @param order The ExecutionOrder to place
  */
-double TradingEngineService::calculate_fill_price(const ExecutionOrder& order) {
-    double base_price;
-    
-    auto order_type_it = order.details.find("order_type");
-    if (order_type_it != order.details.end() && order_type_it->second == "market") {
-        // Market orders get filled at best available price
-        base_price = 50000.0;  // Default mid price
-    } else if (order_type_it != order.details.end() && order_type_it->second == "limit") {
-        auto price_it = order.details.find("price");
-        if (price_it != order.details.end()) {
-            // Limit orders get filled at limit price or better
-            base_price = std::stod(price_it->second);
-        } else {
-            base_price = 50000.0;
+void TradingEngineService::place_cex_order(const ExecutionOrder& order) {
+    try {
+        // Extract order parameters first
+        auto symbol_it = order.details.find("symbol");
+        auto side_it = order.details.find("side");
+        auto size_it = order.details.find("size");
+        auto order_type_it = order.details.find("order_type");
+        
+        if (symbol_it == order.details.end() || side_it == order.details.end() ||
+            size_it == order.details.end() || order_type_it == order.details.end()) {
+            send_rejection_report(order, "missing_parameters", 
+                                "Missing required order parameters");
+            return;
         }
-    } else {
-        base_price = 50000.0;
-    }
-    
-    // Add realistic slippage
-    double slippage_factor = slippage_bps_ / 10000.0;  // Convert bps to decimal
-    
-    // Safely check for side field before accessing
-    auto side_it = order.details.find("side");
-    if (side_it != order.details.end()) {
-        if (side_it->second == "buy") {
-            base_price *= (1.0 + slippage_factor);
-        } else {
-            base_price *= (1.0 - slippage_factor);
+        
+        // Create CCAPI request with proper instrument parameter (symbol, not cl_id)
+        ::ccapi::Request request(::ccapi::Request::Operation::CREATE_ORDER, order.venue, symbol_it->second);
+        
+        // Set Bybit-specific order parameters
+        request.appendParam({
+            {"SIDE", side_it->second == "buy" ? "Buy" : "Sell"},
+            {"QUANTITY", size_it->second}
+        });
+        
+        // Add order type and price
+        if (order_type_it->second == "limit") {
+            auto price_it = order.details.find("price");
+            if (price_it == order.details.end()) {
+                send_rejection_report(order, "missing_price", 
+                                    "Price required for limit orders");
+                return;
+            }
+            request.appendParam({
+                {"LIMIT_PRICE", price_it->second},
+                {"ORDER_TYPE", "Limit"}
+            });
+        } else if (order_type_it->second == "market") {
+            request.appendParam({{"ORDER_TYPE", "Market"}});
         }
-    } else {
-        // Default to buy-side slippage if side is not specified
-        spdlog::warn("[TradingEngine] Order missing 'side' field, defaulting to buy-side slippage");
-        base_price *= (1.0 + slippage_factor);
+        
+        // Set client order ID for tracking
+        request.appendParam({{"CLIENT_ORDER_ID", order.cl_id}});
+        
+        // Add category for Bybit (required for v5 API)
+        if (order.product_type == "perpetual") {
+            request.appendParam({{"category", "linear"}});
+        } else if (order.product_type == "spot") {
+            request.appendParam({{"category", "spot"}});
+        }
+        
+        // Add optional time in force
+        auto tif_it = order.details.find("time_in_force");
+        if (tif_it != order.details.end()) {
+            request.appendParam({{"TIME_IN_FORCE", tif_it->second}});
+        } else {
+            request.appendParam({{"TIME_IN_FORCE", "GTC"}});  // Default to GTC
+        }
+        
+        ccapi_session_->sendRequest(request);
+        
+        spdlog::info("[TradingEngine] Sent {} {} order to {}: {} {} @ {}", 
+                     order_type_it->second, side_it->second, order.venue,
+                     size_it->second, symbol_it->second, 
+                     order_type_it->second == "limit" ? order.details.at("price") : "market");
+        
+    } catch (const std::exception& e) {
+        send_rejection_report(order, "ccapi_error", 
+                            std::string("CCAPI error: ") + e.what());
+        spdlog::error("[TradingEngine] CCAPI order placement error: {}", e.what());
     }
-    
-    return base_price;
 }
 
 /**
- * @brief Generate fill report from market data
- * @param order The original ExecutionOrder
- * @param fill_price Calculated fill price
- * @param fill_size Calculated fill size
- * 
- * Generates Fill report based on simulated execution:
- * 1. Extracts symbol from order details
- * 2. Calculates fill price and size
- * 3. Generates Fill message with execution details
- * 
- * Used to simulate realistic fills in backtest mode.
+ * @brief Cancel CEX order via CCAPI
+ * @param order The cancel order request
  */
-void TradingEngineService::generate_fill_from_market_data(const ExecutionOrder& order, double fill_price, double fill_size) {
-    // First generate acceptance report
-    ExecutionReport acceptance_report;
-    acceptance_report.version = 1;
-    acceptance_report.cl_id = order.cl_id;
-    acceptance_report.status = "accepted";
-    acceptance_report.reason_code = "ok";
-    acceptance_report.reason_text = "Order accepted in backtest simulation";
-    acceptance_report.ts_ns = get_current_time_ns();
-    acceptance_report.tags = order.tags;
-    acceptance_report.tags["execution_type"] = "simulated";
+void TradingEngineService::cancel_cex_order(const ExecutionOrder& order) {
+    try {
+        ::ccapi::Request request(::ccapi::Request::Operation::CANCEL_ORDER, order.venue, order.cl_id);
+        
+        // Get order to cancel
+        auto cl_id_it = order.details.find("cl_id_to_cancel");
+        auto exchange_id_it = order.details.find("exchange_order_id");
+        
+        if (cl_id_it != order.details.end()) {
+            request.appendParam({{"CCAPI_EM_CLIENT_ORDER_ID", cl_id_it->second}});
+        } else if (exchange_id_it != order.details.end()) {
+            request.appendParam({{"CCAPI_EM_ORDER_ID", exchange_id_it->second}});
+        } else {
+            send_rejection_report(order, "missing_cancel_id", 
+                                "Cancel orders require cl_id_to_cancel or exchange_order_id");
+            return;
+        }
+        
+        // Add symbol if provided
+        auto symbol_it = order.details.find("symbol");
+        if (symbol_it != order.details.end()) {
+            request.appendParam({{"CCAPI_EM_ORDER_INSTRUMENT", symbol_it->second}});
+        }
+        
+        ccapi_session_->sendRequest(request);
+        
+        spdlog::info("[TradingEngine] Sent cancel request to {}: {}", 
+                     order.venue, cl_id_it != order.details.end() ? 
+                     cl_id_it->second : exchange_id_it->second);
+        
+    } catch (const std::exception& e) {
+        send_rejection_report(order, "ccapi_error", 
+                            std::string("CCAPI cancel error: ") + e.what());
+        spdlog::error("[TradingEngine] CCAPI cancel error: {}", e.what());
+    }
+}
+
+/**
+ * @brief Replace/modify CEX order via CCAPI
+ * @param order The replace order request
+ */
+void TradingEngineService::replace_cex_order(const ExecutionOrder& order) {
+    try {
+        // CCAPI doesn't have REPLACE_ORDER, so we create a new order to replace the old one
+        ::ccapi::Request request(::ccapi::Request::Operation::CREATE_ORDER, order.venue, order.cl_id);
+        
+        // Get order to replace
+        auto cl_id_it = order.details.find("cl_id_to_replace");
+        if (cl_id_it == order.details.end()) {
+            send_rejection_report(order, "missing_replace_id", 
+                                "Replace orders require cl_id_to_replace");
+            return;
+        }
+        
+        request.appendParam({{"CCAPI_EM_CLIENT_ORDER_ID", cl_id_it->second}});
+        
+        // Add new parameters
+        auto new_price_it = order.details.find("new_price");
+        auto new_size_it = order.details.find("new_size");
+        
+        if (new_price_it != order.details.end()) {
+            request.appendParam({{"CCAPI_EM_ORDER_LIMIT_PRICE", new_price_it->second}});
+        }
+        
+        if (new_size_it != order.details.end()) {
+            request.appendParam({{"CCAPI_EM_ORDER_QUANTITY", new_size_it->second}});
+        }
+        
+        ccapi_session_->sendRequest(request);
+        
+        spdlog::info("[TradingEngine] Sent replace request to {}: {}", 
+                     order.venue, cl_id_it->second);
+        
+    } catch (const std::exception& e) {
+        send_rejection_report(order, "ccapi_error", 
+                            std::string("CCAPI replace error: ") + e.what());
+        spdlog::error("[TradingEngine] CCAPI replace error: {}", e.what());
+    }
+}
+
+/**
+ * @brief Send rejection report for failed orders
+ */
+void TradingEngineService::send_rejection_report(const ExecutionOrder& order, 
+                                               const std::string& reason_code,
+                                               const std::string& reason_text) {
+    ExecutionReport report;
+    report.version = 1;
+    report.cl_id = order.cl_id;
+    report.status = "rejected";
+    report.reason_code = reason_code;
+    report.reason_text = reason_text;
+    report.ts_ns = get_current_time_ns();
+    report.tags = order.tags;
     
-    publish_execution_report(acceptance_report);
+    publish_execution_report(report);
+}
+
+/**
+ * @brief CCAPI event handler - processes exchange responses
+ */
+void TradingEngineService::processEvent(const ::ccapi::Event& event, ::ccapi::Session* sessionPtr) {
+    try {
+        if (event.getType() == ::ccapi::Event::Type::RESPONSE) {
+            for (const auto& message : event.getMessageList()) {
+                handle_ccapi_response(message);
+            }
+        } else if (event.getType() == ::ccapi::Event::Type::SUBSCRIPTION_DATA) {
+            for (const auto& message : event.getMessageList()) {
+                handle_ccapi_subscription_data(message);
+            }
+        }
+    } catch (const std::exception& e) {
+        spdlog::error("[TradingEngine] CCAPI event handler error: {}", e.what());
+    }
+}
+
+/**
+ * @brief Handle CCAPI response messages (order confirmations, etc.)
+ */
+void TradingEngineService::handle_ccapi_response(const ::ccapi::Message& message) {
+    // Extract correlation ID (client order ID)
+    auto correlation_ids = message.getCorrelationIdList();
+    std::string correlation_id = correlation_ids.empty() ? "" : correlation_ids[0];
     
-    // Generate fill report
-    Fill fill;
-    fill.cl_id = order.cl_id;
-    fill.exec_id = generate_exec_id();
-    
-    // Extract symbol from order details based on type
-    auto symbol_it = order.details.find("symbol");
-    if (symbol_it != order.details.end()) {
-        fill.symbol_or_pair = symbol_it->second;
-    } else {
-        spdlog::error("[TradingEngine] Missing symbol in order details");
-        fill.symbol_or_pair = "UNKNOWN";
+    // Find the original order
+    auto order_it = pending_orders_.find(correlation_id);
+    if (order_it == pending_orders_.end()) {
+        spdlog::warn("[TradingEngine] Received response for unknown order: {}", correlation_id);
+        return;
     }
     
-    fill.price = fill_price;
-    fill.size = fill_size;
-    fill.fee_currency = "USDT";
-    fill.fee_amount = fill_price * fill_size * 0.001;  // 0.1% fee
-    fill.liquidity = "taker";
-    fill.ts_ns = get_current_time_ns();
-    fill.tags = order.tags;
-    fill.tags["execution_type"] = "simulated";
+    const ExecutionOrder& original_order = order_it->second;
     
-    publish_fill(fill);
-    
-    // Remove from pending orders
-    pending_orders_.erase(order.cl_id);
-    
-    spdlog::info("[BacktestEngine] Simulated fill: {} symbol={} price={} size={}", 
-                 order.cl_id, fill.symbol_or_pair, fill_price, fill_size);
+    if (message.getType() == ::ccapi::Message::Type::CREATE_ORDER) {
+        // Order placement response
+        ExecutionReport report;
+        report.version = 1;
+        report.cl_id = correlation_id;
+        report.ts_ns = get_current_time_ns();
+        report.tags = original_order.tags;
+        
+        if (message.getRecapType() == ::ccapi::Message::RecapType::NONE) {
+            // Success
+            report.status = "accepted";
+            report.reason_code = "ok";
+            report.reason_text = "Order accepted by exchange";
+            
+            // Extract exchange order ID if available
+            auto elements = message.getElementList();
+            if (!elements.empty()) {
+                auto nameValueMap = elements[0].getNameValueMap();
+                auto order_id_it = nameValueMap.find("CCAPI_EM_ORDER_ID");
+                if (order_id_it != nameValueMap.end()) {
+                    report.exchange_order_id = order_id_it->second;
+                }
+            }
+        } else {
+            // Error
+            report.status = "rejected";
+            report.reason_code = "exchange_error";
+            report.reason_text = message.toString();
+        }
+        
+        publish_execution_report(report);
+        
+    } else if (message.getType() == ::ccapi::Message::Type::CANCEL_ORDER) {
+        // Order cancellation response
+        ExecutionReport report;
+        report.version = 1;
+        report.cl_id = correlation_id;
+        report.status = (message.getRecapType() == ::ccapi::Message::RecapType::NONE) ? 
+                       "canceled" : "cancel_rejected";
+        report.reason_code = (message.getRecapType() == ::ccapi::Message::RecapType::NONE) ? 
+                           "ok" : "exchange_error";
+        report.reason_text = (message.getRecapType() == ::ccapi::Message::RecapType::NONE) ? 
+                           "Order canceled by exchange" : message.toString();
+        report.ts_ns = get_current_time_ns();
+        report.tags = original_order.tags;
+        
+        publish_execution_report(report);
+    }
+}
+
+/**
+ * @brief Handle CCAPI subscription data (fills, order updates)
+ */
+void TradingEngineService::handle_ccapi_subscription_data(const ::ccapi::Message& message) {
+    // Check for execution management events (private trades/fills)
+    if (message.getType() == ::ccapi::Message::Type::EXECUTION_MANAGEMENT_EVENTS_PRIVATE_TRADE) {
+        for (const auto& element : message.getElementList()) {
+            // Convert element to map and handle as fill event
+            auto nameValueMap = element.getNameValueMap();
+            std::map<std::string, std::string> elementMap;
+            for (const auto& [key, value] : nameValueMap) {
+                elementMap.emplace(std::string(key), value);
+            }
+            handle_fill_event(elementMap, message);
+        }
+    }
+}
+
+/**
+ * @brief Handle fill events from exchange
+ */
+void TradingEngineService::handle_fill_event(const std::map<std::string, std::string>& element,
+                                           const ::ccapi::Message& message) {
+    try {
+        Fill fill;
+        fill.version = 1;
+        fill.ts_ns = get_current_time_ns();
+        
+        // Extract fill details
+        auto cl_id_it = element.find("CCAPI_EM_CLIENT_ORDER_ID");
+        auto exec_id_it = element.find("CCAPI_EM_EXECUTION_ID");
+        auto symbol_it = element.find("CCAPI_EM_ORDER_INSTRUMENT");
+        auto price_it = element.find("CCAPI_EM_LAST_EXECUTION_PRICE");
+        auto size_it = element.find("CCAPI_EM_LAST_EXECUTION_SIZE");
+        auto fee_it = element.find("CCAPI_EM_FEE_QUANTITY");
+        auto fee_currency_it = element.find("CCAPI_EM_FEE_CURRENCY");
+        
+        if (cl_id_it != element.end()) fill.cl_id = cl_id_it->second;
+        if (exec_id_it != element.end()) fill.exec_id = exec_id_it->second;
+        if (symbol_it != element.end()) fill.symbol_or_pair = symbol_it->second;
+        if (price_it != element.end()) fill.price = std::stod(price_it->second);
+        if (size_it != element.end()) fill.size = std::stod(size_it->second);
+        if (fee_it != element.end()) fill.fee_amount = std::stod(fee_it->second);
+        if (fee_currency_it != element.end()) fill.fee_currency = fee_currency_it->second;
+        
+        // Set liquidity type if available
+        auto liquidity_it = element.find("CCAPI_EM_IS_MAKER");
+        if (liquidity_it != element.end()) {
+            fill.liquidity = (liquidity_it->second == "1") ? "maker" : "taker";
+        }
+        
+        // Copy tags from original order if available
+        auto order_it = pending_orders_.find(fill.cl_id);
+        if (order_it != pending_orders_.end()) {
+            fill.tags = order_it->second.tags;
+        }
+        fill.tags["execution_type"] = "live";
+        
+        publish_fill(fill);
+        
+        spdlog::info("[TradingEngine] Fill received: {} {} @ {} (fee: {} {})", 
+                     fill.cl_id, fill.size, fill.price, fill.fee_amount, fill.fee_currency);
+        
+    } catch (const std::exception& e) {
+        spdlog::error("[TradingEngine] Error processing fill event: {}", e.what());
+    }
 }
 
 // Publishing methods

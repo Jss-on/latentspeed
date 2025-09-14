@@ -1,12 +1,13 @@
 /**
  * @file trading_engine_service.h
- * @brief Simplified trading engine service for Python integration
+ * @brief Live trading engine service with CCAPI integration
  * @author jessiondiwangan@gmail.com
  * @date 2025
  * 
- * SIMPLIFIED VERSION - This header defines only essential functionality:
- * - ZeroMQ-based order communication
- * - Order validation and acceptance
+ * LIVE TRADING VERSION - This header defines:
+ * - Real exchange connectivity via CCAPI
+ * - Live order placement and management
+ * - Real-time execution reports and fills
  * - Integration with Python strategies
  */
 
@@ -45,6 +46,9 @@
 #include <rapidjson/document.h>
 #include <rapidjson/writer.h>
 #include <rapidjson/stringbuffer.h>
+
+// CCAPI includes - need actual headers for inheritance
+#include "ccapi_cpp/ccapi_session.h"
 
 /**
  * @namespace latentspeed
@@ -113,18 +117,19 @@ struct Fill {
 
 /**
  * @class TradingEngineService
- * @brief Simplified trading engine for Python integration
+ * @brief Live trading engine with CCAPI integration
  * 
- * Essential functionality only:
- * - ZeroMQ order communication 
- * - Order validation and acceptance
- * - ExecutionReport and Fill generation
+ * Core functionality:
+ * - Real exchange connectivity via CCAPI
+ * - Live order placement, cancellation, and modification
+ * - Real-time execution reports and fills
+ * - ZeroMQ communication with Python strategies
  */
-class TradingEngineService {
+class TradingEngineService : public ccapi::EventHandler {
 public:
     /**
-     * @brief Simplified constructor
-     * Sets up ZeroMQ endpoints and backtest parameters.
+     * @brief Live trading constructor
+     * Sets up CCAPI session and ZeroMQ endpoints.
      */
     TradingEngineService();
     
@@ -134,16 +139,16 @@ public:
     ~TradingEngineService();
     
     /**
-     * @brief Initialize the trading engine
+     * @brief Initialize the live trading engine
      * @return true if initialization successful, false otherwise
      * 
-     * Sets up ZeroMQ sockets and prepares all components
-     * for operation. Must be called before start().
+     * Sets up CCAPI session, ZeroMQ sockets and prepares all components
+     * for live trading operation. Must be called before start().
      */
     bool initialize();
     
     /**
-     * @brief Start the trading engine service
+     * @brief Start the live trading engine service
      * 
      * Launches all worker threads for order processing and message publishing.
      * Non-blocking call.
@@ -151,7 +156,7 @@ public:
     void start();
     
     /**
-     * @brief Stop the trading engine service
+     * @brief Stop the live trading engine service
      * 
      * Gracefully shuts down all worker threads and cleans up resources.
      * Blocking call that waits for all threads to complete.
@@ -163,6 +168,9 @@ public:
      * @return true if service is running, false otherwise
      */
     bool is_running() const { return running_; }
+
+    // CCAPI EventHandler interface
+    void processEvent(const ccapi::Event& event, ccapi::Session* sessionPtr) override;
 
 private:
     /// @name ZeroMQ Communication Threads
@@ -190,24 +198,60 @@ private:
      * @brief Process an incoming execution order
      * @param order The ExecutionOrder to process
      * 
-     * Main order processing entry point. Routes orders based on venue_type.
+     * Main order processing entry point. Routes orders to CCAPI.
      */
     void process_execution_order(const ExecutionOrder& order);
     
     /**
-     * @brief Calculate realistic fill price for order execution
-     * @param order The order being filled
-     * @return Calculated execution price including slippage
+     * @brief Place CEX order via CCAPI
+     * @param order The ExecutionOrder to place
      */
-    double calculate_fill_price(const ExecutionOrder& order);
+    void place_cex_order(const ExecutionOrder& order);
     
     /**
-     * @brief Generate fill report from market data
-     * @param order The original ExecutionOrder
-     * @param fill_price Calculated fill price
-     * @param fill_size Calculated fill size
+     * @brief Cancel CEX order via CCAPI
+     * @param order The cancel order request
      */
-    void generate_fill_from_market_data(const ExecutionOrder& order, double fill_price, double fill_size);
+    void cancel_cex_order(const ExecutionOrder& order);
+    
+    /**
+     * @brief Replace/modify CEX order via CCAPI
+     * @param order The replace order request
+     */
+    void replace_cex_order(const ExecutionOrder& order);
+    
+    /**
+     * @brief Send rejection report for failed orders
+     * @param order The original order
+     * @param reason_code Error code
+     * @param reason_text Error description
+     */
+    void send_rejection_report(const ExecutionOrder& order, 
+                             const std::string& reason_code,
+                             const std::string& reason_text);
+    /// @}
+    
+    /// @name CCAPI Event Handlers
+    /// @{
+    /**
+     * @brief Handle CCAPI response messages (order confirmations, etc.)
+     * @param message The CCAPI message
+     */
+    void handle_ccapi_response(const ccapi::Message& message);
+    
+    /**
+     * @brief Handle CCAPI subscription data (fills, order updates)
+     * @param message The CCAPI message
+     */
+    void handle_ccapi_subscription_data(const ccapi::Message& message);
+    
+    /**
+     * @brief Handle fill events from exchange
+     * @param element Fill event data
+     * @param message Original CCAPI message
+     */
+    void handle_fill_event(const std::map<std::string, std::string>& element,
+                          const ccapi::Message& message);
     /// @}
     
     /// @name Message Publishing
@@ -288,6 +332,11 @@ private:
     void mark_order_processed(const std::string& cl_id);
     /// @}
     
+    /// @name CCAPI Components
+    /// @{
+    std::unique_ptr<ccapi::Session> ccapi_session_;                 ///< CCAPI session for exchange connectivity
+    /// @}
+    
     /// @name ZeroMQ Components
     /// @{
     std::unique_ptr<zmq::context_t> zmq_context_;               ///< ZeroMQ context for socket management
@@ -319,13 +368,6 @@ private:
     std::queue<std::string> publish_queue_;                     ///< Queue of messages to publish
     std::mutex publish_mutex_;                                  ///< Mutex protecting publish queue
     std::condition_variable publish_cv_;                        ///< Condition variable for publisher thread
-    /// @}
-    
-    /// @name Backtest Parameters
-    /// @{
-    bool backtest_mode_;                                        ///< Always true in simplified version
-    double fill_probability_;                                   ///< Order fill probability (0.0-1.0)
-    double slippage_bps_;                                       ///< Additional execution slippage (basis points)
     /// @}
 };
 

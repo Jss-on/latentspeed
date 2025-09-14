@@ -1,0 +1,20 @@
+{
+    "exchange": "bybit",
+    "environment": "demo",
+    "credentials": {
+        "api_key": "xgI7ixEhDcOZ5Sr0Sb",
+        "api_secret": "JHi232e3CHDbRRZuYe0EnbLYdYtTi7NF9n82",
+        "passphrase": ""
+    },
+    "endpoints": {
+        "rest_url": "https://api-demo.bybit.com",
+        "websocket_private": "wss://stream-demo.bybit.com",
+        "websocket_public": "wss://stream.bybit.com"
+    },
+    "trading_settings": {
+        "default_symbol": "BTCUSDT",
+        "default_order_type": "limit",
+        "min_order_size": "0.001",
+        "max_order_size": "10.0"
+    }
+}
