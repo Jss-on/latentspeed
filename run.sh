@@ -6,7 +6,7 @@
 
 # ---- defaults ----
 BUILD_TYPE="Debug"
-PRESET_NAME="wsl-debug"
+PRESET_NAME="linux-debug"
 CLEAN=""
 BUILD_DOCS=""
 
@@ -15,12 +15,12 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         --debug)
             BUILD_TYPE="Debug"
-            PRESET_NAME="wsl-debug"
+            PRESET_NAME="linux-debug"
             shift
             ;;
         --release)
             BUILD_TYPE="Release"
-            PRESET_NAME="wsl-release"
+            PRESET_NAME="linux-release"
             shift
             ;;
         --clean)

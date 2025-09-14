@@ -2,46 +2,42 @@
   "version": 3,
   "configurePresets": [
     {
-      "name": "wsl-debug",
-      "displayName": "WSL Debug (Ninja + vcpkg)",
+      "name": "linux-debug",
+      "displayName": "Linux Debug (Ninja + vcpkg)",
       "generator": "Ninja",
-      "binaryDir": "build/wsl-debug",
+      "binaryDir": "build/debug",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/external/vcpkg/scripts/buildsystems/vcpkg.cmake",
-        "VCPKG_INSTALLED_DIR": "${binaryDir}/vcpkg_installed",
         "VCPKG_TARGET_TRIPLET": "x64-linux",
-        "CCAPI_COMPILE_DEFS": "CCAPI_ENABLE_SERVICE_MARKET_DATA;CCAPI_ENABLE_EXCHANGE_OKX;CCAPI_ENABLE_EXCHANGE_BYBIT",
-        "CMAKE_CXX_FLAGS": "-Wno-deprecated-declarations -Wno-unused-parameter -Wno-sign-compare",
-        "LATENTSPEED_WITH_ZLIB": "OFF"
+        "VCPKG_INSTALLED_DIR": "${sourceDir}/build/debug/vcpkg_installed",
+        "CMAKE_CXX_FLAGS": "-Wno-deprecated-declarations -Wno-unused-parameter -Wno-sign-compare"
       }
     },
     {
-      "name": "wsl-release",
-      "displayName": "WSL Release (Ninja + vcpkg)",
+      "name": "linux-release",
+      "displayName": "Linux Release (Ninja + vcpkg)",
       "generator": "Ninja",
-      "binaryDir": "build/wsl-release",
+      "binaryDir": "build/release",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/external/vcpkg/scripts/buildsystems/vcpkg.cmake",
-        "VCPKG_INSTALLED_DIR": "${binaryDir}/vcpkg_installed",
         "VCPKG_TARGET_TRIPLET": "x64-linux",
-        "CCAPI_COMPILE_DEFS": "CCAPI_ENABLE_SERVICE_MARKET_DATA;CCAPI_ENABLE_EXCHANGE_OKX;CCAPI_ENABLE_EXCHANGE_BYBIT",
-        "CMAKE_CXX_FLAGS": "-Wno-deprecated-declarations -Wno-unused-parameter -Wno-sign-compare",
-        "LATENTSPEED_WITH_ZLIB": "OFF"
+        "VCPKG_INSTALLED_DIR": "${sourceDir}/build/release/vcpkg_installed",
+        "CMAKE_CXX_FLAGS": "-Wno-deprecated-declarations -Wno-unused-parameter -Wno-sign-compare"
       }
     }
   ],
   "buildPresets": [
     {
-      "name": "wsl-debug",
-      "displayName": "Build Debug (WSL)",
-      "configurePreset": "wsl-debug"
+      "name": "linux-debug",
+      "displayName": "Build Debug",
+      "configurePreset": "linux-debug"
     },
     {
-      "name": "wsl-release",
-      "displayName": "Build Release (WSL)",
-      "configurePreset": "wsl-release"
+      "name": "linux-release",
+      "displayName": "Build Release",
+      "configurePreset": "linux-release"
     }
   ],
   "testPresets": []

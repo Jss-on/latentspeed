@@ -116,7 +116,7 @@ int main(int argc, char* argv[]) {
 
     try {
         // Create and initialize trading engine
-        latentspeed::TradingEngineService trading_engine;
+        latentspeed::TradingEngineService trading_engine(latentspeed::CpuMode::NORMAL);
         g_trading_engine = &trading_engine;
 
         if (!trading_engine.initialize()) {

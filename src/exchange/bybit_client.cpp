@@ -161,7 +161,7 @@ OrderResponse BybitClient::place_order(const OrderRequest& request) {
         
     } catch (const std::exception& e) {
         spdlog::error("[BybitClient] Failed to place order: {}", e.what());
-        return OrderResponse{false, e.what()};
+        return OrderResponse{false, e.what(), std::nullopt, std::nullopt, std::nullopt, {}};
     }
 }
 
@@ -209,7 +209,7 @@ OrderResponse BybitClient::cancel_order(const std::string& client_order_id,
         
     } catch (const std::exception& e) {
         spdlog::error("[BybitClient] Failed to cancel order: {}", e.what());
-        return OrderResponse{false, e.what()};
+        return OrderResponse{false, e.what(), std::nullopt, std::nullopt, std::nullopt, {}};
     }
 }
 
@@ -261,7 +261,7 @@ OrderResponse BybitClient::modify_order(const std::string& client_order_id,
         
     } catch (const std::exception& e) {
         spdlog::error("[BybitClient] Failed to modify order: {}", e.what());
-        return OrderResponse{false, e.what()};
+        return OrderResponse{false, e.what(), std::nullopt, std::nullopt, std::nullopt, {}};
     }
 }
 
@@ -294,7 +294,7 @@ OrderResponse BybitClient::query_order(const std::string& client_order_id) {
         
     } catch (const std::exception& e) {
         spdlog::error("[BybitClient] Failed to query order: {}", e.what());
-        return OrderResponse{false, e.what()};
+        return OrderResponse{false, e.what(), std::nullopt, std::nullopt, std::nullopt, {}};
     }
 }
 
@@ -423,7 +423,7 @@ OrderResponse BybitClient::parse_order_response(const std::string& json_response
         doc.Parse(json_response.c_str());
         
         if (doc.HasParseError()) {
-            return OrderResponse{false, "Failed to parse JSON response"};
+            return OrderResponse{false, "Failed to parse JSON response", std::nullopt, std::nullopt, std::nullopt, {}};
         }
         
         OrderResponse response;
@@ -453,7 +453,7 @@ OrderResponse BybitClient::parse_order_response(const std::string& json_response
         return response;
         
     } catch (const std::exception& e) {
-        return OrderResponse{false, std::string("Parse error: ") + e.what()};
+        return OrderResponse{false, std::string("Parse error: ") + e.what(), std::nullopt, std::nullopt, std::nullopt, {}};
     }
 }
 

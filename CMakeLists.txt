@@ -3,9 +3,16 @@ cmake_minimum_required(VERSION 3.20)
 project(latentspeed VERSION 0.1.0 LANGUAGES CXX)
 
 # C++ standard
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_CXX_EXTENSIONS ON)
+
+# HFT Compiler optimizations
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -DNDEBUG -march=native -mtune=native")
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -flto -ffast-math -funroll-loops")
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -falign-functions=32 -falign-loops=32")
+endif()
 
 # Required packages
 find_package(OpenSSL REQUIRED)
@@ -26,6 +33,8 @@ add_executable(trading_engine_service
 )
 
 target_include_directories(trading_engine_service PRIVATE include)
+
+# HFT-optimized link libraries
 target_link_libraries(trading_engine_service PRIVATE 
   OpenSSL::SSL 
   OpenSSL::Crypto 
@@ -37,3 +46,35 @@ target_link_libraries(trading_engine_service PRIVATE
   spdlog::spdlog
 )
 
+# Linux-specific libraries for HFT features
+if(UNIX AND NOT APPLE)
+    target_link_libraries(trading_engine_service PRIVATE 
+        pthread  # POSIX threads for CPU affinity
+        rt       # Real-time extensions for scheduling
+    )
+    
+    # Enable HFT-specific compiler features on Linux
+    target_compile_definitions(trading_engine_service PRIVATE 
+        _GNU_SOURCE          # Enable GNU extensions for CPU affinity
+        HFT_LINUX_FEATURES   # Enable HFT Linux-specific code paths
+    )
+endif()
+
+# Compiler-specific optimizations for HFT
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    target_compile_options(trading_engine_service PRIVATE
+        -Wall -Wextra -Wpedantic
+        -Wno-unused-parameter 
+        -Wno-deprecated-declarations 
+        -Wno-sign-compare
+        $<$<CONFIG:Release>:-fno-stack-protector>  # Disable stack protection in release for max performance
+        $<$<CONFIG:Release>:-fno-asynchronous-unwind-tables>  # Reduce binary size
+    )
+endif()
+
+# Link-time optimizations for HFT release builds
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    set_target_properties(trading_engine_service PROPERTIES
+        INTERPROCEDURAL_OPTIMIZATION TRUE  # Enable LTO
+    )
+endif()

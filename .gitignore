@@ -1,5 +1,5 @@
 build
 vcpkg_installed
-sub
+# sub
 ssh_key
 .vscode
