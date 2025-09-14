@@ -47,8 +47,9 @@
 #include <rapidjson/writer.h>
 #include <rapidjson/stringbuffer.h>
 
-// CCAPI includes - need actual headers for inheritance
-#include "ccapi_cpp/ccapi_session.h"
+// Exchange client interface
+#include "exchange/exchange_client.h"
+#include "exchange/bybit_client.h"
 
 /**
  * @namespace latentspeed
@@ -117,15 +118,15 @@ struct Fill {
 
 /**
  * @class TradingEngineService
- * @brief Live trading engine with CCAPI integration
+ * @brief Live trading engine with direct exchange API integration
  * 
  * Core functionality:
- * - Real exchange connectivity via CCAPI
+ * - Direct exchange connectivity (no CCAPI dependency)
  * - Live order placement, cancellation, and modification
  * - Real-time execution reports and fills
  * - ZeroMQ communication with Python strategies
  */
-class TradingEngineService : public ccapi::EventHandler {
+class TradingEngineService {
 public:
     /**
      * @brief Live trading constructor
@@ -169,8 +170,10 @@ public:
      */
     bool is_running() const { return running_; }
 
-    // CCAPI EventHandler interface
-    void processEvent(const ccapi::Event& event, ccapi::Session* sessionPtr) override;
+    // Exchange client callbacks
+    void on_order_update(const OrderUpdate& update);
+    void on_fill(const FillData& fill);
+    void on_exchange_error(const std::string& error);
 
 private:
     /// @name ZeroMQ Communication Threads
@@ -231,28 +234,6 @@ private:
                              const std::string& reason_text);
     /// @}
     
-    /// @name CCAPI Event Handlers
-    /// @{
-    /**
-     * @brief Handle CCAPI response messages (order confirmations, etc.)
-     * @param message The CCAPI message
-     */
-    void handle_ccapi_response(const ccapi::Message& message);
-    
-    /**
-     * @brief Handle CCAPI subscription data (fills, order updates)
-     * @param message The CCAPI message
-     */
-    void handle_ccapi_subscription_data(const ccapi::Message& message);
-    
-    /**
-     * @brief Handle fill events from exchange
-     * @param element Fill event data
-     * @param message Original CCAPI message
-     */
-    void handle_fill_event(const std::map<std::string, std::string>& element,
-                          const ccapi::Message& message);
-    /// @}
     
     /// @name Message Publishing
     /// @{
@@ -332,9 +313,10 @@ private:
     void mark_order_processed(const std::string& cl_id);
     /// @}
     
-    /// @name CCAPI Components
+    /// @name Exchange Client Components
     /// @{
-    std::unique_ptr<ccapi::Session> ccapi_session_;                 ///< CCAPI session for exchange connectivity
+    std::map<std::string, std::unique_ptr<ExchangeClient>> exchange_clients_; ///< Exchange clients by name
+    std::unique_ptr<BybitClient> bybit_client_;                             ///< Bybit exchange client
     /// @}
     
     /// @name ZeroMQ Components

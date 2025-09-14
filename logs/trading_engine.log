@@ -1,0 +1,44 @@
+[2025-09-14 22:40:28.276667] [PID:88216] [TID:88216] [info] [:] [] === Latentspeed Trading Engine Service ===
+[2025-09-14 22:40:28.276761] [PID:88216] [TID:88216] [info] [:] [] Starting up...
+[2025-09-14 22:40:28.276767] [PID:88216] [TID:88216] [info] [:] [] [TradingEngine] Live trading engine initialized
+[2025-09-14 22:40:28.276796] [PID:88216] [TID:88216] [info] [:] [] [TradingEngine] Mode: Live exchange connectivity
+[2025-09-14 22:40:28.276820] [PID:88216] [TID:88216] [info] [:] [] [TradingEngine] Starting initialization...
+[2025-09-14 22:40:28.276844] [PID:88216] [TID:88216] [info] [:] [] [TradingEngine] Creating ZeroMQ context...
+[2025-09-14 22:40:28.279818] [PID:88216] [TID:88216] [info] [:] [] [TradingEngine] ZeroMQ context created successfully
+[2025-09-14 22:40:28.279859] [PID:88216] [TID:88216] [info] [:] [] [TradingEngine] Creating order receiver socket...
+[2025-09-14 22:40:28.281226] [PID:88216] [TID:88216] [info] [:] [] [TradingEngine] Order receiver socket bound to tcp://127.0.0.1:5601
+[2025-09-14 22:40:28.281274] [PID:88216] [TID:88216] [info] [:] [] [TradingEngine] Creating report publisher socket...
+[2025-09-14 22:40:28.281503] [PID:88216] [TID:88216] [info] [:] [] [TradingEngine] Report publisher socket bound to tcp://127.0.0.1:5602
+[2025-09-14 22:40:28.281533] [PID:88216] [TID:88216] [info] [:] [] [TradingEngine] Initializing Bybit client...
+[2025-09-14 22:40:28.283356] [PID:88216] [TID:88216] [info] [:] [] [BybitClient] Initialized for testnet environment
+[2025-09-14 22:40:28.283392] [PID:88216] [TID:88216] [info] [:] [] [TradingEngine] Bybit client initialized for demo environment
+[2025-09-14 22:40:28.283397] [PID:88216] [TID:88216] [info] [:] [] [TradingEngine] Callbacks configured
+[2025-09-14 22:40:28.291074] [PID:88216] [TID:88220] [error] [:] [] [BybitClient] WebSocket error: connect: Connection refused [system:111 at /home/tensor/latentspeed/build/wsl-release/vcpkg_installed/x64-linux/include/boost/asio/detail/reactive_socket_service.hpp:587 in function 'connect']
+[2025-09-14 22:40:28.291121] [PID:88216] [TID:88220] [info] [:] [] [BybitClient] Reconnecting WebSocket in 5 seconds...
+[2025-09-14 22:40:30.283637] [PID:88216] [TID:88216] [warning] [:] [] [BybitClient] REST connected but WebSocket connection pending
+[2025-09-14 22:40:30.283708] [PID:88216] [TID:88216] [info] [:] [] [TradingEngine] Connected to Bybit demo environment
+[2025-09-14 22:40:30.283714] [PID:88216] [TID:88216] [warning] [:] [] [BybitClient] WebSocket not connected, cannot subscribe
+[2025-09-14 22:40:30.283718] [PID:88216] [TID:88216] [warning] [:] [] [TradingEngine] Failed to subscribe to order updates
+[2025-09-14 22:40:30.283754] [PID:88216] [TID:88216] [info] [:] [] [TradingEngine] Live trading initialization complete
+[2025-09-14 22:40:30.283788] [PID:88216] [TID:88216] [info] [:] [] [TradingEngine] Order endpoint: tcp://127.0.0.1:5601
+[2025-09-14 22:40:30.283796] [PID:88216] [TID:88216] [info] [:] [] [TradingEngine] Report endpoint: tcp://127.0.0.1:5602
+[2025-09-14 22:40:30.283799] [PID:88216] [TID:88216] [info] [:] [] [TradingEngine] Exchange clients initialized
+[2025-09-14 22:40:30.283931] [PID:88216] [TID:88238] [info] [:] [] [TradingEngine] Order receiver thread started
+[2025-09-14 22:40:30.283956] [PID:88216] [TID:88216] [info] [:] [] [TradingEngine] Live trading service started
+[2025-09-14 22:40:30.283980] [PID:88216] [TID:88216] [info] [:] [] [Main] Trading engine started successfully
+[2025-09-14 22:40:30.283983] [PID:88216] [TID:88216] [info] [:] [] [Main] Listening for orders on tcp://127.0.0.1:5601
+[2025-09-14 22:40:30.283987] [PID:88216] [TID:88216] [info] [:] [] [Main] Publishing reports on tcp://127.0.0.1:5602
+[2025-09-14 22:40:30.283990] [PID:88216] [TID:88216] [info] [:] [] [Main] Press Ctrl+C to stop
+[2025-09-14 22:40:30.284004] [PID:88216] [TID:88239] [info] [:] [] [TradingEngine] Publisher thread started
+[2025-09-14 22:40:33.298939] [PID:88216] [TID:88220] [error] [:] [] [BybitClient] WebSocket error: connect: Connection refused [system:111 at /home/tensor/latentspeed/build/wsl-release/vcpkg_installed/x64-linux/include/boost/asio/detail/reactive_socket_service.hpp:587 in function 'connect']
+[2025-09-14 22:40:33.298966] [PID:88216] [TID:88220] [info] [:] [] [BybitClient] Reconnecting WebSocket in 5 seconds...
+[2025-09-14 22:40:34.046236] [PID:88216] [TID:88216] [info] [:] [] 
+[Main] Received signal 2, shutting down...
+[2025-09-14 22:40:34.046343] [PID:88216] [TID:88239] [info] [:] [] [TradingEngine] Publisher thread stopped
+[2025-09-14 22:40:34.047149] [PID:88216] [TID:88238] [info] [:] [] [TradingEngine] Order receiver thread stopped
+[2025-09-14 22:40:34.047280] [PID:88216] [TID:88216] [info] [:] [] [TradingEngine] Live trading service stopped
+[2025-09-14 22:40:34.285659] [PID:88216] [TID:88216] [info] [:] [] [Main] Trading engine stopped
+[2025-09-14 22:40:38.263563] [PID:88216] [TID:88216] [info] [:] [] 
+[Main] Received signal 2, shutting down...
+[2025-09-14 22:40:38.299329] [PID:88216] [TID:88216] [info] [:] [] [BybitClient] Disconnected from Bybit
+[2025-09-14 22:40:38.299557] [PID:88216] [TID:88216] [info] [:] [] [Main] Shutdown complete
