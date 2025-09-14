@@ -9,6 +9,7 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/external/vcpkg/scripts/buildsystems/vcpkg.cmake",
+        "VCPKG_INSTALLED_DIR": "${binaryDir}/vcpkg_installed",
         "VCPKG_TARGET_TRIPLET": "x64-linux",
         "CCAPI_COMPILE_DEFS": "CCAPI_ENABLE_SERVICE_MARKET_DATA;CCAPI_ENABLE_EXCHANGE_OKX;CCAPI_ENABLE_EXCHANGE_BYBIT",
         "CMAKE_CXX_FLAGS": "-Wno-deprecated-declarations -Wno-unused-parameter -Wno-sign-compare",
@@ -23,6 +24,7 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/external/vcpkg/scripts/buildsystems/vcpkg.cmake",
+        "VCPKG_INSTALLED_DIR": "${binaryDir}/vcpkg_installed",
         "VCPKG_TARGET_TRIPLET": "x64-linux",
         "CCAPI_COMPILE_DEFS": "CCAPI_ENABLE_SERVICE_MARKET_DATA;CCAPI_ENABLE_EXCHANGE_OKX;CCAPI_ENABLE_EXCHANGE_BYBIT",
         "CMAKE_CXX_FLAGS": "-Wno-deprecated-declarations -Wno-unused-parameter -Wno-sign-compare",

@@ -12,7 +12,6 @@
  */
 
 #include "trading_engine_service.h"
-#include "symbol_fetcher.h"
 #include <chrono>
 #include <iomanip>
 #include <sstream>

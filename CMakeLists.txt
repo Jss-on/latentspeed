@@ -21,7 +21,6 @@ pkg_check_modules(ZMQ REQUIRED libzmq)
 add_executable(trading_engine_service
   src/main.cpp
   src/trading_engine_service.cpp
-  src/symbol_fetcher.cpp
   src/exchange/exchange_client.cpp
   src/exchange/bybit_client.cpp
 )

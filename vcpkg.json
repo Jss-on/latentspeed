@@ -8,13 +8,7 @@
     "boost-beast",
     "rapidjson",
     "zeromq",
-    "spdlog",
-    "pybind11"
-  ],
-  "overrides": [
-    {
-      "name": "pybind11",
-      "version": "2.11.1"
-    }
+    "spdlog"
   ]
+  
 }
