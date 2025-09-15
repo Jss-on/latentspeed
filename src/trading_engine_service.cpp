@@ -836,7 +836,8 @@ void TradingEngineService::place_cex_order_hft(const HFTExecutionOrder& order) {
 }
 
 /**
- * @brief HFT-optimized order cancellation
+ * @brief HFT-optimized order closing (cancellation via opposite order)
+ * Instead of using exchange cancel API, places an opposite order to close the position
  */
 void TradingEngineService::cancel_cex_order_hft(const HFTExecutionOrder& order) {
     try {
@@ -847,29 +848,63 @@ void TradingEngineService::cancel_cex_order_hft(const HFTExecutionOrder& order) 
         }
         auto& client = client_it->second;
 
-        // Extract cancel target from tags
-        auto* cl_id_to_cancel = order.tags.find(FixedString<32>("cl_id_to_cancel"));
-        if (!cl_id_to_cancel) {
-            send_rejection_report_hft(order, "missing_cancel_id", "Missing cl_id_to_cancel");
+        // Extract original order details from tags for closing
+        auto* cl_id_to_close = order.tags.find(FixedString<32>("cl_id_to_cancel"));
+        auto* original_side = order.tags.find(FixedString<32>("original_side"));
+        auto* original_size = order.tags.find(FixedString<32>("original_size"));
+        auto* original_symbol = order.tags.find(FixedString<32>("original_symbol"));
+        
+        if (!cl_id_to_close || !original_side || !original_size || !original_symbol) {
+            send_rejection_report_hft(order, "missing_close_info", 
+                "Missing original order details (cl_id_to_cancel, original_side, original_size, original_symbol)");
             return;
         }
 
-        std::optional<std::string> symbol;
-        if (!order.symbol.empty()) {
-            symbol = std::string(order.symbol.view());
+        // Create opposite order to close position
+        OrderRequest close_req;
+        close_req.client_order_id = std::string(order.cl_id.view()) + "_close";
+        close_req.symbol = std::string(original_symbol->view());
+        
+        // Determine opposite side
+        std::string orig_side_str = std::string(original_side->view());
+        if (orig_side_str == "buy") {
+            close_req.side = "sell";
+        } else if (orig_side_str == "sell") {
+            close_req.side = "buy";
+        } else {
+            send_rejection_report_hft(order, "invalid_side", "Unknown original order side");
+            return;
+        }
+        
+        close_req.order_type = "market"; // Use market order for immediate execution
+        close_req.quantity = std::string(original_size->view());
+        
+        // Set category based on product type
+        if (order.product_type == std::string_view("perpetual")) {
+            close_req.category = "linear";
+        } else if (order.product_type == std::string_view("spot")) {
+            close_req.category = "spot";
         }
 
-        OrderResponse response = client->cancel_order(std::string(cl_id_to_cancel->view()), symbol);
+        // Place the closing order
+        OrderResponse response = client->place_order(close_req);
 
         if (response.success) {
-            send_acceptance_report_hft(order, std::nullopt, "Order cancelled");
+            // Send acceptance report indicating order was closed
+            send_acceptance_report_hft(order, response.exchange_order_id, 
+                "Order closed via opposite market order: " + close_req.client_order_id);
+            
+            // Log the closing action
+            spdlog::info("[HFT-Engine] Order {} closed via opposite {} order {} of size {}", 
+                cl_id_to_close->c_str(), close_req.side, close_req.client_order_id, close_req.quantity);
         } else {
-            send_rejection_report_hft(order, "cancel_rejected", response.message);
+            send_rejection_report_hft(order, "close_rejected", 
+                "Failed to place closing order: " + response.message);
         }
 
     } catch (const std::exception& e) {
         send_rejection_report_hft(order, "exchange_error", e.what());
-        spdlog::error("[HFT-Engine] Cancel error: {}", e.what());
+        spdlog::error("[HFT-Engine] Order closing error: {}", e.what());
     }
 }
 

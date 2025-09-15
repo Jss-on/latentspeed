@@ -24,6 +24,9 @@ find_package(RapidJSON REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(ZMQ REQUIRED libzmq)
 
+# Add subdirectories
+add_subdirectory(benchmark)
+
 # Trading Engine Service executable
 add_executable(trading_engine_service
   src/main.cpp

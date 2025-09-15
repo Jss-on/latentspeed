@@ -177,10 +177,18 @@ class OrderSender:
             logger.error(f"Failed to send order: {e}")
             return None
     
-    def send_cancel_order(self, cl_id_to_cancel: str, venue: str = "bybit") -> str:
-        """Send a cancel order request"""
+    def send_cancel_order(
+        self, 
+        cl_id_to_cancel: str, 
+        original_symbol: str,
+        original_side: str,
+        original_size: str,
+        venue: str = "bybit",
+        product_type: str = "perpetual"
+    ) -> str:
+        """Send an order close request (cancellation via opposite order)"""
         self.order_counter += 1
-        cl_id = f"cancel_{int(time.time())}_{self.order_counter}"
+        cl_id = f"close_{int(time.time())}_{self.order_counter}"
         
         order = {
             "version": 1,
@@ -188,21 +196,25 @@ class OrderSender:
             "action": "cancel",
             "venue_type": "cex",
             "venue": venue,
-            "product_type": "perpetual",
-            "details": {
-                "cl_id_to_cancel": cl_id_to_cancel
-            },
+            "product_type": product_type,
+            "details": {},
             "ts_ns": int(time.time() * 1_000_000_000),
-            "tags": {"source": "test_script"}
+            "tags": {
+                "source": "test_script",
+                "cl_id_to_cancel": cl_id_to_cancel,
+                "original_symbol": original_symbol,
+                "original_side": original_side,
+                "original_size": original_size
+            }
         }
         
         try:
             self.socket.send_string(json.dumps(order))
-            logger.info(f"🚫 Cancel sent for order: {cl_id_to_cancel}")
-            self.cancel_tracker.add_cancel_request(cl_id_to_cancel)
+            logger.info(f"🚫 Close order sent for: {cl_id_to_cancel}")
+            logger.info(f"   Will place opposite {('sell' if original_side == 'buy' else 'buy')} order for {original_size} {original_symbol}")
             return cl_id
         except Exception as e:
-            logger.error(f"Failed to send cancel: {e}")
+            logger.error(f"Failed to send close order: {e}")
             return None
     
     def send_replace_order(
@@ -395,17 +407,12 @@ def test_sequence(cpu_mode: str = "normal"):
         )
         time.sleep(1.5)
         
-        # Test 5: Cancel first order (test cancel functionality)
+        # Test 5: Order closing functionality (NEW MECHANISM)
         if order_id_1:
-            logger.info("\n=== Test 5: Cancel Order Functionality ===")
-            sender.send_cancel_order(order_id_1)
+            logger.info("\n=== Test 5: Order Closing Functionality ===")
+            logger.info("   Using new order closing mechanism (opposite order placement)")
+            sender.send_cancel_order(order_id_1, "ETHUSDT", "buy", "0.1", "bybit", "perpetual")
             time.sleep(1.5)
-            
-            # Wait for cancel confirmation
-            logger.info("🔍 Validating cancel confirmation...")
-            cancel_status = sender.wait_for_cancel_confirmations(timeout_seconds=5.0)
-            if order_id_1 in cancel_status:
-                logger.info(f"📋 Cancel Status for {order_id_1}: {cancel_status[order_id_1]}")
         
         # Test 6: Place and modify order (test replace functionality)
         logger.info("\n=== Test 6: Place and Replace Order ===")
@@ -459,56 +466,43 @@ def test_sequence(cpu_mode: str = "normal"):
         # Test 9: Rapid fire orders (latency test)
         logger.info("\n=== Test 9: Rapid Fire Orders (Latency Test) ===")
         rapid_orders = []
+        rapid_order_details = []  # Track details for closing
         for i in range(3):
+            side = "buy" if i % 2 == 0 else "sell"
+            size = "0.02"
             order_id = sender.send_place_order(
                 symbol="ETHUSDT",
-                side="buy" if i % 2 == 0 else "sell",
+                side=side,
                 order_type="limit",
-                size="0.02",
+                size=size,
                 price=str(2500.0 + (i * 10)),
                 product_type="perpetual",
                 tags={"test": "rapid_fire", "batch": i}
             )
             rapid_orders.append(order_id)
+            rapid_order_details.append((side, size))
             time.sleep(0.1)  # Minimal delay
         
         time.sleep(2)
         
-        # Test 10: Cancel multiple orders
-        logger.info("\n=== Test 10: Bulk Cancel Operations ===")
-        cancel_order_ids = []
-        for i, order_id in enumerate([order_id_5, order_id_6, order_id_7] + rapid_orders):
-            if order_id:
-                logger.info(f"   Cancelling order {i+1}/{len([order_id_5, order_id_6, order_id_7] + rapid_orders)}")
-                sender.send_cancel_order(order_id)
-                cancel_order_ids.append(order_id)
-                time.sleep(0.5)
+        # Test 10: Bulk order closing operations
+        logger.info("\n=== Test 10: Bulk Order Closing Operations ===")
+        orders_to_close = [
+            (order_id_5, "sell", "0.15", "perpetual"),  # Modified order
+            (order_id_6, "buy", "0.06", "spot"),
+            (order_id_7, "buy", "1.0", "perpetual")
+        ]
         
-        # Wait for all cancel confirmations
-        if cancel_order_ids:
-            logger.info(f"\n🔍 Validating {len(cancel_order_ids)} cancel confirmations...")
-            final_cancel_status = sender.wait_for_cancel_confirmations(timeout_seconds=10.0)
-            
-            logger.info("\n📋 CANCEL VALIDATION RESULTS:")
-            logger.info("-" * 50)
-            confirmed_count = 0
-            failed_count = 0
-            pending_count = 0
-            
-            for order_id in cancel_order_ids:
-                status = final_cancel_status.get(order_id, "unknown")
-                if "confirmed" in status:
-                    logger.info(f"✅ {order_id}: {status}")
-                    confirmed_count += 1
-                elif "failed" in status:
-                    logger.error(f"❌ {order_id}: {status}")
-                    failed_count += 1
-                else:
-                    logger.warning(f"⏳ {order_id}: {status}")
-                    pending_count += 1
-            
-            logger.info("-" * 50)
-            logger.info(f"📊 Cancel Summary: {confirmed_count} confirmed, {failed_count} failed, {pending_count} pending")
+        # Add rapid fire orders with their details
+        for order_id, (side, size) in zip(rapid_orders, rapid_order_details):
+            if order_id:
+                orders_to_close.append((order_id, side, size, "perpetual"))
+        
+        for i, (order_id, side, size, product_type) in enumerate(orders_to_close):
+            if order_id:
+                logger.info(f"   Closing order {i+1}/{len(orders_to_close)} via opposite order")
+                sender.send_cancel_order(order_id, "ETHUSDT", side, size, "bybit", product_type)
+                time.sleep(0.5)
         
         # Test 11: Error handling - invalid parameters
         logger.info("\n=== Test 11: Error Handling Tests ===")
@@ -671,7 +665,7 @@ def main():
             )
             time.sleep(1)
             if test_order_id:
-                sender.send_cancel_order(test_order_id)
+                sender.send_cancel_order(test_order_id, "ETHUSDT", "buy", "0.001")
                 logger.info("⏳ Waiting 5s for cancel confirmation...")
                 time.sleep(5)
                 status = sender.wait_for_cancel_confirmations(timeout_seconds=2.0)
@@ -702,7 +696,7 @@ def main():
                 if not args.cancel_id:
                     logger.error("--cancel-id required for cancel action")
                     sys.exit(1)
-                sender.send_cancel_order(args.cancel_id, args.venue)
+                sender.send_cancel_order(args.cancel_id, args.symbol, args.side, args.size, args.venue, args.product)
             
             elif args.action == "replace":
                 if not args.replace_id:
