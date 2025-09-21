@@ -32,6 +32,7 @@ struct OrderRequest {
     std::optional<std::string> price;  // Required for limit orders
     std::optional<std::string> time_in_force;  // GTC, IOC, FOK, etc.
     std::optional<std::string> category;  // spot, linear, inverse, etc.
+    bool reduce_only = false;   // CRITICAL: Position management for derivatives
     std::map<std::string, std::string> extra_params;
 };
 

@@ -139,6 +139,20 @@ OrderResponse BybitClient::place_order(const OrderRequest& request) {
             params.AddMember("timeInForce", rapidjson::Value(request.time_in_force.value().c_str(), allocator), allocator);
         }
         
+        // CRITICAL: Handle reduce_only for position management
+        if (request.reduce_only) {
+            // Only supported for derivatives (linear/inverse), not spot
+            std::string category = request.category.value_or("spot");
+            if (category != "spot") {
+                params.AddMember("reduceOnly", rapidjson::Value(true), allocator);
+                spdlog::info("[BybitClient] Reduce-only order for {}: {}", 
+                           request.symbol, request.client_order_id);
+            } else {
+                spdlog::warn("[BybitClient] reduce_only ignored for spot order: {}", 
+                           request.client_order_id);
+            }
+        }
+        
         params.AddMember("orderLinkId", rapidjson::Value(request.client_order_id.c_str(), allocator), allocator);
         
         // Convert to JSON string
@@ -271,6 +285,7 @@ OrderResponse BybitClient::query_order(const std::string& client_order_id) {
         rapidjson::Document params;
         params.SetObject();
         auto& allocator = params.GetAllocator();
+        (void)allocator; // Mark as used to avoid warning
         
         // Get order info
         std::string category = "spot";

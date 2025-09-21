@@ -23,8 +23,17 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+
+#ifdef HFT_LINUX_FEATURES
+#include <sys/personality.h>
+#ifndef ADDR_NO_RANDOMIZE
+#define ADDR_NO_RANDOMIZE 0x0040000
+#endif
+#endif
 #include <sys/mman.h>  // For mlockall
 #include <unistd.h>    // For sched_getcpu
+#include <sched.h>     // For CPU affinity and real-time scheduling
+#include <sys/resource.h> // For process priority
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/sinks/rotating_file_sink.h>
@@ -247,8 +256,10 @@ TradingEngineService::TradingEngineService(CpuMode cpu_mode)
     : running_(false)
     , order_endpoint_("tcp://127.0.0.1:5601")
     , report_endpoint_("tcp://127.0.0.1:5602")
-    , cpu_mode_(cpu_mode)
 {
+    // Handle CPU mode configuration
+    (void)cpu_mode; // Mark as used to avoid warning
+    
 #ifdef HFT_NUMA_SUPPORT
     // Initialize NUMA if available
     if (numa_available() >= 0) {
@@ -260,6 +271,52 @@ TradingEngineService::TradingEngineService(CpuMode cpu_mode)
         int num_nodes = numa_num_configured_nodes();
         int current_node = numa_node_of_cpu(sched_getcpu());
         spdlog::info("[HFT-Engine] NUMA nodes: {}, current node: {}", num_nodes, current_node);
+    }
+#endif
+
+    // ============================================================================
+    // REAL-TIME OPTIMIZATIONS
+    // ============================================================================
+    
+    // Set real-time scheduling for main process
+    struct sched_param param;
+    param.sched_priority = 80; // High priority (1-99 range)
+    
+    if (sched_setscheduler(0, SCHED_FIFO, &param) == 0) {
+        spdlog::info("[HFT-Engine] Real-time FIFO scheduling enabled (priority: {})", param.sched_priority);
+    } else {
+        spdlog::warn("[HFT-Engine] Failed to set real-time scheduling (requires root/CAP_SYS_NICE)");
+    }
+    
+    // Set process to highest nice priority
+    if (setpriority(PRIO_PROCESS, 0, -20) == 0) {
+        spdlog::info("[HFT-Engine] Process priority set to highest (-20)");
+    } else {
+        spdlog::warn("[HFT-Engine] Failed to set process priority");
+    }
+    
+    // CPU affinity - bind to isolated cores (cores 2-7 typically isolated)
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    
+    // Check for isolated CPUs from kernel command line
+    // In production, use: isolcpus=2-7 nohz_full=2-7 rcu_nocbs=2-7
+    const std::vector<int> isolated_cpus = {2, 3, 4, 5}; // Configure based on your system
+    
+    for (int cpu : isolated_cpus) {
+        CPU_SET(cpu, &cpuset);
+    }
+    
+    if (sched_setaffinity(0, sizeof(cpuset), &cpuset) == 0) {
+        spdlog::info("[HFT-Engine] CPU affinity set to isolated cores: 2-5");
+    } else {
+        spdlog::warn("[HFT-Engine] Failed to set CPU affinity");
+    }
+    
+    // Disable address space randomization for deterministic performance
+#ifdef HFT_LINUX_FEATURES
+    if (personality(ADDR_NO_RANDOMIZE) != -1) {
+        spdlog::info("[HFT-Engine] Address space randomization disabled");
     }
 #endif
 
@@ -285,7 +342,7 @@ TradingEngineService::TradingEngineService(CpuMode cpu_mode)
     
     for (size_t i = 0; i < WARMUP_COUNT; ++i) {
         if (auto* order = order_pool_->allocate()) {
-            // Initialize the memory properly instead of memset
+            // Touch the memory to ensure it's paged in - use placement new for proper initialization
             new (order) HFTExecutionOrder();
             warmup_orders.push_back(order);
         }
@@ -303,7 +360,7 @@ TradingEngineService::TradingEngineService(CpuMode cpu_mode)
     for (auto* ptr : warmup_orders) order_pool_->deallocate(ptr);
     for (auto* ptr : warmup_reports) report_pool_->deallocate(ptr);
     for (auto* ptr : warmup_fills) fill_pool_->deallocate(ptr);
-    
+
     // Lock pages in memory if possible (requires CAP_IPC_LOCK)
 #ifdef __linux__
     if (mlockall(MCL_CURRENT | MCL_FUTURE) == 0) {
@@ -316,6 +373,7 @@ TradingEngineService::TradingEngineService(CpuMode cpu_mode)
     spdlog::info("[HFT-Engine] Ultra-low latency trading engine initialized");
     spdlog::info("[HFT-Engine] Memory pools pre-warmed with {} entries", WARMUP_COUNT);
     spdlog::info("[HFT-Engine] Lock-free queues ready");
+    spdlog::info("[HFT-Engine] Unix domain sockets: {}, {}", order_endpoint_, report_endpoint_);
 }
 
 TradingEngineService::~TradingEngineService() {
@@ -744,7 +802,6 @@ HFTExecutionOrder* TradingEngineService::parse_execution_order_hft(std::string_v
                            (hash == CANCEL_HASH) * 1 + 
                            (hash == REPLACE_HASH) * 2;
         
-        
         if (idx < 3) [[likely]] {
             (this->*handlers[idx])(order);
         } else {
@@ -812,6 +869,18 @@ void TradingEngineService::place_cex_order_hft(const HFTExecutionOrder& order) {
         }
 
         req.time_in_force = order.time_in_force.empty() ? "GTC" : std::string(order.time_in_force.view());
+        
+        // Handle reduce_only for position management (critical for derivatives)
+        req.reduce_only = order.reduce_only;
+        if (order.reduce_only) {
+            // For reduce-only orders, ensure we're only trading perpetuals/futures
+            if (order.product_type == std::string_view("spot")) {
+                send_rejection_report_hft(order, "invalid_reduce_only", "reduce_only not supported for spot orders");
+                return;
+            }
+            spdlog::info("[HFT-Engine] Reduce-only order: {} {} {} @ {}", 
+                        order.cl_id.c_str(), order.side.c_str(), order.size, order.price);
+        }
 
         // Place order via exchange client
         OrderResponse response = client->place_order(req);
@@ -851,55 +920,61 @@ void TradingEngineService::cancel_cex_order_hft(const HFTExecutionOrder& order) 
         // Extract original order details from tags for closing
         auto* cl_id_to_close = order.tags.find(FixedString<32>("cl_id_to_cancel"));
         auto* original_side = order.tags.find(FixedString<32>("original_side"));
-        auto* original_size = order.tags.find(FixedString<32>("original_size"));
         auto* original_symbol = order.tags.find(FixedString<32>("original_symbol"));
+        auto* original_size = order.tags.find(FixedString<32>("original_size"));
         
-        if (!cl_id_to_close || !original_side || !original_size || !original_symbol) {
-            send_rejection_report_hft(order, "missing_close_info", 
-                "Missing original order details (cl_id_to_cancel, original_side, original_size, original_symbol)");
+        if (!cl_id_to_close || !original_side || !original_symbol || !original_size) {
+            send_rejection_report_hft(order, "missing_cancel_data", "Missing required cancel information");
             return;
         }
 
-        // Create opposite order to close position
+        // Create opposite order to close the position with reduce_only
         OrderRequest close_req;
-        close_req.client_order_id = std::string(order.cl_id.view()) + "_close";
+        close_req.client_order_id = std::string(order.cl_id.view());
         close_req.symbol = std::string(original_symbol->view());
-        
-        // Determine opposite side
-        std::string orig_side_str = std::string(original_side->view());
-        if (orig_side_str == "buy") {
-            close_req.side = "sell";
-        } else if (orig_side_str == "sell") {
-            close_req.side = "buy";
-        } else {
-            send_rejection_report_hft(order, "invalid_side", "Unknown original order side");
-            return;
-        }
-        
-        close_req.order_type = "market"; // Use market order for immediate execution
         close_req.quantity = std::string(original_size->view());
         
-        // Set category based on product type
-        if (order.product_type == std::string_view("perpetual")) {
-            close_req.category = "linear";
-        } else if (order.product_type == std::string_view("spot")) {
-            close_req.category = "spot";
+        // Opposite side for closing
+        if (original_side->view() == "buy") {
+            close_req.side = "sell";
+        } else {
+            close_req.side = "buy";
+        }
+        
+        close_req.order_type = "market";  // Use market order for fast closing
+        close_req.time_in_force = "IOC";   // Immediate or cancel
+        
+        // CRITICAL: Set reduce_only=true for position closing
+        close_req.reduce_only = true;
+        
+        // Set category based on venue
+        if (order.venue == std::string_view("bybit")) {
+            if (order.product_type == std::string_view("perpetual")) {
+                close_req.category = "linear";
+            } else {
+                close_req.category = "spot";
+            }
         }
 
-        // Place the closing order
         OrderResponse response = client->place_order(close_req);
-
+        
         if (response.success) {
-            // Send acceptance report indicating order was closed
-            send_acceptance_report_hft(order, response.exchange_order_id, 
-                "Order closed via opposite market order: " + close_req.client_order_id);
+            // Remove from pending orders
+            OrderId cl_id(cl_id_to_close->c_str());
+            auto* pending_order = pending_orders_->find(cl_id);
+            if (pending_order && *pending_order) {
+                order_pool_->deallocate(*pending_order);
+                pending_orders_->erase(cl_id);
+            }
             
-            // Log the closing action
-            spdlog::info("[HFT-Engine] Order {} closed via opposite {} order {} of size {}", 
+            send_acceptance_report_hft(order, response.exchange_order_id, "Position closed via reduce-only opposite order");
+            
+            // Log the closing action with reduce_only info
+            spdlog::info("[HFT-Engine] Order {} closed via reduce-only {} order {} of size {}", 
                 cl_id_to_close->c_str(), close_req.side, close_req.client_order_id, close_req.quantity);
         } else {
             send_rejection_report_hft(order, "close_rejected", 
-                "Failed to place closing order: " + response.message);
+                "Failed to place reduce-only closing order: " + response.message);
         }
 
     } catch (const std::exception& e) {

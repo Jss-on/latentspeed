@@ -327,14 +327,44 @@ struct CACHE_ALIGNED HFTExecutionOrder {
     
     constexpr HFTExecutionOrder() noexcept = default;
     
-    // Copy constructor optimized for cache lines
-    constexpr HFTExecutionOrder(const HFTExecutionOrder& other) noexcept {
-        std::memcpy(this, &other, sizeof(HFTExecutionOrder));
+    // Copy constructor optimized for cache efficiency
+    HFTExecutionOrder(const HFTExecutionOrder& other) noexcept
+        : version(other.version)
+        , cl_id(other.cl_id)
+        , action(other.action)
+        , venue_type(other.venue_type)
+        , venue(other.venue)
+        , product_type(other.product_type)
+        , ts_ns(other.ts_ns.load())
+        , symbol(other.symbol)
+        , side(other.side)
+        , order_type(other.order_type)
+        , time_in_force(other.time_in_force)
+        , price(other.price)
+        , size(other.size)
+        , stop_price(other.stop_price)
+        , reduce_only(other.reduce_only)
+        , tags(other.tags) {
     }
     
-    constexpr HFTExecutionOrder& operator=(const HFTExecutionOrder& other) noexcept {
+    HFTExecutionOrder& operator=(const HFTExecutionOrder& other) noexcept {
         if (this != &other) {
-            std::memcpy(this, &other, sizeof(HFTExecutionOrder));
+            version = other.version;
+            cl_id = other.cl_id;
+            action = other.action;
+            venue_type = other.venue_type;
+            venue = other.venue;
+            product_type = other.product_type;
+            ts_ns.store(other.ts_ns.load());
+            symbol = other.symbol;
+            side = other.side;
+            order_type = other.order_type;
+            time_in_force = other.time_in_force;
+            price = other.price;
+            size = other.size;
+            stop_price = other.stop_price;
+            reduce_only = other.reduce_only;
+            tags = other.tags;
         }
         return *this;
     }

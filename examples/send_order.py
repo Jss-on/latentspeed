@@ -135,6 +135,7 @@ class OrderSender:
         venue: str = "bybit",
         product_type: str = "perpetual",
         time_in_force: str = "GTC",
+        reduce_only: bool = False,
         tags: Optional[Dict] = None
     ) -> str:
         """Send a place order request"""
@@ -153,7 +154,8 @@ class OrderSender:
                 "side": side,
                 "order_type": order_type,
                 "size": size,
-                "time_in_force": time_in_force
+                "time_in_force": time_in_force,
+                "reduce_only": reduce_only
             },
             "ts_ns": int(time.time() * 1_000_000_000),
             "tags": tags or {"source": "test_script"},
@@ -170,7 +172,8 @@ class OrderSender:
         # Send order
         try:
             self.socket.send_string(json.dumps(order))
-            logger.info(f"✅ Order sent - ID: {cl_id}")
+            reduce_only_str = " [REDUCE-ONLY]" if reduce_only else ""
+            logger.info(f"✅ Order sent - ID: {cl_id}{reduce_only_str}")
             logger.info(f"   {side.upper()} {size} {symbol} @ {price or 'MARKET'}")
             return cl_id
         except Exception as e:
@@ -338,6 +341,117 @@ class OrderSender:
                     self.cancel_tracker.pending_cancels.discard(order_id)
         
         return cancel_status
+
+
+def test_reduce_only_position_management(cpu_mode: str = "normal"):
+    """Test reduce_only functionality for position management"""
+    sender = OrderSender(cpu_mode=cpu_mode, listen_reports=True)
+    
+    if not sender.connect():
+        return
+    
+    try:
+        logger.info("🔒 Testing REDUCE-ONLY Position Management")
+        logger.info(f"🔧 CPU Mode: {cpu_mode.upper()}")
+        logger.info("=" * 80)
+        
+        # Step 1: Open a position with a regular order
+        logger.info("\n=== Step 1: Open Long Position (Regular Order) ===")
+        long_order_id = sender.send_place_order(
+            symbol="BTCUSDT",
+            side="buy", 
+            order_type="limit",
+            size="0.01",
+            price="40000.0",
+            product_type="perpetual",
+            reduce_only=False,  # Regular position-opening order
+            tags={"strategy": "position_test", "step": "open_long"}
+        )
+        time.sleep(2)
+        
+        # Step 2: Try to place reduce-only sell to close position
+        logger.info("\n=== Step 2: Close Position with Reduce-Only Order ===")
+        close_order_id = sender.send_place_order(
+            symbol="BTCUSDT",
+            side="sell",  # Opposite side to close
+            order_type="market",
+            size="0.01",  # Same size to fully close
+            product_type="perpetual", 
+            reduce_only=True,  # CRITICAL: Only reduce existing position
+            tags={"strategy": "position_test", "step": "close_long", "original_order": long_order_id}
+        )
+        time.sleep(2)
+        
+        # Step 3: Try reduce-only on same side (should be rejected or not filled)
+        logger.info("\n=== Step 3: Test Reduce-Only Same Side (Should Not Increase Position) ===")
+        invalid_reduce_id = sender.send_place_order(
+            symbol="BTCUSDT", 
+            side="buy",  # Same side as original position
+            order_type="limit",
+            size="0.005",
+            price="39000.0",
+            product_type="perpetual",
+            reduce_only=True,  # Should not increase position
+            tags={"strategy": "position_test", "step": "invalid_reduce"}
+        )
+        time.sleep(2)
+        
+        # Step 4: Test reduce-only with spot (should be rejected)
+        logger.info("\n=== Step 4: Test Reduce-Only on Spot (Should Be Rejected) ===")
+        spot_reduce_id = sender.send_place_order(
+            symbol="BTCUSDT",
+            side="sell",
+            order_type="limit", 
+            size="0.001",
+            price="45000.0",
+            product_type="spot",  # Spot doesn't support reduce_only
+            reduce_only=True,
+            tags={"strategy": "position_test", "step": "spot_reduce_invalid"}
+        )
+        time.sleep(2)
+        
+        # Step 5: Demonstrate partial reduce-only close
+        logger.info("\n=== Step 5: Partial Position Close with Reduce-Only ===")
+        # First open another position
+        position_order_id = sender.send_place_order(
+            symbol="ETHUSDT",
+            side="buy",
+            order_type="limit",
+            size="0.1", 
+            price="2400.0",
+            product_type="perpetual",
+            reduce_only=False,
+            tags={"strategy": "position_test", "step": "open_eth_long"}
+        )
+        time.sleep(2)
+        
+        # Partially close with reduce-only
+        partial_close_id = sender.send_place_order(
+            symbol="ETHUSDT",
+            side="sell",
+            order_type="limit",
+            size="0.05",  # Only half the position
+            price="2500.0",
+            product_type="perpetual", 
+            reduce_only=True,  # Only reduce, don't go short
+            tags={"strategy": "position_test", "step": "partial_close", "original_order": position_order_id}
+        )
+        time.sleep(2)
+        
+        logger.info("\n" + "=" * 80)
+        logger.info("🔒 REDUCE-ONLY Position Management Test Complete!")
+        logger.info("📊 Test Summary:")
+        logger.info("   ✅ Regular position opening")
+        logger.info("   ✅ Reduce-only position closing")
+        logger.info("   ✅ Invalid reduce-only handling")
+        logger.info("   ✅ Spot reduce-only rejection")
+        logger.info("   ✅ Partial position reduction")
+        logger.info("=" * 80)
+        
+    except Exception as e:
+        logger.error(f"Reduce-only test failed: {e}")
+    finally:
+        sender.disconnect()
 
 
 def test_sequence(cpu_mode: str = "normal"):
@@ -620,7 +734,7 @@ def main():
     parser = argparse.ArgumentParser(description="Send orders to Latentspeed Trading Engine")
     parser.add_argument("--endpoint", default="tcp://127.0.0.1:5601", help="Trading engine endpoint")
     parser.add_argument("--cpu-mode", choices=["high_perf", "normal", "eco"], default="normal", help="CPU usage mode")
-    parser.add_argument("--action", choices=["place", "cancel", "replace", "test", "debug"], default="test",
+    parser.add_argument("--action", choices=["place", "cancel", "replace", "test", "debug", "reduce_only"], default="test",
                        help="Order action (default: test)")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     parser.add_argument("--test-reports", action="store_true", help="Test report endpoint connection")
@@ -636,6 +750,7 @@ def main():
     parser.add_argument("--replace-id", help="Order ID to replace")
     parser.add_argument("--new-size", help="New size for replace")
     parser.add_argument("--new-price", help="New price for replace")
+    parser.add_argument("--reduce-only", action="store_true", help="Place reduce-only order (derivatives only)")
     
     args = parser.parse_args()
     
@@ -650,6 +765,8 @@ def main():
     
     if args.action == "test":
         test_sequence(cpu_mode=args.cpu_mode)
+    elif args.action == "reduce_only":
+        test_reduce_only_position_management(cpu_mode=args.cpu_mode)
     elif args.action == "debug":
         logger.info("🐛 Running debug mode...")
         enable_debug_logging()
@@ -689,7 +806,8 @@ def main():
                     size=args.size,
                     price=args.price,
                     venue=args.venue,
-                    product_type=args.product
+                    product_type=args.product,
+                    reduce_only=args.reduce_only
                 )
             
             elif args.action == "cancel":

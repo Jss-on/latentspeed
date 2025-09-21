@@ -9,6 +9,8 @@
  * 2. High throughput lock-free queue testing
  * 3. Deterministic performance analysis
  * 4. Cache efficiency measurement
+ * 5. End-to-End Order Processing Pipeline
+ * 6. Exchange API Call Simulation
  */
 
 #include <chrono>
@@ -22,6 +24,7 @@
 #include <iomanip>
 #include <random>
 #include <cstring>
+#include <rapidjson/document.h>
 
 // HFT includes
 #include "hft_data_structures.h"
@@ -332,6 +335,232 @@ public:
         }
     }
     
+    /**
+     * @brief Benchmark 5: End-to-End Order Processing Pipeline
+     * Measures complete order lifecycle including all real-world components
+     */
+    void benchmark_end_to_end_latency() {
+        std::cout << "\n=== BENCHMARK 5: END-TO-END ORDER PROCESSING LATENCY ===\n";
+        
+        calibrate_tsc();
+        
+        constexpr size_t E2E_ITERATIONS = 10000;
+        std::vector<uint64_t> parse_latencies, validation_latencies, risk_latencies;
+        std::vector<uint64_t> state_mgmt_latencies, total_latencies;
+        
+        parse_latencies.reserve(E2E_ITERATIONS);
+        validation_latencies.reserve(E2E_ITERATIONS);
+        risk_latencies.reserve(E2E_ITERATIONS);
+        state_mgmt_latencies.reserve(E2E_ITERATIONS);
+        total_latencies.reserve(E2E_ITERATIONS);
+        
+        // Setup components
+        auto order_pool = std::make_unique<MemoryPool<HFTExecutionOrder, 1024>>();
+        auto pending_orders = std::make_unique<FlatMap<OrderId, HFTExecutionOrder*, 1024>>();
+        
+        // Sample JSON orders for parsing
+        const std::vector<std::string> sample_orders = {
+            R"({"version":1,"cl_id":"order_001","action":"place","venue_type":"cex","venue":"bybit","product_type":"perpetual","details":{"symbol":"ETHUSDT","side":"buy","order_type":"limit","size":"0.1","price":"2500.0","time_in_force":"GTC"},"ts_ns":1672531200000000000,"tags":{"source":"test"}})",
+            R"({"version":1,"cl_id":"order_002","action":"place","venue_type":"cex","venue":"bybit","product_type":"spot","details":{"symbol":"BTCUSDT","side":"sell","order_type":"market","size":"0.001","time_in_force":"IOC"},"ts_ns":1672531200000000000,"tags":{"source":"test"}})",
+            R"({"version":1,"cl_id":"order_003","action":"place","venue_type":"cex","venue":"binance","product_type":"perpetual","details":{"symbol":"ETHUSDT","side":"buy","order_type":"limit","size":"0.5","price":"2450.0","time_in_force":"GTC"},"ts_ns":1672531200000000000,"tags":{"source":"test","strategy":"momentum"}})"
+        };
+        
+        // Risk limits for validation
+        const double max_position_size = 10.0;
+        const double max_order_value = 100000.0;
+        double current_position = 0.0;
+        
+        std::cout << "Running " << E2E_ITERATIONS << " end-to-end order processing cycles...\n";
+        
+        for (size_t i = 0; i < E2E_ITERATIONS; ++i) {
+            const auto total_start = get_timestamp_ns();
+            
+            // 1. JSON PARSING (~1-5μs)
+            const auto parse_start = get_timestamp_ns();
+            const std::string& json_order = sample_orders[i % sample_orders.size()];
+            
+            rapidjson::Document doc;
+            doc.Parse(json_order.c_str());
+            
+            if (doc.HasParseError()) {
+                continue; // Skip malformed JSON
+            }
+            
+            // Extract basic order data
+            std::string cl_id = doc["cl_id"].GetString();
+            std::string action = doc["action"].GetString();
+            std::string venue = doc["venue"].GetString();
+            std::string symbol, side, order_type;
+            double size = 0.0, price = 0.0;
+            
+            if (doc.HasMember("details")) {
+                const auto& details = doc["details"];
+                symbol = details["symbol"].GetString();
+                side = details["side"].GetString();
+                order_type = details["order_type"].GetString();
+                size = std::stod(details["size"].GetString());
+                if (details.HasMember("price")) {
+                    price = std::stod(details["price"].GetString());
+                }
+            }
+            
+            const auto parse_end = get_timestamp_ns();
+            parse_latencies.push_back(parse_end - parse_start);
+            
+            // 2. ORDER VALIDATION (~100-500ns)
+            const auto validation_start = get_timestamp_ns();
+            
+            bool valid = true;
+            // Basic validation checks
+            if (cl_id.empty() || symbol.empty() || side.empty()) valid = false;
+            if (size <= 0.0) valid = false;
+            if (order_type == "limit" && price <= 0.0) valid = false;
+            if (side != "buy" && side != "sell") valid = false;
+            
+            // Symbol validation (simulate lookup)
+            std::unordered_set<std::string> supported_symbols = {"ETHUSDT", "BTCUSDT", "SOLUSDT"};
+            if (supported_symbols.find(symbol) == supported_symbols.end()) valid = false;
+            
+            const auto validation_end = get_timestamp_ns();
+            validation_latencies.push_back(validation_end - validation_start);
+            
+            if (!valid) continue;
+            
+            // 3. RISK CHECKS (~50-200ns)
+            const auto risk_start = get_timestamp_ns();
+            
+            bool risk_passed = true;
+            double order_value = size * price;
+            if (order_value > max_order_value) risk_passed = false;
+            
+            double new_position = current_position;
+            if (side == "buy") new_position += size;
+            else new_position -= size;
+            
+            if (std::abs(new_position) > max_position_size) risk_passed = false;
+            
+            const auto risk_end = get_timestamp_ns();
+            risk_latencies.push_back(risk_end - risk_start);
+            
+            if (!risk_passed) continue;
+            
+            // 4. ORDER STATE MANAGEMENT (~100-300ns)
+            const auto state_start = get_timestamp_ns();
+            
+            auto* order = order_pool->allocate();
+            if (order) {
+                // Populate order structure
+                order->cl_id = OrderId(cl_id.c_str());
+                order->symbol = Symbol(symbol.c_str());
+                order->side = FixedString<8>(side.c_str());
+                order->order_type = FixedString<16>(order_type.c_str());
+                order->size = size;
+                order->price = price;
+                order->ts_ns.store(get_timestamp_ns(), std::memory_order_relaxed);
+                
+                // Add to pending orders map
+                pending_orders->insert(order->cl_id, order);
+                
+                // Update position tracking
+                current_position = new_position;
+            }
+            
+            const auto state_end = get_timestamp_ns();
+            state_mgmt_latencies.push_back(state_end - state_start);
+            
+            // Simulate periodic cleanup
+            if (i % 100 == 0 && order) {
+                pending_orders->erase(order->cl_id);
+                order_pool->deallocate(order);
+            }
+            
+            const auto total_end = get_timestamp_ns();
+            total_latencies.push_back(total_end - total_start);
+        }
+        
+        // Analysis
+        std::cout << "\n📊 END-TO-END LATENCY BREAKDOWN:\n";
+        analyze_component_latency("JSON Parsing", parse_latencies, 1000, 5000);
+        analyze_component_latency("Order Validation", validation_latencies, 100, 500);
+        analyze_component_latency("Risk Checks", risk_latencies, 50, 200);
+        analyze_component_latency("State Management", state_mgmt_latencies, 100, 300);
+        analyze_component_latency("Total E2E Processing", total_latencies, 2000, 10000);
+        
+        std::cout << "\n🎯 PERFORMANCE ASSESSMENT:\n";
+        const auto total_p99 = get_percentile(total_latencies, 99);
+        if (total_p99 < 10000) {
+            std::cout << "✅ EXCELLENT E2E PERFORMANCE (P99 < 10μs)\n";
+        } else if (total_p99 < 50000) {
+            std::cout << "✅ GOOD E2E PERFORMANCE (P99 < 50μs)\n";
+        } else {
+            std::cout << "❌ E2E performance needs optimization\n";
+        }
+    }
+    
+    /**
+     * @brief Benchmark 6: Exchange API Call Simulation
+     * Simulates realistic exchange interaction latencies
+     */
+    void benchmark_exchange_latency() {
+        std::cout << "\n=== BENCHMARK 6: EXCHANGE API LATENCY SIMULATION ===\n";
+        
+        constexpr size_t API_ITERATIONS = 1000;
+        std::vector<uint64_t> local_latencies, network_latencies, total_latencies;
+        
+        local_latencies.reserve(API_ITERATIONS);
+        network_latencies.reserve(API_ITERATIONS);
+        total_latencies.reserve(API_ITERATIONS);
+        
+        // Simulate different network conditions
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::normal_distribution<double> network_dist(250000.0, 50000.0); // 250μs ± 50μs
+        
+        for (size_t i = 0; i < API_ITERATIONS; ++i) {
+            const auto total_start = get_timestamp_ns();
+            const auto local_start = get_timestamp_ns();
+            
+            // Local processing: order serialization, connection management
+            std::string order_payload = R"({"symbol":"ETHUSDT","side":"buy","type":"LIMIT","quantity":"0.1","price":"2500.0","timeInForce":"GTC"})";
+            
+            // Simulate HTTP header preparation and SSL overhead
+            volatile size_t payload_size = order_payload.size();
+            for (size_t j = 0; j < 10; ++j) {
+                payload_size += j; // Prevent optimization
+            }
+            
+            const auto local_end = get_timestamp_ns();
+            local_latencies.push_back(local_end - local_start);
+            
+            // Network simulation (normally this would be real HTTP call)
+            const auto network_start = get_timestamp_ns();
+            
+            // Simulate network latency with realistic variance
+            uint64_t network_delay_ns = std::max(50000.0, network_dist(gen));
+            
+            // Busy wait to simulate network time (more realistic than sleep)
+            const auto network_target = network_start + network_delay_ns;
+            while (get_timestamp_ns() < network_target) {
+#ifdef __x86_64__
+                __builtin_ia32_pause();
+#else
+                std::this_thread::yield();
+#endif
+            }
+            
+            const auto network_end = get_timestamp_ns();
+            network_latencies.push_back(network_end - network_start);
+            
+            const auto total_end = get_timestamp_ns();
+            total_latencies.push_back(total_end - total_start);
+        }
+        
+        std::cout << "\n📡 EXCHANGE API LATENCY BREAKDOWN:\n";
+        analyze_component_latency("Local Processing", local_latencies, 1000, 10000);
+        analyze_component_latency("Network Round-trip", network_latencies, 100000, 1000000);
+        analyze_component_latency("Total API Latency", total_latencies, 150000, 1500000);
+    }
+
     void run_all_benchmarks() {
         std::cout << "🚀 LATENTSPEED HFT BENCHMARK SUITE\n";
         std::cout << "==================================\n";
@@ -340,11 +569,49 @@ public:
         benchmark_throughput(); 
         benchmark_deterministic_performance();
         benchmark_cache_efficiency();
+        benchmark_end_to_end_latency();
+        benchmark_exchange_latency();
         
-        std::cout << "\n📊 BENCHMARK SUMMARY COMPLETE\n";
+        std::cout << "\n📊 COMPREHENSIVE BENCHMARK SUMMARY COMPLETE\n";
     }
 
 private:
+    void analyze_component_latency(const std::string& component, 
+                                  const std::vector<uint64_t>& latencies, 
+                                  uint64_t target_min, 
+                                  uint64_t target_max) {
+        if (latencies.empty()) return;
+        
+        std::vector<uint64_t> sorted = latencies;
+        std::sort(sorted.begin(), sorted.end());
+        
+        const auto mean = std::accumulate(latencies.begin(), latencies.end(), 0ULL) / latencies.size();
+        const auto p50 = get_percentile(sorted, 50);
+        const auto p95 = get_percentile(sorted, 95);
+        const auto p99 = get_percentile(sorted, 99);
+        
+        std::cout << "  " << component << ":\n";
+        std::cout << "    Mean: " << mean << " ns (" << mean/1000.0 << " μs)\n";
+        std::cout << "    P50:  " << p50 << " ns (" << p50/1000.0 << " μs)\n";
+        std::cout << "    P95:  " << p95 << " ns (" << p95/1000.0 << " μs)\n";
+        std::cout << "    P99:  " << p99 << " ns (" << p99/1000.0 << " μs)\n";
+        
+        if (p99 >= target_min && p99 <= target_max) {
+            std::cout << "    ✅ Within expected range (" << target_min/1000.0 << "-" << target_max/1000.0 << "μs)\n";
+        } else if (p99 < target_min) {
+            std::cout << "    🚀 Better than expected!\n";
+        } else {
+            std::cout << "    ⚠️  Slower than expected\n";
+        }
+    }
+    
+    uint64_t get_percentile(const std::vector<uint64_t>& sorted_data, int percentile) {
+        if (sorted_data.empty()) return 0;
+        size_t index = (sorted_data.size() * percentile) / 100;
+        if (index >= sorted_data.size()) index = sorted_data.size() - 1;
+        return sorted_data[index];
+    }
+    
     void analyze_latency_results(const std::vector<uint64_t>& latencies) {
         std::vector<uint64_t> sorted_latencies = latencies;
         std::sort(sorted_latencies.begin(), sorted_latencies.end());
@@ -425,7 +692,9 @@ int main(int argc, char* argv[]) {
     std::cout << "  ⚡ Sub-microsecond latency\n";
     std::cout << "  🚄 High throughput lock-free queues\n";  
     std::cout << "  🎯 Deterministic performance\n";
-    std::cout << "  💨 Cache efficiency\n\n";
+    std::cout << "  💨 Cache efficiency\n";
+    std::cout << "  📈 End-to-End Order Processing Pipeline\n";
+    std::cout << "  📊 Exchange API Call Simulation\n\n";
     
     try {
         HFTBenchmark benchmark;
@@ -441,8 +710,12 @@ int main(int argc, char* argv[]) {
                 benchmark.benchmark_deterministic_performance();
             } else if (test == "cache") {
                 benchmark.benchmark_cache_efficiency();
+            } else if (test == "e2e") {
+                benchmark.benchmark_end_to_end_latency();
+            } else if (test == "exchange") {
+                benchmark.benchmark_exchange_latency();
             } else {
-                std::cout << "Usage: " << argv[0] << " [latency|throughput|deterministic|cache]\n";
+                std::cout << "Usage: " << argv[0] << " [latency|throughput|deterministic|cache|e2e|exchange]\n";
                 std::cout << "Run without arguments to execute all benchmarks.\n";
                 return 1;
             }
