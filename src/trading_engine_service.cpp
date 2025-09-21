@@ -70,83 +70,6 @@ namespace latentspeed {
 
 using namespace hft;
 
-// ============================================================================
-// STRING INTERNING FOR COMMON TRADING STRINGS
-// ============================================================================
-
-/**
- * @brief Thread-safe string interning pool for common trading strings
- * Uses perfect hashing for O(1) lookups
- */
-class StringInternPool {
-public:
-    static StringInternPool& instance() {
-        static StringInternPool pool;
-        return pool;
-    }
-    
-    const char* intern(std::string_view str) {
-        // Common trading strings are pre-interned
-        static const std::unordered_map<std::string_view, const char*> common_strings = {
-            // Actions
-            {"place", "place"},
-            {"cancel", "cancel"},
-            {"replace", "replace"},
-            {"modify", "modify"},
-            
-            // Order types
-            {"market", "market"},
-            {"limit", "limit"},
-            {"stop", "stop"},
-            {"stop_limit", "stop_limit"},
-            
-            // Sides
-            {"buy", "buy"},
-            {"sell", "sell"},
-            {"long", "long"},
-            {"short", "short"},
-            
-            // Time in force
-            {"GTC", "GTC"},
-            {"IOC", "IOC"},
-            {"FOK", "FOK"},
-            {"GTX", "GTX"},
-            
-            // Statuses
-            {"new", "new"},
-            {"accepted", "accepted"},
-            {"rejected", "rejected"},
-            {"filled", "filled"},
-            {"partially_filled", "partially_filled"},
-            {"cancelled", "cancelled"},
-            
-            // Venues
-            {"bybit", "bybit"},
-            {"binance", "binance"},
-            {"okx", "okx"},
-            
-            // Product types
-            {"spot", "spot"},
-            {"perpetual", "perpetual"},
-            {"futures", "futures"},
-            {"option", "option"},
-            
-            // Categories
-            {"linear", "linear"},
-            {"inverse", "inverse"}
-        };
-        
-        if (auto it = common_strings.find(str); it != common_strings.end()) [[likely]] {
-            return it->second;
-        }
-        
-        // For non-common strings, return nullptr (caller should handle)
-        return nullptr;
-    }
-    
-private:
-    StringInternPool() = default;
-};
 
 // ============================================================================
 // ULTRA-LOW LATENCY UTILITIES
@@ -861,11 +784,14 @@ void TradingEngineService::place_cex_order_hft(const HFTExecutionOrder& order) {
             req.price = std::to_string(order.price);
         }
 
-        // Set category based on product type
+        // Set category based on product type (CRITICAL for reduce_only functionality)
         if (order.product_type == std::string_view("perpetual")) {
             req.category = "linear";
         } else if (order.product_type == std::string_view("spot")) {
             req.category = "spot";
+        } else {
+            // Default to linear for derivatives if not explicitly set
+            req.category = "linear";
         }
 
         req.time_in_force = order.time_in_force.empty() ? "GTC" : std::string(order.time_in_force.view());
@@ -878,8 +804,13 @@ void TradingEngineService::place_cex_order_hft(const HFTExecutionOrder& order) {
                 send_rejection_report_hft(order, "invalid_reduce_only", "reduce_only not supported for spot orders");
                 return;
             }
-            spdlog::info("[HFT-Engine] Reduce-only order: {} {} {} @ {}", 
-                        order.cl_id.c_str(), order.side.c_str(), order.size, order.price);
+            spdlog::info("[HFT-Engine] 🔒 REDUCE-ONLY order: {} {} {} @ {} (product: {}, category: {})", 
+                        order.cl_id.c_str(), order.side.c_str(), order.size, order.price,
+                        order.product_type.c_str(), req.category.value_or("NONE"));
+        } else {
+            spdlog::debug("[HFT-Engine] Regular order: {} {} {} @ {} (product: {}, category: {})", 
+                         order.cl_id.c_str(), order.side.c_str(), order.size, order.price,
+                         order.product_type.c_str(), req.category.value_or("NONE"));
         }
 
         // Place order via exchange client

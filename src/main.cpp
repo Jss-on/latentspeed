@@ -17,6 +17,7 @@
 #include <signal.h>
 #include <thread>
 #include <chrono>
+#include <filesystem>
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 
@@ -80,6 +81,14 @@ void signal_handler(int signal) {
  * The service returns non-zero exit codes on failure for proper system integration.
  */
 int main(int argc, char* argv[]) {
+    // Create logs directory if it doesn't exist
+    try {
+        std::filesystem::create_directories("logs");
+    } catch (const std::filesystem::filesystem_error& ex) {
+        std::cerr << "Failed to create logs directory: " << ex.what() << std::endl;
+        return 1;
+    }
+    
     // Initialize spdlog with enhanced formatting including timestamp, thread ID, function name
     try {
         // Create console sink with colors

@@ -92,6 +92,16 @@ class OrderSender:
         self.report_listener_thread = None
         self.report_socket = None
         
+        # Report statistics tracking
+        self._report_stats = {
+            'total': 0,
+            'accepted': 0,
+            'rejected': 0,
+            'cancelled': 0,
+            'filled': 0,
+            'fills': 0
+        }
+        
         # Configure socket based on CPU mode
         if cpu_mode == "high_perf":
             # High-performance mode: minimize latency, maximize CPU usage
@@ -298,7 +308,7 @@ class OrderSender:
                         
                         try:
                             report = json.loads(message)
-                            self._process_execution_report(report)
+                            self._process_execution_report(topic, report)
                         except json.JSONDecodeError as e:
                             logger.error(f"❌ Invalid JSON in execution report: {e}")
                             logger.debug(f"Raw message: {message}")
@@ -326,6 +336,144 @@ class OrderSender:
     def listen_reports(self):
         """Start report listener thread"""
         self._start_report_listener()
+    
+    def _process_execution_report(self, topic: str, report: Dict) -> None:
+        """Process and display execution reports asynchronously"""
+        try:
+            # Extract common fields
+            cl_id = report.get('cl_id', 'N/A')
+            status = report.get('status', 'unknown')
+            timestamp_ns = report.get('ts_ns', 0)
+            
+            # Convert timestamp to readable format
+            if timestamp_ns:
+                timestamp_ms = int(timestamp_ns) / 1_000_000
+                timestamp_str = time.strftime('%H:%M:%S', time.localtime(timestamp_ms / 1000))
+                timestamp_str += f".{int(timestamp_ms % 1000):03d}"
+            else:
+                timestamp_str = time.strftime('%H:%M:%S')
+            
+            if topic == "exec.report":
+                # Update statistics
+                self._report_stats['total'] += 1
+                if status in self._report_stats:
+                    self._report_stats[status] += 1
+                
+                self._display_execution_report(timestamp_str, report)
+                
+                # Update cancel tracker if this is a cancel-related report
+                if status in ["cancelled", "rejected"] and cl_id != 'N/A':
+                    if status == "cancelled":
+                        self.cancel_tracker.confirm_cancel(cl_id)
+                    else:
+                        reason = report.get('reason_text', 'Unknown error')
+                        self.cancel_tracker.fail_cancel(cl_id, reason)
+                        
+            elif topic == "exec.fill":
+                # Update fill statistics
+                self._report_stats['fills'] += 1
+                self._display_fill_report(timestamp_str, report)
+            
+        except Exception as e:
+            logger.error(f"❌ Error processing {topic}: {e}")
+            logger.debug(f"Raw report: {report}")
+    
+    def _display_execution_report(self, timestamp: str, report: Dict) -> None:
+        """Display execution report with rich formatting"""
+        cl_id = report.get('cl_id', 'N/A')
+        status = report.get('status', 'unknown')
+        exchange_order_id = report.get('exchange_order_id', '')
+        reason_code = report.get('reason_code', '')
+        reason_text = report.get('reason_text', '')
+        tags = report.get('tags', {})
+        
+        # Status emoji mapping
+        status_emojis = {
+            'accepted': '✅',
+            'rejected': '❌', 
+            'cancelled': '🔴',
+            'filled': '💰',
+            'partially_filled': '📈',
+            'new': '🆕'
+        }
+        
+        emoji = status_emojis.get(status, '📋')
+        
+        # Create display message
+        display_parts = [
+            f"{emoji} EXEC REPORT",
+            f"[{timestamp}]",
+            f"ID: {cl_id[:8]}...",
+            f"Status: {status.upper()}"
+        ]
+        
+        if exchange_order_id:
+            display_parts.append(f"ExchID: {exchange_order_id[:8]}...")
+        
+        if reason_code and reason_code != 'ok':
+            display_parts.append(f"Code: {reason_code}")
+            
+        if reason_text and reason_text not in ['', 'ok']:
+            display_parts.append(f"Msg: {reason_text[:30]}...")
+        
+        # Add strategy info if available in tags
+        if isinstance(tags, dict) and 'strategy' in tags:
+            display_parts.append(f"Strategy: {tags['strategy']}")
+        
+        print(" | ".join(display_parts))
+        
+        # Log detailed info for important statuses
+        if status in ['rejected', 'cancelled']:
+            logger.warning(f"Order {cl_id}: {status} - {reason_text}")
+        elif status in ['accepted', 'filled']:
+            logger.info(f"Order {cl_id}: {status}")
+    
+    def _display_fill_report(self, timestamp: str, report: Dict) -> None:
+        """Display fill report with trading details"""
+        cl_id = report.get('cl_id', 'N/A')
+        exec_id = report.get('exec_id', 'N/A')
+        symbol = report.get('symbol_or_pair', 'N/A')
+        price = report.get('price', 0.0)
+        size = report.get('size', 0.0)
+        fee_amount = report.get('fee_amount', 0.0)
+        fee_currency = report.get('fee_currency', '')
+        liquidity = report.get('liquidity', 'unknown')
+        
+        # Calculate notional value
+        notional = price * size if price and size else 0.0
+        
+        # Liquidity emoji
+        liq_emoji = '🏗️' if liquidity == 'maker' else '🏃' if liquidity == 'taker' else '💱'
+        
+        display_parts = [
+            f"💰 FILL [{timestamp}]",
+            f"ID: {cl_id[:8]}...",
+            f"Symbol: {symbol}",
+            f"Price: {price:,.4f}" if price else "Price: N/A",
+            f"Size: {size:,.6f}" if size else "Size: N/A",
+            f"Notional: ${notional:,.2f}" if notional else "Notional: N/A",
+            f"{liq_emoji} {liquidity.title()}"
+        ]
+        
+        if fee_amount and fee_currency:
+            display_parts.append(f"Fee: {fee_amount:.6f} {fee_currency}")
+        
+        print(" | ".join(display_parts))
+        logger.info(f"Fill: {symbol} {size} @ {price} (${notional:.2f})")
+    
+    def display_report_summary(self) -> None:
+        """Display summary of received reports"""
+        if hasattr(self, '_report_stats'):
+            stats = self._report_stats
+            print("\n" + "="*60)
+            print("📊 EXECUTION REPORT SUMMARY")
+            print("="*60)
+            print(f"Total Reports: {stats.get('total', 0)}")
+            print(f"Accepted: {stats.get('accepted', 0)}")
+            print(f"Rejected: {stats.get('rejected', 0)}")
+            print(f"Fills: {stats.get('fills', 0)}")
+            print(f"Cancelled: {stats.get('cancelled', 0)}")
+            print("="*60)
     
     def wait_for_cancel_confirmations(self, timeout_seconds: float = 5.0) -> Dict[str, str]:
         """Wait for cancel confirmations"""
@@ -729,12 +877,78 @@ def test_report_connection():
         logger.info("🔌 Report connection test completed")
 
 
+def monitor_execution_reports(cpu_mode: str = "normal"):
+    """Live execution report monitoring mode"""
+    print("="*80)
+    print("📡 LIVE EXECUTION REPORT MONITOR")
+    print("="*80)
+    print(f"🔧 CPU Mode: {cpu_mode.upper()}")
+    print("🔌 Endpoint: tcp://127.0.0.1:5602")
+    print("📋 Listening for: exec.report, exec.fill")
+    print("⚠️  Press Ctrl+C to stop monitoring")
+    print("="*80)
+    print()
+    
+    # Create a monitor-only sender (no order sending capability needed)
+    monitor = OrderSender(cpu_mode=cpu_mode, listen_reports=True)
+    
+    try:
+        # Start report monitoring
+        monitor._start_report_listener()
+        
+        print("🟢 Report monitor started successfully!")
+        print("📊 Waiting for execution reports and fills...")
+        print("="*80)
+        
+        # Keep the main thread alive and show periodic stats
+        start_time = time.time()
+        last_stats_time = start_time
+        
+        while True:
+            time.sleep(5)  # Update every 5 seconds
+            
+            current_time = time.time()
+            elapsed = current_time - start_time
+            
+            # Show periodic statistics
+            if current_time - last_stats_time >= 30:  # Every 30 seconds
+                print(f"\n📊 Stats after {elapsed:.0f}s:")
+                print(f"   Total Reports: {monitor._report_stats['total']}")
+                print(f"   Accepted: {monitor._report_stats['accepted']} | Rejected: {monitor._report_stats['rejected']}")
+                print(f"   Cancelled: {monitor._report_stats['cancelled']} | Fills: {monitor._report_stats['fills']}")
+                print("-" * 60)
+                last_stats_time = current_time
+                
+    except KeyboardInterrupt:
+        print("\n\n🛑 Monitoring stopped by user")
+        
+    except Exception as e:
+        print(f"\n❌ Monitor error: {e}")
+        logger.error(f"Monitor error: {e}")
+        
+    finally:
+        # Clean shutdown
+        print("\n📊 Final execution report summary:")
+        monitor.display_report_summary()
+        
+        # Stop the report listener
+        if hasattr(monitor, '_running'):
+            monitor._running = False
+        
+        if monitor.report_listener_thread and monitor.report_listener_thread.is_alive():
+            print("⏳ Waiting for report listener to finish...")
+            monitor.report_listener_thread.join(timeout=2)
+        
+        monitor.disconnect()
+        print("✅ Monitor shutdown complete")
+
+
 def main():
     """Main entry point with CLI support"""
     parser = argparse.ArgumentParser(description="Send orders to Latentspeed Trading Engine")
     parser.add_argument("--endpoint", default="tcp://127.0.0.1:5601", help="Trading engine endpoint")
     parser.add_argument("--cpu-mode", choices=["high_perf", "normal", "eco"], default="normal", help="CPU usage mode")
-    parser.add_argument("--action", choices=["place", "cancel", "replace", "test", "debug", "reduce_only"], default="test",
+    parser.add_argument("--action", choices=["place", "cancel", "replace", "test", "debug", "reduce_only", "monitor"], default="test",
                        help="Order action (default: test)")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     parser.add_argument("--test-reports", action="store_true", help="Test report endpoint connection")
@@ -767,6 +981,8 @@ def main():
         test_sequence(cpu_mode=args.cpu_mode)
     elif args.action == "reduce_only":
         test_reduce_only_position_management(cpu_mode=args.cpu_mode)
+    elif args.action == "monitor":
+        monitor_execution_reports(cpu_mode=args.cpu_mode)
     elif args.action == "debug":
         logger.info("🐛 Running debug mode...")
         enable_debug_logging()

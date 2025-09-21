@@ -140,17 +140,27 @@ OrderResponse BybitClient::place_order(const OrderRequest& request) {
         }
         
         // CRITICAL: Handle reduce_only for position management
-        if (request.reduce_only) {
-            // Only supported for derivatives (linear/inverse), not spot
-            std::string category = request.category.value_or("spot");
-            if (category != "spot") {
-                params.AddMember("reduceOnly", rapidjson::Value(true), allocator);
-                spdlog::info("[BybitClient] Reduce-only order for {}: {}", 
-                           request.symbol, request.client_order_id);
+        // Always include reduceOnly parameter for derivatives (linear/inverse)
+        std::string category = request.category.value_or("spot");
+        if (category != "spot") {
+            // Always add the reduceOnly parameter for derivatives
+            params.AddMember("reduceOnly", rapidjson::Value(request.reduce_only), allocator);
+            
+            // For derivatives, also add positionIdx (0 for one-way mode, 1 for buy side, 2 for sell side in hedge mode)
+            // Default to 0 (one-way mode) - this is the most common setup
+            params.AddMember("positionIdx", rapidjson::Value(0), allocator);
+            
+            if (request.reduce_only) {
+                spdlog::info("[BybitClient] ✅ REDUCE-ONLY order for {} ({}): {} - category: {}, positionIdx: 0", 
+                           request.symbol, category, request.client_order_id, category);
             } else {
-                spdlog::warn("[BybitClient] reduce_only ignored for spot order: {}", 
-                           request.client_order_id);
+                spdlog::debug("[BybitClient] Regular order (not reduce-only): {} - category: {}, positionIdx: 0", 
+                             request.client_order_id, category);
             }
+        } else if (request.reduce_only) {
+            // Warn if trying to use reduce-only on spot
+            spdlog::warn("[BybitClient] ❌ reduce_only ignored for spot order: {} - category: {}", 
+                        request.client_order_id, category);
         }
         
         params.AddMember("orderLinkId", rapidjson::Value(request.client_order_id.c_str(), allocator), allocator);
@@ -160,6 +170,9 @@ OrderResponse BybitClient::place_order(const OrderRequest& request) {
         rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
         params.Accept(writer);
         std::string params_json = buffer.GetString();
+        
+        // LOG THE ACTUAL JSON PAYLOAD BEING SENT
+        spdlog::info("[BybitClient] 📨 Sending to Bybit API: {}", params_json);
         
         // Store pending order
         {
