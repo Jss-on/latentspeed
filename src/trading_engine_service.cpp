@@ -14,6 +14,8 @@
 
 #include "trading_engine_service.h"
 #include "hft_data_structures.h"
+#include "action_dispatch.h"
+#include "reason_code_mapper.h"
 #include <chrono>
 #include <iomanip>
 #include <sstream>
@@ -23,6 +25,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <cctype>
+#include <optional>
+#include <cmath>
 
 #ifdef HFT_LINUX_FEATURES
 #include <sys/personality.h>
@@ -69,6 +74,166 @@
 namespace latentspeed {
 
 using namespace hft;
+
+namespace {
+
+std::string to_lower_ascii(std::string_view input) {
+    std::string out(input.begin(), input.end());
+    std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return out;
+}
+
+std::string to_upper_ascii(std::string_view input) {
+    std::string out(input.begin(), input.end());
+    std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) {
+        return static_cast<char>(std::toupper(c));
+    });
+    return out;
+}
+
+std::string trim_trailing_zeros(std::string value) {
+    if (auto pos = value.find('.'); pos != std::string::npos) {
+        auto last = value.find_last_not_of('0');
+        if (last != std::string::npos) {
+            value.erase(last + 1);
+        }
+        if (!value.empty() && value.back() == '.') {
+            value.pop_back();
+        }
+    }
+    if (value.empty()) {
+        return std::string{"0"};
+    }
+    return value;
+}
+
+std::string format_decimal(double value, int precision = 12) {
+    if (!std::isfinite(value)) {
+        return std::string{"0"};
+    }
+    std::ostringstream oss;
+    oss.setf(std::ios::fixed, std::ios::floatfield);
+    oss << std::setprecision(precision) << value;
+    return trim_trailing_zeros(oss.str());
+}
+
+std::string normalize_symbol_for_bybit(std::string_view symbol, [[maybe_unused]] std::string_view product_type) {
+    std::string s(symbol.begin(), symbol.end());
+    if (s.empty()) {
+        return s;
+    }
+
+    // Remove settle suffix if present (e.g., ETH/USDT:USDT)
+    if (auto colon = s.find(':'); colon != std::string::npos) {
+        s = s.substr(0, colon);
+    }
+
+    std::string upper = to_upper_ascii(s);
+    const std::string perp_suffix = "-PERP";
+    if (upper.size() > perp_suffix.size()) {
+        auto tail = upper.substr(upper.size() - perp_suffix.size());
+        if (tail == perp_suffix) {
+            upper.erase(upper.size() - perp_suffix.size());
+        }
+    }
+
+    std::string compact;
+    compact.reserve(upper.size());
+    for (char c : upper) {
+        if (c == '-' || c == '/') {
+            continue;
+        }
+        compact.push_back(c);
+    }
+
+    // Fallback: if product_type signals spot but compact is empty, return original upper
+    if (compact.empty()) {
+        return upper;
+    }
+    return compact;
+}
+
+std::optional<std::string> map_time_in_force(std::string_view tif_raw) {
+    if (tif_raw.empty()) {
+        return std::nullopt;
+    }
+    auto upper = to_upper_ascii(tif_raw);
+    if (upper == "GTC") {
+        return std::string{"GTC"};
+    }
+    if (upper == "IOC") {
+        return std::string{"IOC"};
+    }
+    if (upper == "FOK") {
+        return std::string{"FOK"};
+    }
+    if (upper == "PO" || upper == "POST_ONLY") {
+        return std::string{"PostOnly"};
+    }
+    return std::string(tif_raw);
+}
+
+std::optional<std::string> normalize_report_status(std::string_view raw_status) {
+    auto lower = to_lower_ascii(raw_status);
+    if (lower == "new" || lower == "partiallyfilled" || lower == "filled" || lower == "accepted") {
+        return std::string{"accepted"};
+    }
+    if (lower == "cancelled" || lower == "canceled" || lower == "partiallyfilledcancelled" || lower == "inactive" || lower == "deactivated") {
+        return std::string{"canceled"};
+    }
+    if (lower == "rejected") {
+        return std::string{"rejected"};
+    }
+    if (lower == "amended" || lower == "replaced") {
+        return std::string{"replaced"};
+    }
+    return std::nullopt;
+}
+
+std::string normalize_reason_code(std::string_view normalized_status, std::string_view raw_reason) {
+    if (normalized_status == "rejected") {
+        std::string lower_reason = to_lower_ascii(raw_reason);
+        if (lower_reason.find("balance") != std::string::npos) {
+            return std::string{"insufficient_balance"};
+        }
+        return std::string{"venue_reject"};
+    }
+    if (normalized_status == "canceled") {
+        return std::string{"ok"};
+    }
+    if (normalized_status == "replaced") {
+        return std::string{"ok"};
+    }
+    return std::string{"ok"};
+}
+
+std::string build_reason_text(std::string_view normalized_status, std::string_view raw_reason) {
+    if (!raw_reason.empty()) {
+        if (raw_reason == "EC_NoError") {
+            return std::string{"OK"};
+        }
+        return std::string(raw_reason);
+    }
+    if (normalized_status == "canceled") {
+        return std::string{"Order cancelled"};
+    }
+    if (normalized_status == "rejected") {
+        return std::string{"Order rejected"};
+    }
+    if (normalized_status == "replaced") {
+        return std::string{"Order replaced"};
+    }
+    return std::string{"OK"};
+}
+
+bool is_terminal_status(std::string_view raw_status) {
+    auto lower = to_lower_ascii(raw_status);
+    return lower == "filled" || lower == "cancelled" || lower == "canceled" || lower == "rejected" || lower == "partiallyfilledcancelled";
+}
+
+} // namespace
 
 
 // ============================================================================
@@ -146,7 +311,27 @@ void calibrate_tsc() {
  */
 template<typename T>
 [[gnu::always_inline]] inline void prefetch(const T* ptr, int locality = 3) noexcept {
-    __builtin_prefetch(ptr, 0, locality);
+    if (ptr == nullptr) {
+        return;
+    }
+
+    switch (locality) {
+        case 0:
+            __builtin_prefetch(ptr, 0, 0);
+            break;
+        case 1:
+            __builtin_prefetch(ptr, 0, 1);
+            break;
+        case 2:
+            __builtin_prefetch(ptr, 0, 2);
+            break;
+        case 3:
+            __builtin_prefetch(ptr, 0, 3);
+            break;
+        default:
+            __builtin_prefetch(ptr, 0, 3);
+            break;
+    }
 }
 
 /**
@@ -341,15 +526,42 @@ bool TradingEngineService::initialize() {
         // Create Bybit client - for testing, we'll use a minimal setup
         auto bybit_client = std::make_unique<BybitClient>();
         
-        // Initialize with test credentials (can be overridden via config)
-        std::string api_key = "xgI7ixEhDcOZ5Sr0Sb";
-        std::string api_secret = "JHi232e3CHDbRRZuYe0EnbLYdYtTi7NF9n82"; 
-        bool use_testnet = true;
+        auto getenv_string = [](const char* key) -> std::string {
+            const char* value = std::getenv(key);
+            return value ? std::string(value) : std::string();
+        };
+
+        auto getenv_bool = [](const char* key, bool default_value) -> bool {
+            const char* value = std::getenv(key);
+            if (!value) {
+                return default_value;
+            }
+            std::string lower = to_lower_ascii(value);
+            if (lower == "1" || lower == "true" || lower == "yes" || lower == "on") {
+                return true;
+            }
+            if (lower == "0" || lower == "false" || lower == "no" || lower == "off") {
+                return false;
+            }
+            return default_value;
+        };
+
+        std::string api_key = getenv_string("LATENTSPEED_BYBIT_API_KEY");
+        std::string api_secret = getenv_string("LATENTSPEED_BYBIT_API_SECRET");
+        bool use_testnet = getenv_bool("LATENTSPEED_BYBIT_USE_TESTNET", true);
+
+        if (api_key.empty() || api_secret.empty()) {
+            spdlog::error("[HFT-Engine] Missing Bybit credentials. Set LATENTSPEED_BYBIT_API_KEY and LATENTSPEED_BYBIT_API_SECRET.");
+            return false;
+        }
         
         // For cancel validation testing, we can initialize without connecting to exchange
         // This allows us to test the execution report flow
-        bybit_client->initialize(api_key, api_secret, use_testnet);
-        
+        if (!bybit_client->initialize(api_key, api_secret, use_testnet)) {
+            spdlog::error("[HFT-Engine] Failed to initialize Bybit client with provided credentials");
+            return false;
+        }
+
         // Set callbacks for order updates and fills
         bybit_client->set_order_update_callback([this](const OrderUpdate& update) {
             this->on_order_update_hft(update);
@@ -359,10 +571,14 @@ bool TradingEngineService::initialize() {
             this->on_fill_hft(fill);
         });
         
+        if (!bybit_client->connect()) {
+            spdlog::warn("[HFT-Engine] Bybit WebSocket not connected; fills may be delayed");
+        }
+
         // Add to exchange clients map - this is the key fix!
         exchange_clients_["bybit"] = std::move(bybit_client);
-        
-        spdlog::info("[HFT-Engine] Exchange clients initialized: bybit");
+
+        spdlog::info("[HFT-Engine] Exchange clients initialized: bybit (use_testnet={})", use_testnet ? "true" : "false");
         
         const auto end_time = std::chrono::high_resolution_clock::now();
         const auto init_time_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -659,6 +875,35 @@ HFTExecutionOrder* TradingEngineService::parse_execution_order_hft(std::string_v
                     order->reduce_only = (val == "true");
                 }
             }
+
+            auto parse_object_to_params = [&](const rapidjson::Value& obj, const std::string& prefix = std::string()) {
+                for (auto it = obj.MemberBegin(); it != obj.MemberEnd(); ++it) {
+                    if (order->params.full()) break;
+                    std::string key = prefix.empty() ? it->name.GetString()
+                                                      : prefix + it->name.GetString();
+                    if (it->value.IsString()) {
+                        order->params.insert(FixedString<32>(key.c_str()), FixedString<64>(it->value.GetString()));
+                    } else if (it->value.IsNumber()) {
+                        std::string str_val = format_decimal(it->value.GetDouble());
+                        order->params.insert(FixedString<32>(key.c_str()), FixedString<64>(str_val.c_str()));
+                    } else if (it->value.IsBool()) {
+                        const char* bool_val = it->value.GetBool() ? "true" : "false";
+                        order->params.insert(FixedString<32>(key.c_str()), FixedString<64>(bool_val));
+                    }
+                }
+            };
+
+            if (details.HasMember("params") && details["params"].IsObject()) {
+                parse_object_to_params(details["params"]);
+            }
+
+            if (details.HasMember("cancel") && details["cancel"].IsObject()) {
+                parse_object_to_params(details["cancel"], "cancel_");
+            }
+
+            if (details.HasMember("replace") && details["replace"].IsObject()) {
+                parse_object_to_params(details["replace"], "replace_");
+            }
         }
 
         // Parse tags into flat map (limited to prevent DoS)
@@ -688,48 +933,64 @@ HFTExecutionOrder* TradingEngineService::parse_execution_order_hft(std::string_v
     const uint64_t process_start_ns = get_current_time_ns_hft();
     
     try {
-        // Check for duplicate processing
+        const std::string_view action_view = order.action.view();
+        if (action_view.empty()) {
+            send_rejection_report_hft(order, "missing_action", "Action is required");
+            return;
+        }
+
+        const bool action_is_alpha = std::all_of(
+            action_view.begin(),
+            action_view.end(),
+            [](unsigned char ch) { return ch < 0x80 && std::isalpha(ch); }
+        );
+        if (!action_is_alpha) {
+            send_rejection_report_hft(order, "invalid_action", "Action contains invalid characters");
+            return;
+        }
+
+        const std::string action_lower = to_lower_ascii(action_view);
+        const auto action_kind = dispatch::decode_action(action_lower);
+
+        using dispatch::ActionKind;
+        using ActionHandler = void (TradingEngineService::*)(const HFTExecutionOrder&);
+
+        ActionHandler handler = nullptr;
+        switch (action_kind) {
+            case ActionKind::Place:
+                handler = &TradingEngineService::place_cex_order_hft;
+                break;
+            case ActionKind::Cancel:
+                handler = &TradingEngineService::cancel_cex_order_hft;
+                break;
+            case ActionKind::Replace:
+                handler = &TradingEngineService::replace_cex_order_hft;
+                break;
+            case ActionKind::Unknown:
+            default:
+                break;
+        }
+
+        if (handler == nullptr) {
+            spdlog::warn(
+                "[HFT-Engine] Unknown action '{}', rejecting order {}",
+                std::string(action_view),
+                order.cl_id.c_str()
+            );
+            send_rejection_report_hft(order, "invalid_action", "Unknown action");
+            return;
+        }
+
+        // Check for duplicate processing only after we know the action is supported
         const uint64_t current_time_ns = get_current_time_ns_hft();
         if (processed_orders_->find(order.cl_id)) [[unlikely]] {
-            // Order already processed, ignore duplicate
             spdlog::warn("[HFT-Engine] Duplicate order ignored: {}", order.cl_id.c_str());
             return;
         }
 
-        // Mark as processed immediately
         processed_orders_->insert(order.cl_id, current_time_ns);
 
-        // Branch-free action dispatch using perfect hash
-        // Pre-computed hash for common actions
-        static constexpr uint32_t PLACE_HASH = 0x1a2b3c4d;   // Pre-computed hash("place")
-        static constexpr uint32_t CANCEL_HASH = 0x2b3c4d5e;  // Pre-computed hash("cancel")
-        static constexpr uint32_t REPLACE_HASH = 0x3c4d5e6f; // Pre-computed hash("replace")
-        
-        // Simple FNV-1a hash for action string
-        uint32_t hash = 0x811c9dc5;
-        for (char c : order.action.view()) {
-            hash ^= static_cast<uint32_t>(c);
-            hash *= 0x01000193;
-        }
-        
-        // Use computed goto pattern (branch-free dispatch)
-        using ActionHandler = void (TradingEngineService::*)(const HFTExecutionOrder&);
-        static const ActionHandler handlers[] = {
-            &TradingEngineService::place_cex_order_hft,   // index 0
-            &TradingEngineService::cancel_cex_order_hft,  // index 1
-            &TradingEngineService::replace_cex_order_hft  // index 2
-        };
-        
-        // Convert hash to index (0-2) without branches
-        const uint32_t idx = (hash == PLACE_HASH) * 0 + 
-                           (hash == CANCEL_HASH) * 1 + 
-                           (hash == REPLACE_HASH) * 2;
-        
-        if (idx < 3) [[likely]] {
-            (this->*handlers[idx])(order);
-        } else {
-            send_rejection_report_hft(order, "invalid_action", "Unknown action");
-        }
+        (this->*handler)(order);
 
         // Update latency statistics with relaxed ordering
         const uint64_t process_end_ns = get_current_time_ns_hft();
@@ -770,33 +1031,88 @@ void TradingEngineService::place_cex_order_hft(const HFTExecutionOrder& order) {
         // Build order request with stack allocation
         OrderRequest req;
         req.client_order_id = std::string(order.cl_id.view());
-        req.symbol = std::string(order.symbol.view());
-        req.side = std::string(order.side.view());
-        req.order_type = std::string(order.order_type.view());
-        req.quantity = std::to_string(order.size);
 
-        // Handle price for limit orders
-        if (order.order_type == std::string_view("limit")) {
+        // Normalise symbol for Bybit requirements and ensure lowercase side/order type
+        const std::string product_type_lower = to_lower_ascii(order.product_type.view());
+        const std::string category = product_type_lower.empty() || product_type_lower == "spot" ? "spot" : "linear";
+        req.category = category;
+        req.symbol = normalize_symbol_for_bybit(order.symbol.view(), order.product_type.view());
+        req.side = to_lower_ascii(order.side.view());
+
+        auto order_type_lower = to_lower_ascii(order.order_type.view());
+        bool is_stop_order = (order_type_lower == "stop" || order_type_lower == "stop_market");
+        bool is_stop_limit = (order_type_lower == "stop_limit");
+
+        if (is_stop_order) {
+            req.order_type = "market";
+        } else if (is_stop_limit) {
+            req.order_type = "limit";
+        } else {
+            req.order_type = order_type_lower;
+        }
+
+        if (req.order_type != "limit" && req.order_type != "market") {
+            send_rejection_report_hft(order, "unsupported_type", "Unsupported order type for venue");
+            return;
+        }
+
+        if (order.size <= 0.0) {
+            send_rejection_report_hft(order, "invalid_size", "Size must be greater than zero");
+            return;
+        }
+        req.quantity = format_decimal(order.size);
+
+        if (req.order_type == "limit") {
             if (order.price == 0.0) {
                 send_rejection_report_hft(order, "missing_price", "Price required for limit orders");
                 return;
             }
-            req.price = std::to_string(order.price);
+            req.price = format_decimal(order.price);
         }
 
-        // Set category based on product type (CRITICAL for reduce_only functionality)
-        if (order.product_type == std::string_view("perpetual")) {
-            req.category = "linear";
-        } else if (order.product_type == std::string_view("spot")) {
-            req.category = "spot";
-        } else {
-            // Default to linear for derivatives if not explicitly set
-            req.category = "linear";
+        auto tif_mapped = map_time_in_force(order.time_in_force.view());
+        if (tif_mapped) {
+            req.time_in_force = *tif_mapped;
+        } else if (req.order_type == "limit") {
+            req.time_in_force = "GTC";
         }
 
-        req.time_in_force = order.time_in_force.empty() ? "GTC" : std::string(order.time_in_force.view());
-        
-        // Handle reduce_only for position management (critical for derivatives)
+        // Merge pass-through params first so we can override selectively when needed
+        order.params.for_each([&](const auto& key, const auto& value) {
+            if (!req.extra_params.contains(key.c_str())) {
+                req.extra_params.emplace(key.c_str(), value.c_str());
+            }
+        });
+
+        if ((is_stop_order || is_stop_limit) && order.stop_price <= 0.0) {
+            send_rejection_report_hft(order, "missing_stop_price", "stop_price required for stop orders");
+            return;
+        }
+
+        // Handle stop / stop-limit specifics
+        if ((is_stop_order || is_stop_limit) && order.stop_price > 0.0) {
+            req.extra_params["triggerPrice"] = format_decimal(order.stop_price);
+
+            // Determine trigger direction: 1 for price rising to trigger, 2 for falling
+            std::string trigger_direction = "1";
+            if (auto* trig = order.tags.find(FixedString<32>("stop_trigger")); trig != nullptr) {
+                if (trig->view() == "below") {
+                    trigger_direction = "2";
+                } else if (trig->view() == "above") {
+                    trigger_direction = "1";
+                }
+            } else {
+                trigger_direction = (req.side == "buy") ? "1" : "2";
+            }
+            req.extra_params["triggerDirection"] = trigger_direction;
+            req.extra_params["orderFilter"] = "StopOrder";
+
+            // Stop-limit retains explicit limit price if provided
+            if (is_stop_limit && order.price > 0.0) {
+                req.price = format_decimal(order.price);
+            }
+        }
+
         req.reduce_only = order.reduce_only;
         if (order.reduce_only) {
             // For reduce-only orders, ensure we're only trading perpetuals/futures
@@ -821,6 +1137,10 @@ void TradingEngineService::place_cex_order_hft(const HFTExecutionOrder& order) {
             auto* order_copy = order_pool_->allocate();
             if (order_copy) {
                 *order_copy = order;
+                if (response.exchange_order_id.has_value()) {
+                    order_copy->params.insert(FixedString<32>("exchange_order_id"),
+                                             FixedString<64>(response.exchange_order_id->c_str()));
+                }
                 pending_orders_->insert(order.cl_id, order_copy);
             }
 
@@ -836,8 +1156,7 @@ void TradingEngineService::place_cex_order_hft(const HFTExecutionOrder& order) {
 }
 
 /**
- * @brief HFT-optimized order closing (cancellation via opposite order)
- * Instead of using exchange cancel API, places an opposite order to close the position
+ * @brief HFT-optimized native cancellation flow
  */
 void TradingEngineService::cancel_cex_order_hft(const HFTExecutionOrder& order) {
     try {
@@ -848,64 +1167,58 @@ void TradingEngineService::cancel_cex_order_hft(const HFTExecutionOrder& order) 
         }
         auto& client = client_it->second;
 
-        // Extract original order details from tags for closing
-        auto* cl_id_to_close = order.tags.find(FixedString<32>("cl_id_to_cancel"));
-        auto* original_side = order.tags.find(FixedString<32>("original_side"));
-        auto* original_symbol = order.tags.find(FixedString<32>("original_symbol"));
-        auto* original_size = order.tags.find(FixedString<32>("original_size"));
-        
-        if (!cl_id_to_close || !original_side || !original_symbol || !original_size) {
-            send_rejection_report_hft(order, "missing_cancel_data", "Missing required cancel information");
+        auto find_value = [&](const char* key) -> const FixedString<64>* {
+            if (auto* param = order.params.find(FixedString<32>(key))) {
+                return param;
+            }
+            return order.tags.find(FixedString<32>(key));
+        };
+
+        const auto* cl_id_to_cancel = find_value("cancel_cl_id_to_cancel");
+        if (!cl_id_to_cancel) {
+            send_rejection_report_hft(order, "missing_cancel_id", "Missing cl_id_to_cancel for cancel request");
             return;
         }
 
-        // Create opposite order to close the position with reduce_only
-        OrderRequest close_req;
-        close_req.client_order_id = std::string(order.cl_id.view());
-        close_req.symbol = std::string(original_symbol->view());
-        close_req.quantity = std::string(original_size->view());
-        
-        // Opposite side for closing
-        if (original_side->view() == "buy") {
-            close_req.side = "sell";
-        } else {
-            close_req.side = "buy";
+        std::optional<std::string> exchange_order_id;
+        if (auto* exch = find_value("cancel_exchange_order_id")) {
+            exchange_order_id = std::string(exch->c_str());
         }
-        
-        close_req.order_type = "market";  // Use market order for fast closing
-        close_req.time_in_force = "IOC";   // Immediate or cancel
-        
-        // CRITICAL: Set reduce_only=true for position closing
-        close_req.reduce_only = true;
-        
-        // Set category based on venue
-        if (order.venue == std::string_view("bybit")) {
-            if (order.product_type == std::string_view("perpetual")) {
-                close_req.category = "linear";
-            } else {
-                close_req.category = "spot";
+
+        const std::string cl_to_cancel_str = cl_id_to_cancel->c_str();
+
+        std::optional<std::string> symbol;
+        if (!order.symbol.empty()) {
+            symbol = normalize_symbol_for_bybit(order.symbol.view(), order.product_type.view());
+        }
+
+        // Fallback to cached pending order metadata when not supplied in request
+        OrderId original_id_lookup(cl_to_cancel_str.c_str());
+        if (!symbol.has_value()) {
+            if (auto* pending_order = pending_orders_->find(original_id_lookup); pending_order && *pending_order) {
+                symbol = normalize_symbol_for_bybit((*pending_order)->symbol.view(), (*pending_order)->product_type.view());
+            }
+        }
+        if (!exchange_order_id.has_value()) {
+            if (auto* pending_order = pending_orders_->find(original_id_lookup); pending_order && *pending_order) {
+                if (auto* stored_exch = (*pending_order)->params.find(FixedString<32>("exchange_order_id"))) {
+                    exchange_order_id = std::string(stored_exch->c_str());
+                }
             }
         }
 
-        OrderResponse response = client->place_order(close_req);
-        
+        OrderResponse response = client->cancel_order(cl_to_cancel_str, symbol, exchange_order_id);
+
         if (response.success) {
-            // Remove from pending orders
-            OrderId cl_id(cl_id_to_close->c_str());
-            auto* pending_order = pending_orders_->find(cl_id);
-            if (pending_order && *pending_order) {
+            send_acceptance_report_hft(order, response.exchange_order_id, response.message.empty() ?
+                                       "Cancel request sent" : response.message);
+
+            if (auto* pending_order = pending_orders_->find(original_id_lookup); pending_order && *pending_order) {
                 order_pool_->deallocate(*pending_order);
-                pending_orders_->erase(cl_id);
+                pending_orders_->erase(original_id_lookup);
             }
-            
-            send_acceptance_report_hft(order, response.exchange_order_id, "Position closed via reduce-only opposite order");
-            
-            // Log the closing action with reduce_only info
-            spdlog::info("[HFT-Engine] Order {} closed via reduce-only {} order {} of size {}", 
-                cl_id_to_close->c_str(), close_req.side, close_req.client_order_id, close_req.quantity);
         } else {
-            send_rejection_report_hft(order, "close_rejected", 
-                "Failed to place reduce-only closing order: " + response.message);
+            send_rejection_report_hft(order, "cancel_rejected", response.message);
         }
 
     } catch (const std::exception& e) {
@@ -926,7 +1239,14 @@ void TradingEngineService::replace_cex_order_hft(const HFTExecutionOrder& order)
         }
         auto& client = client_it->second;
 
-        auto* cl_id_to_replace = order.tags.find(FixedString<32>("cl_id_to_replace"));
+        auto find_value = [&](const char* key) -> const FixedString<64>* {
+            if (auto* param = order.params.find(FixedString<32>(key))) {
+                return param;
+            }
+            return order.tags.find(FixedString<32>(key));
+        };
+
+        const auto* cl_id_to_replace = find_value("replace_cl_id_to_replace");
         if (!cl_id_to_replace) {
             send_rejection_report_hft(order, "missing_replace_id", "Missing cl_id_to_replace");
             return;
@@ -935,11 +1255,20 @@ void TradingEngineService::replace_cex_order_hft(const HFTExecutionOrder& order)
         std::optional<std::string> new_price;
         std::optional<std::string> new_quantity;
 
-        if (order.price > 0.0) {
-            new_price = std::to_string(order.price);
+        if (auto* price_override = find_value("replace_new_price")) {
+            if (!price_override->empty()) {
+                new_price = price_override->c_str();
+            }
+        } else if (order.price > 0.0) {
+            new_price = format_decimal(order.price);
         }
-        if (order.size > 0.0) {
-            new_quantity = std::to_string(order.size);
+
+        if (auto* size_override = find_value("replace_new_size")) {
+            if (!size_override->empty()) {
+                new_quantity = size_override->c_str();
+            }
+        } else if (order.size > 0.0) {
+            new_quantity = format_decimal(order.size);
         }
 
         OrderResponse response = client->modify_order(
@@ -976,21 +1305,27 @@ void TradingEngineService::on_order_update_hft(const OrderUpdate& update) {
 
         const HFTExecutionOrder& original_order = **order_ptr;
 
-        // Create execution report from pool
+        const std::string raw_status = update.status;
+        auto normalized_status = normalize_report_status(raw_status);
+        if (!normalized_status) {
+            return;
+        }
+
         auto* report = report_pool_->allocate();
         if (!report) {
             spdlog::error("[HFT-Engine] Report pool exhausted");
             return;
         }
 
-        // Populate report with minimal copying
         report->version = 1;
         report->cl_id = cl_id;
         report->exchange_order_id.assign(update.exchange_order_id.c_str());
-        report->status.assign(update.status.c_str());
-        report->reason_code.assign(update.reason.empty() ? "ok" : "exchange_update");
-        report->reason_text.assign(update.reason.empty() ? 
-                                 ("Order " + update.status) : update.reason);
+        report->status.assign(normalized_status->c_str());
+
+        std::string reason_code = normalize_reason_code(*normalized_status, update.reason);
+        std::string reason_text = build_reason_text(*normalized_status, update.reason);
+        report->reason_code.assign(reason_code.c_str());
+        report->reason_text.assign(reason_text.c_str());
         report->ts_ns.store(get_current_time_ns_hft(), std::memory_order_relaxed);
         report->tags = original_order.tags;
 
@@ -999,7 +1334,7 @@ void TradingEngineService::on_order_update_hft(const OrderUpdate& update) {
         report_pool_->deallocate(report);
 
         // Clean up completed orders
-        if (update.status == "filled" || update.status == "cancelled" || update.status == "rejected") {
+        if (is_terminal_status(raw_status)) {
             pending_orders_->erase(cl_id);
             order_pool_->deallocate(*order_ptr);
         }
@@ -1038,6 +1373,9 @@ void TradingEngineService::on_fill_hft(const FillData& fill_data) {
         OrderId cl_id(fill_data.client_order_id.c_str());
         if (auto* order_ptr = pending_orders_->find(cl_id); order_ptr && *order_ptr) {
             fill->tags = (*order_ptr)->tags;
+            if (!(*order_ptr)->symbol.empty()) {
+                fill->symbol_or_pair.assign((*order_ptr)->symbol.c_str());
+            }
         }
         fill->tags.insert(FixedString<32>("execution_type"), FixedString<64>("live"));
 
@@ -1146,7 +1484,8 @@ void TradingEngineService::send_rejection_report_hft(const HFTExecutionOrder& or
     report->version = 1;
     report->cl_id = order.cl_id;
     report->status.assign("rejected");
-    report->reason_code.assign(reason_code);
+    const std::string canonical = latentspeed::exec::canonical_reason_code(reason_code);
+    report->reason_code.assign(canonical.c_str());
     report->reason_text.assign(reason_text);
     report->ts_ns.store(get_current_time_ns_hft(), std::memory_order_relaxed);
     report->tags = order.tags;
@@ -1196,7 +1535,11 @@ std::string TradingEngineService::serialize_execution_report_hft(const HFTExecut
     
     // Serialize tags
     rapidjson::Value tags_obj(rapidjson::kObjectType);
-    // Note: Would need iterator support for FlatMap to serialize all tags
+    report.tags.for_each([&](const auto& key, const auto& value) {
+        rapidjson::Value json_key(key.c_str(), allocator);
+        rapidjson::Value json_val(value.c_str(), allocator);
+        tags_obj.AddMember(json_key, json_val, allocator);
+    });
     doc.AddMember("tags", tags_obj, allocator);
     
     rapidjson::StringBuffer buffer;
@@ -1228,6 +1571,11 @@ std::string TradingEngineService::serialize_fill_hft(const HFTFill& fill) {
     
     // Serialize tags
     rapidjson::Value tags_obj(rapidjson::kObjectType);
+    fill.tags.for_each([&](const auto& key, const auto& value) {
+        rapidjson::Value json_key(key.c_str(), allocator);
+        rapidjson::Value json_val(value.c_str(), allocator);
+        tags_obj.AddMember(json_key, json_val, allocator);
+    });
     doc.AddMember("tags", tags_obj, allocator);
     
     rapidjson::StringBuffer buffer;

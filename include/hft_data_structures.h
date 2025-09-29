@@ -296,6 +296,20 @@ public:
     [[nodiscard]] constexpr bool full() const noexcept { return size_ >= MaxSize; }
     
     constexpr void clear() noexcept { size_ = 0; }
+
+    template <typename Fn>
+    constexpr void for_each(Fn&& fn) noexcept {
+        for (size_t i = 0; i < size_; ++i) {
+            fn(data_[i].key, data_[i].value);
+        }
+    }
+
+    template <typename Fn>
+    constexpr void for_each(Fn&& fn) const noexcept {
+        for (size_t i = 0; i < size_; ++i) {
+            fn(data_[i].key, data_[i].value);
+        }
+    }
 };
 
 // ============================================================================
@@ -324,6 +338,7 @@ struct CACHE_ALIGNED HFTExecutionOrder {
     
     // Fast tag lookup (max 8 tags)
     FlatMap<FixedString<32>, FixedString<64>, 8> tags;
+    FlatMap<FixedString<32>, FixedString<64>, 12> params;
     
     constexpr HFTExecutionOrder() noexcept = default;
     
@@ -344,9 +359,10 @@ struct CACHE_ALIGNED HFTExecutionOrder {
         , size(other.size)
         , stop_price(other.stop_price)
         , reduce_only(other.reduce_only)
-        , tags(other.tags) {
+        , tags(other.tags)
+        , params(other.params) {
     }
-    
+
     HFTExecutionOrder& operator=(const HFTExecutionOrder& other) noexcept {
         if (this != &other) {
             version = other.version;
@@ -365,6 +381,7 @@ struct CACHE_ALIGNED HFTExecutionOrder {
             stop_price = other.stop_price;
             reduce_only = other.reduce_only;
             tags = other.tags;
+            params = other.params;
         }
         return *this;
     }

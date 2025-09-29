@@ -139,7 +139,8 @@ public:
      * @return Order response with result
      */
     virtual OrderResponse cancel_order(const std::string& client_order_id,
-                                      const std::optional<std::string>& symbol = std::nullopt) = 0;
+                                      const std::optional<std::string>& symbol = std::nullopt,
+                                      const std::optional<std::string>& exchange_order_id = std::nullopt) = 0;
     
     /**
      * @brief Modify an existing order
