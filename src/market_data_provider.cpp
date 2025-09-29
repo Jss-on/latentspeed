@@ -34,7 +34,8 @@ MarketDataProvider::MarketDataProvider(const std::string& exchange,
     // Initialize lock-free queues
     tick_queue_ = std::make_unique<hft::LockFreeSPSCQueue<MarketTick, 4096>>();
     orderbook_queue_ = std::make_unique<hft::LockFreeSPSCQueue<OrderBookSnapshot, 2048>>();
-    message_queue_ = std::make_unique<hft::LockFreeSPSCQueue<std::string, 8192>>();
+    // Initialize raw message queue from WebSocket (fixed-size buffer for lock-free queue)
+    message_queue_ = std::make_unique<hft::LockFreeSPSCQueue<MessageBuffer, 8192>>();
     
     spdlog::info("[MarketData] Memory pools and queues initialized");
 }
@@ -63,12 +64,12 @@ bool MarketDataProvider::initialize() {
         orderbook_publisher_->bind("tcp://*:5557");
         
         // Initialize Boost.Beast WebSocket components
-        io_context_ = std::make_unique<net::io_context>();
-        ssl_context_ = std::make_unique<ssl::context>(ssl::context::tlsv12_client);
+        io_context_ = std::make_unique<boost::asio::io_context>();
+        ssl_context_ = std::make_unique<boost::asio::ssl::context>(boost::asio::ssl::context::tlsv12_client);
         
         // Configure SSL context
         ssl_context_->set_default_verify_paths();
-        ssl_context_->set_verify_mode(ssl::verify_peer);
+        ssl_context_->set_verify_mode(boost::asio::ssl::verify_peer);
         
         spdlog::info("[MarketData] ZMQ publishers bound to ports 5556 (trades) and 5557 (orderbook)");
         spdlog::info("[MarketData] WebSocket client initialized");
@@ -131,7 +132,7 @@ void MarketDataProvider::stop() {
     // Stop WebSocket connection
     if (ws_stream_) {
         try {
-            ws_stream_->close(websocket::close_code::normal);
+            ws_stream_->close(boost::beast::websocket::close_code::normal);
         } catch (const std::exception& e) {
             spdlog::warn("[MarketData] Error closing WebSocket: {}", e.what());
         }
@@ -211,22 +212,22 @@ void MarketDataProvider::connect_websocket() {
     }
     
     // Resolve hostname
-    tcp::resolver resolver(*io_context_);
+    boost::asio::ip::tcp::resolver resolver(*io_context_);
     auto const results = resolver.resolve(host, port);
     
     // Connect to server
-    auto ep = beast::get_lowest_layer(*ws_stream_).connect(results);
+    auto ep = boost::beast::get_lowest_layer(*ws_stream_).connect(results);
     
     // Update the host string for HTTP/1.1 header
     host += ":" + std::to_string(ep.port());
     
     // Perform SSL handshake
-    ws_stream_->next_layer().handshake(ssl::stream_base::client);
+    ws_stream_->next_layer().handshake(boost::asio::ssl::stream_base::client);
     
     // Set WebSocket options
-    ws_stream_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
-    ws_stream_->set_option(websocket::stream_base::decorator([](websocket::request_type& req) {
-        req.set(http::field::user_agent, "Latentspeed/1.0");
+    ws_stream_->set_option(boost::beast::websocket::stream_base::timeout::suggested(boost::beast::role_type::client));
+    ws_stream_->set_option(boost::beast::websocket::stream_base::decorator([](boost::beast::websocket::request_type& req) {
+        req.set(boost::beast::http::field::user_agent, "Latentspeed/1.0");
     }));
     
     // Perform WebSocket handshake
@@ -241,11 +242,22 @@ void MarketDataProvider::connect_websocket() {
             ws_buffer_.clear();
             ws_stream_->read(ws_buffer_);
             
-            std::string message = beast::buffers_to_string(ws_buffer_.data());
-            handle_websocket_message(message);
+            std::string message = boost::beast::buffers_to_string(ws_buffer_.data());
             
-        } catch (const beast::system_error& se) {
-            if (se.code() != websocket::error::closed) {
+            // Copy message to fixed-size buffer for lock-free queue
+            MessageBuffer msg_buffer;
+            std::memcpy(msg_buffer.data(), message.c_str(), 
+                       std::min(message.size(), msg_buffer.size() - 1));
+            msg_buffer[std::min(message.size(), msg_buffer.size() - 1)] = '\0';
+            
+            // Push to processing queue
+            if (!message_queue_->try_push(msg_buffer)) {
+                spdlog::warn("[MarketData] Message queue full, dropping message");
+                stats_.errors.fetch_add(1);
+            }
+            
+        } catch (const boost::beast::system_error& se) {
+            if (se.code() != boost::beast::websocket::error::closed) {
                 spdlog::error("[MarketData] WebSocket read error: {}", se.what());
                 stats_.errors.fetch_add(1);
             }
@@ -257,20 +269,23 @@ void MarketDataProvider::connect_websocket() {
 void MarketDataProvider::processing_thread() {
     spdlog::info("[MarketData] Processing thread started");
     
-    std::string message;
+    MessageBuffer message;
     
     while (running_.load(std::memory_order_acquire)) {
         try {
             if (message_queue_->try_pop(message)) {
+                // Convert buffer back to string
+                std::string message_str(message.data());
+                message_str = message_str.substr(0, message_str.find('\0')); // Remove null terminators
+                
                 // Parse message based on exchange
                 if (exchange_ == "bybit") {
-                    parse_bybit_message(message);
+                    parse_bybit_message(message_str);
                 } else if (exchange_ == "binance") {
-                    parse_binance_message(message);
+                    parse_binance_message(message_str);
                 }
             } else {
-                // No messages, small yield
-                std::this_thread::yield();
+                std::this_thread::sleep_for(std::chrono::microseconds(10));
             }
         } catch (const std::exception& e) {
             spdlog::error("[MarketData] Processing error: {}", e.what());
@@ -325,7 +340,7 @@ void MarketDataProvider::send_subscription() {
     std::string sub_msg = build_subscription_message();
     
     try {
-        ws_stream_->write(net::buffer(sub_msg));
+        ws_stream_->write(boost::asio::buffer(sub_msg));
         spdlog::info("[MarketData] Subscription sent: {}", sub_msg);
     } catch (const std::exception& e) {
         spdlog::error("[MarketData] Failed to send subscription: {}", e.what());
@@ -333,11 +348,8 @@ void MarketDataProvider::send_subscription() {
 }
 
 void MarketDataProvider::handle_websocket_message(const std::string& message) {
-    // Push to processing queue
-    if (!message_queue_->try_push(message)) {
-        spdlog::warn("[MarketData] Message queue full, dropping message");
-        stats_.errors.fetch_add(1);
-    }
+    // Push to processing queue (this method is now replaced by inline code in connect_websocket)
+    // Keeping for compatibility with other parts of the codebase
 }
 
 void MarketDataProvider::parse_bybit_message(const std::string& message) {
@@ -433,7 +445,7 @@ void MarketDataProvider::parse_binance_message(const std::string& message) {
     }
 }
 
-bool MarketDataProvider::parse_trade_data(const rapidjson::Document& doc, MarketTick& tick) {
+bool MarketDataProvider::parse_trade_data(const rapidjson::Value& doc, MarketTick& tick) {
     try {
         tick.timestamp_ns = get_timestamp_ns();
         tick.exchange.assign(exchange_);
@@ -482,7 +494,7 @@ bool MarketDataProvider::parse_trade_data(const rapidjson::Document& doc, Market
     }
 }
 
-bool MarketDataProvider::parse_orderbook_data(const rapidjson::Document& doc, OrderBookSnapshot& snapshot) {
+bool MarketDataProvider::parse_orderbook_data(const rapidjson::Value& doc, OrderBookSnapshot& snapshot) {
     try {
         snapshot.timestamp_ns = get_timestamp_ns();
         snapshot.exchange.assign(exchange_);

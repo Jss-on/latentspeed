@@ -180,16 +180,10 @@ public:
     const Stats& get_stats() const { return stats_; }
 
 private:
-    // Boost.Beast WebSocket types
-    namespace beast = boost::beast;
-    namespace http = beast::http;
-    namespace websocket = beast::websocket;
-    namespace net = boost::asio;
-    namespace ssl = boost::asio::ssl;
+    // Boost.Beast WebSocket type aliases
     using tcp = boost::asio::ip::tcp;
-    
-    using WSStream = websocket::stream<beast::ssl_stream<beast::tcp_stream>>;
-    using WSBuffer = beast::flat_buffer;
+    using WSStream = boost::beast::websocket::stream<boost::beast::ssl_stream<boost::beast::tcp_stream>>;
+    using WSBuffer = boost::beast::flat_buffer;
     
     /**
      * @brief WebSocket thread for handling connections
@@ -222,12 +216,12 @@ private:
     /**
      * @brief Parse trade data from JSON
      */
-    bool parse_trade_data(const rapidjson::Document& doc, MarketTick& tick);
+    bool parse_trade_data(const rapidjson::Value& doc, MarketTick& tick);
     
     /**
      * @brief Parse orderbook data from JSON
      */
-    bool parse_orderbook_data(const rapidjson::Document& doc, OrderBookSnapshot& snapshot);
+    bool parse_orderbook_data(const rapidjson::Value& doc, OrderBookSnapshot& snapshot);
     
     /**
      * @brief Publish trade data to ZMQ port 5556
@@ -265,9 +259,9 @@ private:
     std::vector<std::string> symbols_;
     std::atomic<bool> running_{false};
     
-    // WebSocket components
-    std::unique_ptr<net::io_context> io_context_;
-    std::unique_ptr<ssl::context> ssl_context_;
+    // Boost.Beast WebSocket components
+    std::unique_ptr<boost::asio::io_context> io_context_;
+    std::unique_ptr<boost::asio::ssl::context> ssl_context_;
     std::unique_ptr<WSStream> ws_stream_;
     std::unique_ptr<std::thread> ws_thread_;
     WSBuffer ws_buffer_;
@@ -290,7 +284,9 @@ private:
     std::unique_ptr<hft::LockFreeSPSCQueue<OrderBookSnapshot, 2048>> orderbook_queue_;
     
     // Raw message queue from WebSocket
-    std::unique_ptr<hft::LockFreeSPSCQueue<std::string, 8192>> message_queue_;
+    // Fixed-size message buffer for lock-free queue (std::string is not trivially copyable)
+    using MessageBuffer = std::array<char, 4096>;
+    std::unique_ptr<hft::LockFreeSPSCQueue<MessageBuffer, 8192>> message_queue_;
     
     // Callback handler
     std::shared_ptr<MarketDataCallbacks> callbacks_;
