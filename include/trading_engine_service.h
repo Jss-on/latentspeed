@@ -64,6 +64,9 @@
 #include "exchange/exchange_client.h"
 #include "exchange/bybit_client.h"
 
+// Market data provider
+#include "market_data_provider.h"
+
 /**
  * @namespace latentspeed
  * @brief Main namespace for Latentspeed trading infrastructure
@@ -136,6 +139,32 @@ struct Fill {
 };
 
 /**
+ * @struct TradingEngineConfig
+ * @brief Configuration structure for trading engine initialization
+ */
+struct TradingEngineConfig {
+    std::string exchange = "";              ///< Exchange name (e.g., "bybit", "binance")
+    std::string api_key = "";               ///< Exchange API key
+    std::string api_secret = "";            ///< Exchange API secret
+    bool live_trade = false;                ///< Trading mode: false for demo/testnet, true for live
+    CpuMode cpu_mode = CpuMode::NORMAL;     ///< CPU performance mode
+    
+    // Market data configuration
+    bool enable_market_data = false;        ///< Enable market data streaming
+    std::vector<std::string> symbols = {"BTCUSDT", "ETHUSDT"};  ///< Symbols to subscribe to
+    bool enable_trades = true;              ///< Enable trade data streaming
+    bool enable_orderbook = true;           ///< Enable orderbook data streaming
+    
+    /**
+     * @brief Validate configuration parameters
+     * @return true if configuration is valid, false otherwise
+     */
+    bool is_valid() const {
+        return !exchange.empty() && !api_key.empty() && !api_secret.empty();
+    }
+};
+
+/**
  * @class TradingEngineService
  * @brief Ultra-low latency trading engine optimized for high-frequency trading
  * 
@@ -153,8 +182,9 @@ class TradingEngineService {
 public:
     /**
      * @brief HFT-optimized constructor with pre-warmed memory pools
+     * @param config Configuration containing exchange settings and CPU mode
      */
-    explicit TradingEngineService(CpuMode cpu_mode = CpuMode::NORMAL);
+    explicit TradingEngineService(const TradingEngineConfig& config);
     
     /**
      * @brief Destructor with proper cleanup of HFT resources
@@ -347,6 +377,12 @@ private:
     std::unique_ptr<BybitClient> bybit_client_;                                         ///< Bybit exchange client
     /// @}
     
+    /// @name Market Data Components
+    /// @{
+    std::unique_ptr<MarketDataProvider> market_data_provider_;                          ///< Market data provider with ZMQ publishing
+    std::shared_ptr<MarketDataCallbacks> market_data_callbacks_;                        ///< Market data callbacks handler
+    /// @}
+    
     /// @name ZeroMQ Components (HFT-Optimized)
     /// @{
     std::unique_ptr<zmq::context_t> zmq_context_;                                       ///< ZeroMQ context for socket management
@@ -364,6 +400,7 @@ private:
     
     /// @name Service Configuration
     /// @{
+    TradingEngineConfig config_;                                                        ///< Trading engine configuration from command line
     std::string order_endpoint_;                                                        ///< Order receiver endpoint (tcp://127.0.0.1:5601)
     std::string report_endpoint_;                                                       ///< Report publisher endpoint (tcp://127.0.0.1:5602)
     CpuMode cpu_mode_;  // CPU usage mode configuration

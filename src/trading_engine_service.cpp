@@ -175,13 +175,17 @@ template<typename T>
 /**
  * @brief Ultra-low latency constructor with pre-allocated memory pools
  */
-TradingEngineService::TradingEngineService(CpuMode cpu_mode)
-    : running_(false)
+TradingEngineService::TradingEngineService(const TradingEngineConfig& config)
+    : config_(config)
+    , running_(false)
     , order_endpoint_("tcp://127.0.0.1:5601")
     , report_endpoint_("tcp://127.0.0.1:5602")
+    , cpu_mode_(config.cpu_mode)
 {
-    // Handle CPU mode configuration
-    (void)cpu_mode; // Mark as used to avoid warning
+    // Validate configuration
+    if (!config_.is_valid()) {
+        throw std::invalid_argument("Invalid trading engine configuration: exchange, api_key, and api_secret are required");
+    }
     
 #ifdef HFT_NUMA_SUPPORT
     // Initialize NUMA if available
@@ -338,31 +342,53 @@ bool TradingEngineService::initialize() {
         // Initialize exchange clients
         spdlog::info("[HFT-Engine] Initializing exchange clients...");
         
-        // Create Bybit client - for testing, we'll use a minimal setup
-        auto bybit_client = std::make_unique<BybitClient>();
+        // Use configuration from command line arguments
+        std::string api_key = config_.api_key;
+        std::string api_secret = config_.api_secret;
+        bool use_testnet = !config_.live_trade; // Use testnet when not in live trade mode
         
-        // Initialize with test credentials (can be overridden via config)
-        std::string api_key = "xgI7ixEhDcOZ5Sr0Sb";
-        std::string api_secret = "JHi232e3CHDbRRZuYe0EnbLYdYtTi7NF9n82"; 
-        bool use_testnet = true;
+        spdlog::info("[HFT-Engine] Exchange: {}, Live trading: {}, Testnet: {}", 
+                     config_.exchange, config_.live_trade, use_testnet);
         
-        // For cancel validation testing, we can initialize without connecting to exchange
-        // This allows us to test the execution report flow
-        bybit_client->initialize(api_key, api_secret, use_testnet);
+        if (config_.exchange == "bybit") {
+            // Create Bybit client with configuration
+            auto bybit_client = std::make_unique<BybitClient>();
+            
+            // Initialize with configuration credentials
+            bybit_client->initialize(api_key, api_secret, use_testnet);
+            
+            // Set callbacks for order updates and fills
+            bybit_client->set_order_update_callback([this](const OrderUpdate& update) {
+                this->on_order_update_hft(update);
+            });
+            
+            bybit_client->set_fill_callback([this](const FillData& fill) {
+                this->on_fill_hft(fill);
+            });
+            
+            // Add to exchange clients map
+            exchange_clients_[config_.exchange] = std::move(bybit_client);
+            
+            spdlog::info("[HFT-Engine] Exchange client initialized: {}", config_.exchange);
+        } else {
+            throw std::runtime_error("Unsupported exchange: " + config_.exchange + ". Currently supported: bybit");
+        }
         
-        // Set callbacks for order updates and fills
-        bybit_client->set_order_update_callback([this](const OrderUpdate& update) {
-            this->on_order_update_hft(update);
-        });
-        
-        bybit_client->set_fill_callback([this](const FillData& fill) {
-            this->on_fill_hft(fill);
-        });
-        
-        // Add to exchange clients map - this is the key fix!
-        exchange_clients_["bybit"] = std::move(bybit_client);
-        
-        spdlog::info("[HFT-Engine] Exchange clients initialized: bybit");
+        // Initialize market data provider if enabled
+        if (config_.enable_market_data) {
+            spdlog::info("[HFT-Engine] Initializing market data provider...");
+            
+            market_data_provider_ = std::make_unique<MarketDataProvider>(config_.exchange, config_.symbols);
+            market_data_callbacks_ = std::make_shared<SimpleMarketDataCallback>();
+            market_data_provider_->set_callbacks(market_data_callbacks_);
+            
+            if (!market_data_provider_->initialize()) {
+                throw std::runtime_error("Failed to initialize market data provider");
+            }
+            
+            spdlog::info("[HFT-Engine] Market data provider initialized for {} symbols on {}", 
+                         config_.symbols.size(), config_.exchange);
+        }
         
         const auto end_time = std::chrono::high_resolution_clock::now();
         const auto init_time_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -414,6 +440,13 @@ void TradingEngineService::start() {
     pthread_setaffinity_np(publisher_thread_->native_handle(), sizeof(cpu_set_t), &cpuset);
     #endif
     
+    // Start market data provider if enabled
+    if (config_.enable_market_data && market_data_provider_) {
+        spdlog::info("[HFT-Engine] Starting market data provider...");
+        market_data_provider_->start();
+        spdlog::info("[HFT-Engine] Market data streaming to ZMQ ports 5556 (trades) and 5557 (orderbook)");
+    }
+    
     spdlog::info("[HFT-Engine] Ultra-low latency service started");
     spdlog::info("[HFT-Engine] Real-time scheduling enabled");
     spdlog::info("[HFT-Engine] CPU affinity configured");
@@ -422,6 +455,12 @@ void TradingEngineService::start() {
 void TradingEngineService::stop() {
     if (!running_.exchange(false)) {
         return;
+    }
+    
+    // Stop market data provider if enabled
+    if (config_.enable_market_data && market_data_provider_) {
+        spdlog::info("[HFT-Engine] Stopping market data provider...");
+        market_data_provider_->stop();
     }
     
     // Wait for all threads to complete
