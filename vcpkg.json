@@ -10,7 +10,6 @@
     "rapidjson",
     "zeromq",
     "cppzmq",
-    "websocketpp",
     "spdlog",
     "args",
     "curl"
