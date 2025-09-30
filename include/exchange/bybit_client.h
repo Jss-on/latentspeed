@@ -74,6 +74,12 @@ public:
     std::string get_exchange_name() const override { return "bybit"; }
     
     bool subscribe_to_orders(const std::vector<std::string>& symbols = {}) override;
+
+    std::vector<OpenOrderBrief> list_open_orders(
+    const std::optional<std::string>& category,
+    const std::optional<std::string>& symbol,
+    const std::optional<std::string>& settle_coin,
+    const std::optional<std::string>& base_coin) override;
     
 private:
     // REST API methods
@@ -130,6 +136,11 @@ private:
     std::atomic<bool> ws_connected_{false};
     std::atomic<bool> should_stop_{false};
     
+    // Endpoint configuration (centralized; PR1 — no behavior change)
+    void configure_endpoints(bool testnet);
+    bool demo_mode_{false}; // derived from configured endpoints
+    bool build_ws_auth_payload(std::string& out_json);
+    
     // REST API configuration
     std::string rest_host_;
     std::string rest_port_;
@@ -164,12 +175,17 @@ private:
     std::mutex orders_mutex_;
     std::unordered_set<std::string> seen_exec_ids_;
     std::mutex seen_exec_mutex_;
-    
+
+    // Backfill recent executions
+    void backfill_recent_executions(uint64_t lookback_ms, const std::string& category_hint);
+
     // Ping/Pong for WebSocket keepalive
     std::chrono::steady_clock::time_point last_ping_time_;
     std::chrono::steady_clock::time_point last_pong_time_;
     static constexpr int PING_INTERVAL_SEC = 20;
     static constexpr int PONG_TIMEOUT_SEC = 30;
+    std::chrono::steady_clock::time_point last_rx_time_;
+    std::atomic<bool> ws_healthy_{false};
 };
 
 } // namespace latentspeed

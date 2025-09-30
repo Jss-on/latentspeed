@@ -574,9 +574,66 @@ bool TradingEngineService::initialize() {
         if (!bybit_client->connect()) {
             spdlog::warn("[HFT-Engine] Bybit WebSocket not connected; fills may be delayed");
         }
-
+        
         // Add to exchange clients map - this is the key fix!
         exchange_clients_["bybit"] = std::move(bybit_client);
+        {
+            auto& client = *exchange_clients_["bybit"];
+
+            struct Req { std::string category; std::optional<std::string> settle; };
+            std::vector<Req> batches = {
+                {"linear", std::string("USDT")},
+                {"linear", std::string("USDC")},
+                {"inverse", std::nullopt},      // many are coin-settled; we’ll rely on lazy rehydrate if API needs baseCoin
+                {"spot",    std::nullopt},      // some Bybit routes require baseCoin/symbol; try best-effort
+            };
+
+            size_t inserted_total = 0;
+
+            for (const auto& b : batches) {
+                std::optional<std::string> base_coin;  // none for now (no extra configs)
+                std::optional<std::string> symbol;     // none for now
+
+                auto briefs = client.list_open_orders(b.category, symbol, b.settle, base_coin);
+                size_t inserted = 0;
+
+                for (const auto& x : briefs) {
+                    OrderId key(x.client_order_id.c_str());
+                    if (auto* p = pending_orders_->find(key); p && *p) continue;
+
+                    auto* o = order_pool_->allocate();
+                    if (!o) continue;
+                    new (o) HFTExecutionOrder();
+
+                    o->version = 1;
+                    o->cl_id.assign(x.client_order_id.c_str());
+                    o->venue.assign("bybit");
+                    o->venue_type.assign("cex");
+                    o->product_type.assign((x.category == "spot") ? "spot" : "perpetual");
+                    o->symbol.assign(x.symbol.c_str());
+                    o->side.assign(x.side.c_str());
+                    o->order_type.assign(x.order_type.c_str());
+                    if (!x.qty.empty()) {
+                        try { o->size = std::stod(x.qty); } catch (...) { o->size = 0.0; }
+                    }
+                    o->reduce_only = x.reduce_only;
+
+                    pending_orders_->insert(o->cl_id, o);
+                    ++inserted;
+                }
+
+                if (inserted > 0) {
+                    spdlog::info("[HFT-Engine] Rehydrated {} open {} orders{}",
+                                inserted,
+                                b.category,
+                                b.settle ? fmt::format(" (settle={})", *b.settle) : "");
+                }
+                inserted_total += inserted;
+            }
+
+            spdlog::info("[HFT-Engine] Rehydrated {} open orders into local map after connect", inserted_total);
+        }
+
 
         spdlog::info("[HFT-Engine] Exchange clients initialized: bybit (use_testnet={})", use_testnet ? "true" : "false");
         
@@ -983,8 +1040,28 @@ HFTExecutionOrder* TradingEngineService::parse_execution_order_hft(std::string_v
 
         // Check for duplicate processing only after we know the action is supported
         const uint64_t current_time_ns = get_current_time_ns_hft();
-        if (processed_orders_->find(order.cl_id)) [[unlikely]] {
-            spdlog::warn("[HFT-Engine] Duplicate order ignored: {}", order.cl_id.c_str());
+        const bool already_processed = processed_orders_->find(order.cl_id);
+        bool pending_exists = false;
+        if (auto* p = pending_orders_->find(order.cl_id); p && *p) {
+            pending_exists = true;
+        }
+
+        // Resend-friendly dedupe policy:
+        // - CANCEL/REPLACE are idempotent: allow re-processing even if already seen.
+        // - PLACE: if already processed and still pending, ignore; if not pending, allow re-process.
+        bool allow_process = true;
+        if (already_processed) {
+            if (action_kind == dispatch::ActionKind::Place) {
+                if (pending_exists) {
+                    spdlog::warn("[HFT-Engine] Duplicate PLACE ignored (still pending): {}", order.cl_id.c_str());
+                    allow_process = false;
+                } else {
+                    spdlog::info("[HFT-Engine] Resubmitting PLACE for {} (not pending anymore)", order.cl_id.c_str());
+                }
+            }
+        }
+
+        if (!allow_process) {
             return;
         }
 
@@ -1209,10 +1286,43 @@ void TradingEngineService::cancel_cex_order_hft(const HFTExecutionOrder& order) 
 
         OrderResponse response = client->cancel_order(cl_to_cancel_str, symbol, exchange_order_id);
 
-        if (response.success) {
+        auto to_lower = [](std::string s) {
+            std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c){return static_cast<char>(std::tolower(c));});
+            return s;
+        };
+
+        const std::string msg_lower = to_lower(response.message);
+        const bool idempotent_missing = (!response.success) && (
+            msg_lower.find("does not exist") != std::string::npos ||
+            msg_lower.find("not exists") != std::string::npos ||
+            msg_lower.find("not found") != std::string::npos ||
+            msg_lower.find("unknown order") != std::string::npos
+        );
+
+        if (response.success || idempotent_missing) {
+            // 1) Acknowledge the cancel request itself
             send_acceptance_report_hft(order, response.exchange_order_id, response.message.empty() ?
                                        "Cancel request sent" : response.message);
 
+            // 2) Publish synthetic 'canceled' for the ORIGINAL order so upstream can clear state
+            auto* report = report_pool_->allocate();
+            if (report) {
+                report->version = 1;
+                report->cl_id = original_id_lookup;
+                report->exchange_order_id.assign(response.exchange_order_id.has_value() ? response.exchange_order_id->c_str() : "");
+                report->status.assign("canceled");
+                report->reason_code.assign("ok");
+                report->reason_text.assign(idempotent_missing ? "Cancel idempotent: order missing" : "Cancel accepted");
+                report->ts_ns.store(get_current_time_ns_hft(), std::memory_order_relaxed);
+                // Copy tags from pending original if present
+                if (auto* pending_order = pending_orders_->find(original_id_lookup); pending_order && *pending_order) {
+                    report->tags = (*pending_order)->tags;
+                }
+                publish_execution_report_hft(*report);
+                report_pool_->deallocate(report);
+            }
+
+            // 3) Drop any local pending cache for the original order
             if (auto* pending_order = pending_orders_->find(original_id_lookup); pending_order && *pending_order) {
                 order_pool_->deallocate(*pending_order);
                 pending_orders_->erase(original_id_lookup);
@@ -1298,11 +1408,87 @@ void TradingEngineService::on_order_update_hft(const OrderUpdate& update) {
         // Fast order lookup in pending orders
         OrderId cl_id(update.client_order_id.c_str());
         auto* order_ptr = pending_orders_->find(cl_id);
+
         if (!order_ptr || !*order_ptr) {
-            spdlog::warn("[HFT-Engine] Update for unknown order: {}", update.client_order_id);
-            return;
+            // Unknown order
+            if (is_terminal_status(update.status)) {
+                // Late terminal update: idempotent; safe to ignore
+                spdlog::info("[HFT-Engine] Late terminal update for non-tracked order: {} status={}",
+                             update.client_order_id, update.status);
+                return;
+            }
+
+            // Non-terminal unknown update → try lazy rehydration from exchange
+            ExchangeClient* client_raw = nullptr;
+            if (exchange_clients_.size() == 1) {
+                // single venue configured
+                client_raw = exchange_clients_.begin()->second.get();
+            } else {
+                auto it = exchange_clients_.find(std::string("bybit"));
+                if (it != exchange_clients_.end()) client_raw = it->second.get();
+            }
+
+            if (client_raw) {
+                OrderResponse qr = client_raw->query_order(update.client_order_id);
+                if (qr.success) {
+                    // Expect symbol/category in extra_data (added in BybitClient earlier)
+                    std::string sym;
+                    std::string cat;
+                    if (auto it = qr.extra_data.find("symbol"); it != qr.extra_data.end()) {
+                        sym = it->second;
+                    }
+                    if (auto it = qr.extra_data.find("category"); it != qr.extra_data.end()) {
+                        cat = it->second;
+                    }
+
+                    if (!sym.empty()) {
+                        auto* o = order_pool_->allocate();
+                        if (o) {
+                            new (o) HFTExecutionOrder(); // placement new
+                            o->version = 1;
+                            o->cl_id.assign(update.client_order_id.c_str());
+                            o->venue.assign("bybit");          // we queried bybit
+                            o->venue_type.assign("cex");
+                            // category → product_type
+                            // spot → "spot"; otherwise treat as perpetual
+                            if (!cat.empty() && to_lower_ascii(cat) == "spot") {
+                                o->product_type.assign("spot");
+                            } else {
+                                o->product_type.assign("perpetual");
+                            }
+                            o->symbol.assign(sym.c_str());
+
+                            // If exchange_order_id came back, store it in params for later use
+                            if (qr.exchange_order_id.has_value()) {
+                                o->params.insert(FixedString<32>("exchange_order_id"),
+                                                 FixedString<64>(qr.exchange_order_id->c_str()));
+                            }
+
+                            pending_orders_->insert(o->cl_id, o);
+                            // refresh local pointer after insert
+                            order_ptr = pending_orders_->find(cl_id);
+                            spdlog::info("[HFT-Engine] Lazy rehydrated live order {}", update.client_order_id);
+                        }
+                    } else {
+                        spdlog::warn("[HFT-Engine] Lazy rehydrate failed: query_order({}) had no symbol",
+                                     update.client_order_id);
+                    }
+                } else {
+                    spdlog::warn("[HFT-Engine] Lazy rehydrate failed: query_order({}) not open/success",
+                                 update.client_order_id);
+                }
+            } else {
+                spdlog::warn("[HFT-Engine] Update for unknown live order (no client available): {} status={}",
+                             update.client_order_id, update.status);
+            }
+
+            // If still unknown after rehydrate attempt, bail out (non-terminal)
+            if (!order_ptr || !*order_ptr) {
+                return;
+            }
         }
 
+        // From here, we have a cached order entry (original or placeholder)
         const HFTExecutionOrder& original_order = **order_ptr;
 
         const std::string raw_status = update.status;
@@ -1327,7 +1513,7 @@ void TradingEngineService::on_order_update_hft(const OrderUpdate& update) {
         report->reason_code.assign(reason_code.c_str());
         report->reason_text.assign(reason_text.c_str());
         report->ts_ns.store(get_current_time_ns_hft(), std::memory_order_relaxed);
-        report->tags = original_order.tags;
+        report->tags = original_order.tags; // placeholder will have empty tags, which is fine
 
         // Publish via lock-free queue
         publish_execution_report_hft(*report);
@@ -1344,6 +1530,7 @@ void TradingEngineService::on_order_update_hft(const OrderUpdate& update) {
     }
 }
 
+
 /**
  * @brief Ultra-low latency fill callback
  */
@@ -1358,7 +1545,12 @@ void TradingEngineService::on_fill_hft(const FillData& fill_data) {
 
         // Fast string-to-double conversion
         fill->version = 1;
-        fill->cl_id.assign(fill_data.client_order_id.c_str());
+        {
+            const std::string& primary = fill_data.client_order_id.empty()
+                ? fill_data.exchange_order_id
+                : fill_data.client_order_id;
+            fill->cl_id.assign(primary.c_str());
+        }
         fill->exchange_order_id.assign(fill_data.exchange_order_id.c_str());
         fill->exec_id.assign(fill_data.exec_id.c_str());
         fill->symbol_or_pair.assign(fill_data.symbol.c_str());
@@ -1370,14 +1562,17 @@ void TradingEngineService::on_fill_hft(const FillData& fill_data) {
         fill->ts_ns.store(get_current_time_ns_hft(), std::memory_order_relaxed);
 
         // Copy tags from original order if available
-        OrderId cl_id(fill_data.client_order_id.c_str());
-        if (auto* order_ptr = pending_orders_->find(cl_id); order_ptr && *order_ptr) {
+        OrderId lookup_id(fill->cl_id.c_str());
+        if (auto* order_ptr = pending_orders_->find(lookup_id); order_ptr && *order_ptr) {
             fill->tags = (*order_ptr)->tags;
             if (!(*order_ptr)->symbol.empty()) {
                 fill->symbol_or_pair.assign((*order_ptr)->symbol.c_str());
             }
+            fill->tags.insert(FixedString<32>("execution_type"), FixedString<64>("live"));
+        } else {
+            // External/manual action: still publish with clear tagging
+            fill->tags.insert(FixedString<32>("execution_type"), FixedString<64>("external"));
         }
-        fill->tags.insert(FixedString<32>("execution_type"), FixedString<64>("live"));
 
         publish_fill_hft(*fill);
         stats_->fills_received.fetch_add(1, std::memory_order_relaxed);

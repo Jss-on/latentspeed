@@ -16,6 +16,147 @@
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
+#include <algorithm>  // added for std::max
+
+// Put near the top of bybit_client.cpp
+namespace {
+// Returns pointer to the "data" array if present and is an array; else nullptr.
+inline const rapidjson::Value* get_data_array(const rapidjson::Document& doc) {
+    if (doc.HasMember("data") && doc["data"].IsArray()) {
+        return &doc["data"];
+    }
+    // Some payloads wrap the actual array inside { "data": { "result": [...] } }
+    if (doc.HasMember("data") && doc["data"].IsObject()) {
+        const auto& d = doc["data"];
+        if (d.HasMember("result") && d["result"].IsArray()) {
+            return &d["result"];
+        }
+    }
+    return nullptr;
+}
+} // namespace
+
+namespace {
+
+// Exponential backoff with small jitter: 1s,2s,4s,8s,16s,30s cap, plus 0–250 ms jitter.
+inline uint32_t next_backoff_ms(uint32_t& attempt) {
+    const uint32_t base_ms = 250u;
+    const uint32_t cap_ms  = 30000u;
+    const uint32_t shift   = std::min<uint32_t>(attempt, 5u); // cap growth
+    uint64_t delay = static_cast<uint64_t>(base_ms) << shift; // 1s << n
+    if (delay > cap_ms) delay = cap_ms;
+    // bump attempt for next time
+    attempt = std::min<uint32_t>(attempt + 1u, 16u);
+
+    // add jitter 0–250 ms
+    static thread_local std::mt19937 rng{std::random_device{}()};
+    std::uniform_int_distribution<int> dist(0, 250);
+    return static_cast<uint32_t>(delay) + static_cast<uint32_t>(dist(rng));
+}
+
+// Tiny guard to close socket if it's open
+inline void safe_ws_close(std::unique_ptr<boost::beast::websocket::stream<
+                              boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>>& ws) {
+    if (!ws) return;
+    boost::beast::error_code ec;
+    ws->close(boost::beast::websocket::close_code::normal, ec);
+}
+
+} // namespace
+
+namespace {
+
+// Execution time cursor (ms since epoch) to avoid re-fetching old fills
+static std::atomic<uint64_t> last_exec_time_cursor_ms{0};
+
+inline void maybe_advance_exec_cursor(uint64_t exec_time_ms) {
+    uint64_t prev = last_exec_time_cursor_ms.load(std::memory_order_relaxed);
+    while (exec_time_ms > prev &&
+           !last_exec_time_cursor_ms.compare_exchange_weak(prev, exec_time_ms,
+                                                          std::memory_order_relaxed)) {
+        /* CAS retry */
+    }
+}
+
+} // namespace
+
+namespace {
+// return true if host is an IPv4/IPv6 literal (SNI should be skipped)
+inline bool is_ip_literal(const std::string& host) {
+    boost::system::error_code ec;
+    (void)boost::asio::ip::make_address(host, ec);
+    return !ec;
+}
+} // namespace
+
+namespace {
+
+// Known quote coins we strip to infer base coin from a symbol.
+// Example: "BNBUSDT" -> base "BNB", "ETHBTC" -> base "ETH"
+inline std::string extract_base_from_symbol(const std::string& sym) {
+    static const std::array<const char*, 8> quotes = {
+        "USDT","USDC","BTC","ETH","EUR","USD","DAI","FDUSD"
+    };
+    for (auto q : quotes) {
+        const auto qlen = std::strlen(q);
+        if (sym.size() > qlen && sym.rfind(q) == sym.size() - qlen) {
+            return sym.substr(0, sym.size() - qlen);
+        }
+    }
+    return {}; // unknown
+}
+
+// Pull a small set of "observed symbols" from pending orders (best hint for spot/option)
+inline std::unordered_set<std::string> observed_symbols_from_pending(
+    const std::map<std::string, latentspeed::OrderRequest>& pending) {
+    std::unordered_set<std::string> out;
+    out.reserve(pending.size());
+    for (const auto& kv : pending) {
+        if (!kv.second.symbol.empty()) out.insert(kv.second.symbol);
+    }
+    return out;
+}
+
+// Build a compact query plan that covers all categories without config.
+// We:
+//  - For linear: query settleCoin=USDT and settleCoin=USDC (covers most perps)
+//  - For inverse: query a short baseCoin set (BTC, ETH) — safe & cheap
+//  - For spot: if we have observed symbols, query them individually
+//  - For option: if an observed symbol looks like an option (has '-' segments), query it
+struct Query { std::string category; std::string qs; };
+
+inline std::vector<Query> build_realtime_query_plan(
+    const std::unordered_set<std::string>& observed_syms) {
+
+    std::vector<Query> plan;
+    plan.reserve(8 + observed_syms.size());
+
+    // linear perps (USDT/USDC margined)
+    plan.push_back({"linear", "category=linear&settleCoin=USDT"});
+    plan.push_back({"linear", "category=linear&settleCoin=USDC"});
+
+    // inverse perps (coin margined) — query a tiny allowlist of popular base coins
+    for (const std::string base : {"BTC","ETH"}) {
+        plan.push_back({"inverse", "category=inverse&baseCoin=" + base});
+    }
+
+    // spot & option — driven by observed symbols (if any)
+    for (const auto& s : observed_syms) {
+        // Heuristic: OPTION symbols on Bybit usually contain hyphens (e.g., "BTC-30SEP25-20000-C")
+        const bool looks_option = (s.find('-') != std::string::npos);
+        if (looks_option) {
+            plan.push_back({"option", "category=option&symbol=" + s});
+            continue;
+        }
+        // Otherwise treat as spot symbol (Bybit uses the same "symbol" token, e.g., "BNBUSDT")
+        plan.push_back({"spot", "category=spot&symbol=" + s});
+    }
+
+    return plan;
+}
+
+} // namespace
+
 
 namespace latentspeed {
 
@@ -56,7 +197,29 @@ BybitClient::BybitClient()
 }
 
 BybitClient::~BybitClient() {
-    disconnect();
+    try {
+        should_stop_.store(true);
+        ws_connected_.store(false);
+        ws_send_cv_.notify_all();
+
+        if (ws_) {
+            boost::beast::error_code ec;
+            ws_->close(boost::beast::websocket::close_code::normal, ec);
+            boost::beast::get_lowest_layer(*ws_).close(ec);
+        }
+        if (ws_thread_ && ws_thread_->joinable()) ws_thread_->join();
+
+        {   // drain send queue
+            std::lock_guard<std::mutex> qlk(ws_send_mutex_);
+            std::queue<std::string> empty;
+            std::swap(ws_send_queue_, empty);
+        }
+
+        {   // close REST
+            std::scoped_lock lk(rest_mutex_);
+            close_rest_connection_locked();
+        }
+    } catch (...) {}
 }
 
 bool BybitClient::initialize(const std::string& api_key, 
@@ -66,22 +229,12 @@ bool BybitClient::initialize(const std::string& api_key,
         api_key_ = api_key;
         api_secret_ = api_secret;
         is_testnet_ = testnet;
-        
-        if (testnet) {
-            // Bybit testnet/demo endpoints
-            rest_host_ = "api-demo.bybit.com";
-            rest_port_ = "443";
-            ws_host_ = "stream-demo.bybit.com";
-            ws_port_ = "443";
-            ws_target_ = "/v5/private";
-        } else {
-            // Bybit production endpoints
-            rest_host_ = "api.bybit.com";
-            rest_port_ = "443";
-            ws_host_ = "stream.bybit.com";
-            ws_port_ = "443";
-            ws_target_ = "/v5/private";
-        }
+
+        // PR1: centralized endpoint selection (no behavior change)
+        configure_endpoints(testnet);
+        demo_mode_ = (rest_host_ == std::string("api-demo.bybit.com"));
+        spdlog::info("[BybitClient] Endpoint matrix: demo_mode={}, REST={}, WS={}",
+                     demo_mode_, rest_host_, ws_host_);
 
         rest_stream_ = std::make_unique<ssl::stream<tcp::socket>>(*rest_ioc_, *ssl_ctx_);
         rest_connected_ = false;
@@ -437,48 +590,80 @@ std::string BybitClient::make_rest_request(const std::string& method,
 }
 
 bool BybitClient::ensure_rest_connection_locked() {
+    // Fast path: still connected and socket open
     if (rest_connected_ && rest_stream_ && rest_stream_->lowest_layer().is_open()) {
         return true;
     }
 
+    // Tear down any old stream and create a fresh TLS stream
     close_rest_connection_locked();
+    rest_stream_ = std::make_unique<ssl::stream<tcp::socket>>(*rest_ioc_, *ssl_ctx_);
 
-    if (!rest_stream_) {
-        rest_stream_ = std::make_unique<ssl::stream<tcp::socket>>(*rest_ioc_, *ssl_ctx_);
+    // ------ SNI (skip for IPs) ------
+    if (!is_ip_literal(rest_host_)) {
+        if (!SSL_set_tlsext_host_name(rest_stream_->native_handle(), rest_host_.c_str())) {
+            spdlog::error("[BybitClient] Failed to set SNI (REST) for host {}", rest_host_);
+            return false;
+        }
+        // Optional but recommended: enable hostname verification against cert
+        X509_VERIFY_PARAM* param = SSL_get0_param(rest_stream_->native_handle());
+        // (flags are optional; pass 0 if you prefer to allow wildcards)
+        X509_VERIFY_PARAM_set_hostflags(param, 0);
+        if (X509_VERIFY_PARAM_set1_host(param, rest_host_.c_str(), 0) != 1) {
+            spdlog::warn("[BybitClient] Failed to set hostname verification for {}", rest_host_);
+        }
     }
 
-    SSL_set_tlsext_host_name(rest_stream_->native_handle(), rest_host_.c_str());
-
+    // Resolve endpoints once (cache)
     if (rest_endpoints_.empty()) {
         try {
             auto results = rest_resolver_->resolve(rest_host_, rest_port_);
-            for (const auto& entry : results) {
-                rest_endpoints_.push_back(entry.endpoint());
-            }
+            for (const auto& e : results) rest_endpoints_.push_back(e.endpoint());
         } catch (const std::exception& e) {
             spdlog::error("[BybitClient] REST resolve failed: {}", e.what());
             return false;
         }
     }
 
-    beast::error_code ec;
-    for (const auto& endpoint : rest_endpoints_) {
-        rest_stream_->lowest_layer().close(ec);
-        rest_stream_->lowest_layer().connect(endpoint, ec);
+    // Try endpoints until one succeeds
+    boost::beast::error_code ec;
+    for (const auto& ep : rest_endpoints_) {
+        rest_stream_->lowest_layer().connect(ep, ec);
         if (ec) {
-            continue;
-        }
-        rest_stream_->lowest_layer().set_option(net::socket_base::keep_alive(true));
-        rest_stream_->lowest_layer().set_option(net::ip::tcp::no_delay(true));
-        rest_stream_->handshake(ssl::stream_base::client, ec);
-        if (ec) {
-            spdlog::warn("[BybitClient] REST handshake failed: {}", ec.message());
+            spdlog::warn("[BybitClient] REST TCP connect to {}:{} failed: {}",
+                        ep.address().to_string(), ep.port(), ec.message());
+            // ensure the underlying FD is not left around
+            rest_stream_->lowest_layer().close(ec);
+            // recreate a fresh TLS stream for the next attempt
+            rest_stream_ = std::make_unique<ssl::stream<tcp::socket>>(*rest_ioc_, *ssl_ctx_);
+            if (!is_ip_literal(rest_host_)) {
+                (void)SSL_set_tlsext_host_name(rest_stream_->native_handle(), rest_host_.c_str());
+                X509_VERIFY_PARAM* param = SSL_get0_param(rest_stream_->native_handle());
+                X509_VERIFY_PARAM_set_hostflags(param, 0);
+                (void)X509_VERIFY_PARAM_set1_host(param, rest_host_.c_str(), 0);
+            }
             continue;
         }
 
-#ifdef TCP_NODELAY
-        rest_stream_->lowest_layer().set_option(net::ip::tcp::no_delay(true));
-#endif
+        // TCP options...
+        rest_stream_->lowest_layer().set_option(boost::asio::socket_base::keep_alive(true), ec);
+        rest_stream_->lowest_layer().set_option(boost::asio::ip::tcp::no_delay(true), ec);
+
+        // TLS handshake ...
+        rest_stream_->handshake(ssl::stream_base::client, ec);
+        if (ec) {
+            spdlog::warn("[BybitClient] REST TLS handshake failed: {}", ec.message());
+            rest_stream_->lowest_layer().close(ec);
+            rest_stream_ = std::make_unique<ssl::stream<tcp::socket>>(*rest_ioc_, *ssl_ctx_);
+            if (!is_ip_literal(rest_host_)) {
+                (void)SSL_set_tlsext_host_name(rest_stream_->native_handle(), rest_host_.c_str());
+                X509_VERIFY_PARAM* param = SSL_get0_param(rest_stream_->native_handle());
+                X509_VERIFY_PARAM_set_hostflags(param, 0);
+                (void)X509_VERIFY_PARAM_set1_host(param, rest_host_.c_str(), 0);
+            }
+            continue;
+        }
+
         rest_connected_ = true;
         return true;
     }
@@ -487,35 +672,196 @@ bool BybitClient::ensure_rest_connection_locked() {
     return false;
 }
 
-void BybitClient::close_rest_connection_locked() {
-    if (!rest_stream_) {
-        return;
+
+void BybitClient::configure_endpoints(bool testnet) {
+    if (testnet) {
+        // Bybit mainnet demo trading (paper) endpoints
+        rest_host_ = "api-demo.bybit.com";
+        rest_port_ = "443";
+        ws_host_ = "stream-demo.bybit.com";
+        ws_port_ = "443";
+        ws_target_ = "/v5/private?max_active_time=1m";
+    } else {
+        // Bybit production endpoints
+        rest_host_ = "api.bybit.com";
+        rest_port_ = "443";
+        ws_host_ = "stream.bybit.com";
+        ws_port_ = "443";
+        ws_target_ = "/v5/private";
     }
-    beast::error_code ec;
+}
+
+bool BybitClient::build_ws_auth_payload(std::string& out_json) {
+    try {
+        // Bybit sample: signature = HMAC_SHA256(secret, "GET/realtime" + expires)
+        // Keep expires tight (now + 1000ms).
+        const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        const auto expires = now + 1000;
+
+        std::string sign_src = std::string("GET/realtime") + std::to_string(expires);
+        const std::string sig = hmac_sha256(api_secret_, sign_src);
+
+        // {"op":"auth","args":[apiKey, expiresMs, signature]}
+        out_json.reserve(96 + api_key_.size() + sig.size());
+        out_json = std::string("{\"op\":\"auth\",\"args\":[\"")
+                 + api_key_ + "\",\"" + std::to_string(expires) + "\",\"" + sig + "\"]}";
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+void BybitClient::close_rest_connection_locked() {
+    if (!rest_stream_) return;
+    boost::beast::error_code ec;
+    // Best-effort cleanup; ignore errors
     rest_stream_->shutdown(ec);
     rest_stream_->lowest_layer().shutdown(tcp::socket::shutdown_both, ec);
     rest_stream_->lowest_layer().close(ec);
     rest_connected_ = false;
+    rest_stream_.reset();              // <-- IMPORTANT: drop the shutdown SSL object
 }
 
 void BybitClient::resync_pending_orders() {
-    std::vector<std::pair<std::string, OrderRequest>> pending_snapshot;
+    // Snapshot open orders across categories, then exec catch-up.
+    // We drive spot/option queries from any symbols we've seen in pending_orders_.
+
+    // ---- Build a symbol hint set from pending orders (thread-safe copy) ----
+    std::unordered_set<std::string> observed_syms;
     {
-        std::lock_guard<std::mutex> lock(orders_mutex_);
-        pending_snapshot.reserve(pending_orders_.size());
-        for (const auto& [cl_id, request] : pending_orders_) {
-            pending_snapshot.emplace_back(cl_id, request);
+        std::lock_guard<std::mutex> lk(orders_mutex_);
+        observed_syms = observed_symbols_from_pending(pending_orders_);
+    }
+
+    // ---- 1) Open orders snapshot ----
+    const auto plan = build_realtime_query_plan(observed_syms);
+
+    size_t total_orders = 0;
+    for (const auto& q : plan) {
+        const std::string endpoint = "/v5/order/realtime?" + q.qs; // default returns OPEN orders
+
+        std::string body;
+        try {
+            body = perform_rest_request_locked("GET", endpoint, "");
+        } catch (const std::exception& e) {
+            spdlog::warn("[BybitClient] resync {}: GET {} failed: {}", q.category, endpoint, e.what());
+            continue;
+        }
+
+        rapidjson::Document doc;
+        doc.Parse(body.c_str());
+        if (doc.HasParseError() || !doc.IsObject()) {
+            spdlog::warn("[BybitClient] resync {}: invalid JSON", q.category);
+            continue;
+        }
+
+        const int ret = doc.HasMember("retCode") && doc["retCode"].IsInt() ? doc["retCode"].GetInt() : -1;
+        if (ret != 0) {
+            const char* msg = (doc.HasMember("retMsg") && doc["retMsg"].IsString()) ? doc["retMsg"].GetString() : "";
+            spdlog::warn("[BybitClient] resync {}: retCode={} retMsg='{}' (qs: {})", q.category, ret, msg, q.qs);
+            continue;
+        }
+
+        // result.list || result.orders || data
+        const rapidjson::Value* list = nullptr;
+        if (doc.HasMember("result") && doc["result"].IsObject()) {
+            const auto& res = doc["result"];
+            if (res.HasMember("list")   && res["list"].IsArray())   list = &res["list"];
+            else if (res.HasMember("orders") && res["orders"].IsArray()) list = &res["orders"];
+        } else if (doc.HasMember("data") && doc["data"].IsArray()) {
+            list = &doc["data"];
+        }
+        if (!list) {
+            spdlog::info("[BybitClient] resync {}: empty list (qs: {})", q.category, q.qs);
+            continue;
+        }
+
+        for (auto it = list->Begin(); it != list->End(); ++it) {
+            if (it->IsObject()) emit_order_snapshot(*it);
+        }
+        total_orders += list->Size();
+    }
+
+    spdlog::info("[BybitClient] resync: applied {} open orders across categories", total_orders);
+
+    // ---- 2) Executions catch-up (cursor-based), across the same categories ----
+    const uint64_t start_ms = last_exec_time_cursor_ms.load(std::memory_order_relaxed);
+    if (start_ms == 0) {
+        spdlog::info("[BybitClient] resync: no execution cursor yet; skipping exec backfill");
+        return;
+    }
+
+    size_t total_execs = 0;
+    uint64_t newest_ts = start_ms;
+
+    // Reuse categories from the plan but dedupe categories to avoid duplicate calls
+    std::unordered_set<std::string> cats;
+    cats.reserve(plan.size());
+    for (const auto& q : plan) cats.insert(q.category);
+
+    for (const auto& cat : cats) {
+        const std::string ep = "/v5/execution/list?category=" + cat +
+                               "&startTime=" + std::to_string(start_ms) +
+                               "&limit=200";
+
+        std::string body;
+        try {
+            body = perform_rest_request_locked("GET", ep, "");
+        } catch (const std::exception& e) {
+            spdlog::warn("[BybitClient] resync {}: execution/list failed: {}", cat, e.what());
+            continue;
+        }
+
+        rapidjson::Document doc;
+        doc.Parse(body.c_str());
+        if (doc.HasParseError() || !doc.IsObject()) {
+            spdlog::warn("[BybitClient] resync {}: invalid JSON from execution/list", cat);
+            continue;
+        }
+
+        const int ret = doc.HasMember("retCode") && doc["retCode"].IsInt() ? doc["retCode"].GetInt() : -1;
+        if (ret != 0) {
+            const char* msg = (doc.HasMember("retMsg") && doc["retMsg"].IsString()) ? doc["retMsg"].GetString() : "";
+            spdlog::warn("[BybitClient] resync {}: execution retCode={} retMsg='{}'", cat, ret, msg);
+            continue;
+        }
+
+        const rapidjson::Value* list = nullptr;
+        if (doc.HasMember("result") && doc["result"].IsObject()) {
+            const auto& res = doc["result"];
+            if (res.HasMember("list") && res["list"].IsArray()) list = &res["list"];
+        } else if (doc.HasMember("data") && doc["data"].IsArray()) {
+            list = &doc["data"];
+        }
+        if (!list) continue;
+
+        for (auto it = list->Begin(); it != list->End(); ++it) {
+            if (!it->IsObject()) continue;
+            emit_execution_snapshot(*it);
+
+            // track newest timestamp to advance cursor
+            if (it->HasMember("execTime")) {
+                if ((*it)["execTime"].IsUint64()) {
+                    newest_ts = std::max<uint64_t>(newest_ts, (*it)["execTime"].GetUint64());
+                } else if ((*it)["execTime"].IsString()) {
+                    try { newest_ts = std::max<uint64_t>(newest_ts, std::stoull((*it)["execTime"].GetString())); } catch (...) {}
+                }
+            } else if (it->HasMember("time") && (*it)["time"].IsUint64()) {
+                newest_ts = std::max<uint64_t>(newest_ts, (*it)["time"].GetUint64());
+            }
+            ++total_execs;
         }
     }
 
-    for (const auto& entry : pending_snapshot) {
-        try {
-            resync_order(entry.first, entry.second);
-        } catch (const std::exception& e) {
-            spdlog::warn("[BybitClient] Resync for {} failed: {}", entry.first, e.what());
-        }
+    if (total_execs > 0) {
+        maybe_advance_exec_cursor(newest_ts);
     }
+    spdlog::info("[BybitClient] resync: applied {} executions (start >= {})", total_execs, start_ms);
 }
+
+
+
 
 void BybitClient::resync_order(const std::string& client_order_id, const OrderRequest& snapshot) {
     const std::string category = snapshot.category.value_or("spot");
@@ -605,13 +951,15 @@ void BybitClient::emit_order_snapshot(const rapidjson::Value& order_data) {
     }
 }
 
-http::request<http::string_body> BybitClient::build_signed_request(const std::string& method,
-                                                                   const std::string& endpoint,
-                                                                   const std::string& params_json,
-                                                                   std::string& timestamp_out) {
+http::request<http::string_body>
+BybitClient::build_signed_request(const std::string& method,
+                                  const std::string& endpoint,
+                                  const std::string& params_json,
+                                  std::string& timestamp_out) {
     http::request<http::string_body> req;
+    req.version(11);
     req.method(method == "GET" ? http::verb::get : http::verb::post);
-    req.target(endpoint);
+    req.target(endpoint);                    // keep the query in the target as-is
     req.set(http::field::host, rest_host_);
     req.set(http::field::user_agent, "LatentSpeed/1.0");
     req.set(http::field::content_type, "application/json");
@@ -619,21 +967,37 @@ http::request<http::string_body> BybitClient::build_signed_request(const std::st
 
     timestamp_out = get_timestamp_ms();
     std::string recv_window = "5000";
+
+    // ---- build sign payload per Bybit v5 ----
     std::string sign_payload = timestamp_out + api_key_ + recv_window;
 
-    if (method == "POST" && !params_json.empty()) {
-        sign_payload += params_json;
-        req.body() = params_json;
+    if (req.method() == http::verb::get) {
+        // append queryString (no leading '?') if present
+        const auto qpos = endpoint.find('?');
+        if (qpos != std::string::npos && qpos + 1 < endpoint.size()) {
+            const std::string query_string = endpoint.substr(qpos + 1);
+            sign_payload += query_string;
+        }
+        // no body for GET
+    } else {
+        // POST: append raw JSON body (must exactly match what you send)
+        if (!params_json.empty()) {
+            sign_payload += params_json;
+            req.body() = params_json;
+        }
     }
+    // -----------------------------------------
 
-    std::string signature = hmac_sha256(api_secret_, sign_payload);
+    const std::string signature = hmac_sha256(api_secret_, sign_payload);
     req.set("X-BAPI-API-KEY", api_key_);
     req.set("X-BAPI-TIMESTAMP", timestamp_out);
     req.set("X-BAPI-SIGN", signature);
     req.set("X-BAPI-RECV-WINDOW", recv_window);
+    // req.set("X-BAPI-SIGN-TYPE", "2"); // optional (HMAC-SHA256), default is fine
     req.prepare_payload();
     return req;
 }
+
 
 std::string BybitClient::perform_rest_request_locked(const std::string& method,
                                                      const std::string& endpoint,
@@ -647,7 +1011,7 @@ std::string BybitClient::perform_rest_request_locked(const std::string& method,
         try {
             std::string timestamp;
             auto req = build_signed_request(method, endpoint, params_json, timestamp);
-
+            
             http::write(*rest_stream_, req);
 
             beast::flat_buffer buffer;
@@ -655,6 +1019,19 @@ std::string BybitClient::perform_rest_request_locked(const std::string& method,
             http::read(*rest_stream_, buffer, res);
 
             if (res.need_eof()) {
+                close_rest_connection_locked();
+            }
+            bool server_wants_close = false;
+            auto conn_hdr = res.base().find(http::field::connection);
+            if (conn_hdr != res.base().end()) {
+                // case-insensitive compare is fine; Beast normalizes flags internally too
+                std::string v(conn_hdr->value().data(), conn_hdr->value().size());
+                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+                server_wants_close = (v.find("close") != std::string::npos);
+            }
+
+            if (server_wants_close || !res.keep_alive()) {
+                // server intends to close; match it to avoid lingering half-open FDs
                 close_rest_connection_locked();
             }
 
@@ -709,19 +1086,22 @@ OrderResponse BybitClient::parse_order_response(const std::string& json_response
             response.success = true;
             response.message = doc.HasMember("retMsg") ? doc["retMsg"].GetString() : "Success";
             
-            if (doc.HasMember("result") && doc["result"].IsObject()) {
-                const auto& result = doc["result"];
-                
-                if (result.HasMember("orderId")) {
-                    response.exchange_order_id = result["orderId"].GetString();
-                }
-                if (result.HasMember("orderLinkId")) {
-                    response.client_order_id = result["orderLinkId"].GetString();
-                }
-                if (result.HasMember("orderStatus")) {
-                    response.status = map_order_status(result["orderStatus"].GetString());
-                }
+        if (doc.HasMember("result")) {
+            const auto& res = doc["result"];
+            // bybit v5 usually nests in result.list[0]
+            if (res.HasMember("list") && res["list"].IsArray() && !res["list"].Empty()) {
+                const auto& o = res["list"][0];
+                if (o.HasMember("symbol") && o["symbol"].IsString())
+                    response.extra_data["symbol"] = o["symbol"].GetString();
+                if (o.HasMember("category") && o["category"].IsString())
+                    response.extra_data["category"] = o["category"].GetString();
+            } else {
+                if (res.HasMember("symbol") && res["symbol"].IsString())
+                    response.extra_data["symbol"] = res["symbol"].GetString();
+                if (res.HasMember("category") && res["category"].IsString())
+                    response.extra_data["category"] = res["category"].GetString();
             }
+        }
         } else {
             response.success = false;
             response.message = doc.HasMember("retMsg") ? doc["retMsg"].GetString() : "Unknown error";
@@ -759,125 +1139,223 @@ std::string BybitClient::map_order_status(const std::string& bybit_status) const
 }
 
 void BybitClient::websocket_thread_func() {
+    uint32_t backoff_attempt = 0; // grows on failures, resets on success
+
     while (!should_stop_) {
         try {
-            // Create WebSocket stream
             tcp::resolver resolver(*ioc_);
             ws_ = std::make_unique<websocket::stream<ssl::stream<tcp::socket>>>(*ioc_, *ssl_ctx_);
-            
-            // Set SNI hostname
+
+            // Suggested Beast WS timeouts can be set anytime
+            ws_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
+
+            // SNI (ok before connect)
             if (!SSL_set_tlsext_host_name(ws_->next_layer().native_handle(), ws_host_.c_str())) {
                 throw beast::system_error(
-                    beast::error_code(static_cast<int>(::ERR_get_error()),
-                    net::error::get_ssl_category()),
+                    beast::error_code(static_cast<int>(::ERR_get_error()), net::error::get_ssl_category()),
                     "Failed to set SNI hostname");
             }
-            
-            // Connect TCP socket
+
+            // --- CONNECT FIRST ---
             auto const results = resolver.resolve(ws_host_, ws_port_);
             boost::asio::connect(beast::get_lowest_layer(*ws_), results);
-            
-            // Perform SSL handshake
+
+            // Now the TCP socket is open → set TCP keepalive safely
+            beast::get_lowest_layer(*ws_).set_option(net::socket_base::keep_alive(true));
+            // (optional) disable Nagle if you want:
+            // beast::get_lowest_layer(*ws_).set_option(net::ip::tcp::no_delay(true));
+
+            // TLS handshake
             ws_->next_layer().handshake(ssl::stream_base::client);
-            
-            // Perform WebSocket handshake
-            ws_->handshake(ws_host_, ws_target_);
-            
-            ws_connected_ = true;
-            spdlog::info("[BybitClient] WebSocket connected");
-            
-            // Send authentication
+
+            // Decorate request
+            ws_->set_option(websocket::stream_base::decorator(
+                [](websocket::request_type& req) {
+                    req.set(http::field::user_agent, "latentspeed-bybit/1.0");
+                }));
+
+            // WS handshake
+            beast::error_code ec;
+            ws_->handshake(ws_host_, ws_target_, ec);
+            if (ec) {
+                spdlog::error("[BybitClient] WebSocket handshake error: {}", ec.message());
+                if (ws_) {
+                    boost::beast::error_code ec2;
+                    beast::get_lowest_layer(*ws_).close(ec2);
+                }
+                ws_.reset(); 
+                safe_ws_close(ws_);
+                goto backoff_wait;
+            }
+
+            // Auth
             if (!send_websocket_auth()) {
                 spdlog::error("[BybitClient] WebSocket authentication failed");
-                ws_connected_ = false;
-                continue;
+                if (ws_) {
+                    boost::beast::error_code ec2;
+                    beast::get_lowest_layer(*ws_).close(ec2);
+                }
+                ws_.reset(); 
+                safe_ws_close(ws_);
+                goto backoff_wait;
             }
 
-            // Subscribe to private order/execution streams
+            // Subscribe to private topics
             if (!send_websocket_subscribe({"order", "execution"})) {
-                spdlog::warn("[BybitClient] Failed to subscribe to private topics");
+                spdlog::warn("[BybitClient] WS subscribe failed (order/execution)");
+                // still proceed; we might get another try after reconnect
             }
 
-            resync_pending_orders();
+            // Mark connected/healthy and reset backoff
+            ws_connected_.store(true);
+            backoff_attempt = 0;
+            last_ping_time_ = std::chrono::steady_clock::now();
+            last_pong_time_ = last_ping_time_;
+            spdlog::info("[BybitClient] WebSocket connected & authed");
 
-            // Message reading loop
-            while (!should_stop_ && ws_connected_) {
+            // ---- SINGLE REST CATCH-UP (only once after successful reconnect) ----
+            // We do this here (not in the failure loop) to avoid resync storms.
+            try {
+                resync_pending_orders();
+                spdlog::info("[BybitClient] REST catch-up complete after reconnect");
+                backfill_recent_executions(120000 /* 120s */, "linear");
+            } catch (const std::exception& e) {
+                spdlog::warn("[BybitClient] REST catch-up error (continuing): {}", e.what());
+            }
+            // ---------------------------------------------------------------------
+
+            // Message loop + heartbeat
+            for (;;) {
+                if (should_stop_) break;
+
+                // Heartbeat: send ping if due
+                const auto now = std::chrono::steady_clock::now();
+                if (std::chrono::duration_cast<std::chrono::seconds>(now - last_ping_time_).count() >= PING_INTERVAL_SEC) {
+                    send_websocket_ping();
+                }
+
+                // Read one frame
                 beast::flat_buffer buffer;
-                beast::error_code ec;
-                
-                // Read message with timeout
                 ws_->read(buffer, ec);
-                
+
                 if (ec) {
-                    if (ec != websocket::error::closed) {
+                    if (ec == websocket::error::closed) {
+                        spdlog::warn("[BybitClient] WebSocket closed by peer");
+                    } else {
                         spdlog::error("[BybitClient] WebSocket read error: {}", ec.message());
                     }
-                    ws_connected_ = false;
-                    break;
+                    break; // exit message loop -> backoff -> reconnect
                 }
-                
-                std::string message = beast::buffers_to_string(buffer.data());
-                process_websocket_message(message);
+
+                // Process frame
+                const std::string msg = beast::buffers_to_string(buffer.data());
+                process_websocket_message(msg);
+
+                // WS health check: consider both last pong and any data RX activity
+                const auto after = std::chrono::steady_clock::now();
+                const auto healthy_since = std::max(last_pong_time_, last_rx_time_);
+                if (std::chrono::duration_cast<std::chrono::seconds>(after - healthy_since).count() > PONG_TIMEOUT_SEC) {
+                    spdlog::warn("[BybitClient] WS health timeout (no pong or data > {}s); will reconnect", PONG_TIMEOUT_SEC);
+                    break; // exit message loop
+                }
             }
-            
+
+            // Drop connection cleanly before reconnecting
+             if (ws_) {
+                boost::beast::error_code ec2;
+                beast::get_lowest_layer(*ws_).close(ec2);
+            }
+            ws_.reset(); 
+            safe_ws_close(ws_);
+            ws_connected_.store(false);
+
         } catch (const std::exception& e) {
-            spdlog::error("[BybitClient] WebSocket error: {}", e.what());
-            ws_connected_ = false;
+            spdlog::error("[BybitClient] WebSocket exception: {}", e.what());
+            if (ws_) {
+                boost::beast::error_code ec2;
+                beast::get_lowest_layer(*ws_).close(ec2);
+            }
+            ws_.reset(); 
+            safe_ws_close(ws_);
+            ws_connected_.store(false);
         }
-        
-        if (!should_stop_) {
-            resync_pending_orders();
-            spdlog::info("[BybitClient] Reconnecting WebSocket in 5 seconds...");
-            std::this_thread::sleep_for(std::chrono::seconds(5));
-        }
+
+    backoff_wait:
+        if (should_stop_) break;
+
+        // IMPORTANT: No resync here. We only resync once *after* a successful reconnect.
+        const uint32_t sleep_ms = next_backoff_ms(backoff_attempt);
+        spdlog::info("[BybitClient] Reconnecting WebSocket in {} ms (attempt #{})", sleep_ms, backoff_attempt);
+        std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
     }
 }
 
+
 bool BybitClient::send_websocket_auth() {
     try {
-        std::string expires = std::to_string(
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::system_clock::now().time_since_epoch() + std::chrono::seconds(10)
-            ).count()
-        );
-        
-        std::string sign_payload = "GET/realtime" + expires;
-        std::string signature = hmac_sha256(api_secret_, sign_payload);
-        
+        // Bybit sample recipe: HMAC_SHA256(secret, "GET/realtime" + expiresMs)
+        // Keep expires tight (now + 1000 ms).
+        const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        const auto expires_ms = now_ms + 1000;
+
+        const std::string expires = std::to_string(expires_ms);
+        const std::string sign_payload = std::string("GET/realtime") + expires;
+        const std::string signature = hmac_sha256(api_secret_, sign_payload);
+
         rapidjson::Document auth_msg;
         auth_msg.SetObject();
-        auto& allocator = auth_msg.GetAllocator();
-        
-        auth_msg.AddMember("op", "auth", allocator);
-        
+        auto& alloc = auth_msg.GetAllocator();
+
+        auth_msg.AddMember("op", "auth", alloc);
+
         rapidjson::Value args(rapidjson::kArrayType);
-        args.PushBack(rapidjson::Value(api_key_.c_str(), allocator), allocator);
-        args.PushBack(rapidjson::Value(expires.c_str(), allocator), allocator);
-        args.PushBack(rapidjson::Value(signature.c_str(), allocator), allocator);
-        
-        auth_msg.AddMember("args", args, allocator);
-        
-        rapidjson::StringBuffer buffer;
-        rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
-        auth_msg.Accept(writer);
-        
-        ws_->write(net::buffer(buffer.GetString(), buffer.GetSize()));
-        
-        // Wait for auth response
-        beast::flat_buffer response_buffer;
-        ws_->read(response_buffer);
-        std::string response = beast::buffers_to_string(response_buffer.data());
-        
-        rapidjson::Document response_doc;
-        response_doc.Parse(response.c_str());
-        
-        if (response_doc.HasMember("success") && response_doc["success"].GetBool()) {
+        args.PushBack(rapidjson::Value(api_key_.c_str(), alloc), alloc);
+        args.PushBack(rapidjson::Value(expires.c_str(), alloc), alloc);
+        args.PushBack(rapidjson::Value(signature.c_str(), alloc), alloc);
+        auth_msg.AddMember("args", args, alloc);
+
+        rapidjson::StringBuffer sb;
+        rapidjson::Writer<rapidjson::StringBuffer> w(sb);
+        auth_msg.Accept(w);
+
+        beast::error_code ec;
+        ws_->text(true); // send JSON text frames
+        ws_->write(net::buffer(sb.GetString(), sb.GetSize()), ec);
+        if (ec) {
+            spdlog::error("[BybitClient] WS auth write error: {}", ec.message());
+            return false;
+        }
+
+        // Read a single response frame for auth ack; do not block forever.
+        beast::flat_buffer resp_buf;
+        ws_->read(resp_buf, ec);
+        if (ec) {
+            spdlog::error("[BybitClient] WS auth read error: {}", ec.message());
+            return false;
+        }
+
+        const std::string resp = beast::buffers_to_string(resp_buf.data());
+        rapidjson::Document resp_doc;
+        resp_doc.Parse(resp.c_str());
+        if (resp_doc.HasParseError() || !resp_doc.IsObject()) {
+            spdlog::error("[BybitClient] WS auth invalid JSON response: {}", resp);
+            return false;
+        }
+
+        // Bybit replies include "op":"auth" and "success":true/false
+        bool ok = false;
+        if (resp_doc.HasMember("success") && resp_doc["success"].IsBool()) {
+            ok = resp_doc["success"].GetBool();
+        }
+        if (ok) {
             spdlog::info("[BybitClient] WebSocket authenticated successfully");
             return true;
         }
-        
+
+        spdlog::error("[BybitClient] WebSocket auth failed: {}", resp);
         return false;
-        
+
     } catch (const std::exception& e) {
         spdlog::error("[BybitClient] WebSocket auth failed: {}", e.what());
         return false;
@@ -886,64 +1364,175 @@ bool BybitClient::send_websocket_auth() {
 
 bool BybitClient::send_websocket_subscribe(const std::vector<std::string>& topics) {
     try {
-        rapidjson::Document sub_msg;
-        sub_msg.SetObject();
-        auto& allocator = sub_msg.GetAllocator();
-        
-        sub_msg.AddMember("op", "subscribe", allocator);
-        
-        rapidjson::Value args(rapidjson::kArrayType);
-        for (const auto& topic : topics) {
-            args.PushBack(rapidjson::Value(topic.c_str(), allocator), allocator);
+        std::vector<std::string> want = topics;
+        if (want.empty()) {
+            // Private stream defaults for demo/mainnet: order + execution
+            want = {"order", "execution"};
         }
-        
-        sub_msg.AddMember("args", args, allocator);
-        
-        rapidjson::StringBuffer buffer;
-        rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
-        sub_msg.Accept(writer);
-        
-        ws_->write(net::buffer(buffer.GetString(), buffer.GetSize()));
-        
-        spdlog::info("[BybitClient] Subscribed to topics: {}", buffer.GetString());
+
+        rapidjson::Document msg;
+        msg.SetObject();
+        auto& alloc = msg.GetAllocator();
+
+        msg.AddMember("op", "subscribe", alloc);
+
+        rapidjson::Value args(rapidjson::kArrayType);
+        for (const auto& t : want) {
+            args.PushBack(rapidjson::Value(t.c_str(), alloc), alloc);
+        }
+        msg.AddMember("args", args, alloc);
+
+        rapidjson::StringBuffer sb;
+        rapidjson::Writer<rapidjson::StringBuffer> w(sb);
+        msg.Accept(w);
+
+        beast::error_code ec;
+        ws_->text(true);
+        ws_->write(net::buffer(sb.GetString(), sb.GetSize()), ec);
+        if (ec) {
+            spdlog::error("[BybitClient] WS subscribe write error: {}", ec.message());
+            return false;
+        }
+
+        spdlog::info("[BybitClient] WS subscribe sent ({} topics)", want.size());
         return true;
-        
     } catch (const std::exception& e) {
-        spdlog::error("[BybitClient] WebSocket subscribe failed: {}", e.what());
+        spdlog::error("[BybitClient] WS subscribe failed: {}", e.what());
         return false;
     }
 }
 
 void BybitClient::process_websocket_message(const std::string& message) {
+    last_rx_time_ = std::chrono::steady_clock::now();
     try {
         rapidjson::Document doc;
         doc.Parse(message.c_str());
-        
-        if (doc.HasParseError()) {
+        if (doc.HasParseError() || !doc.IsObject()) {
             spdlog::error("[BybitClient] Failed to parse WebSocket message");
             return;
         }
-        
-        // Handle different message types
-        if (doc.HasMember("topic")) {
-            std::string topic = doc["topic"].GetString();
-            
-            if (topic == "order") {
-                handle_order_update_message(doc);
-            } else if (topic == "execution") {
-                handle_execution_message(doc);
-            }
-        } else if (doc.HasMember("op")) {
-            std::string op = doc["op"].GetString();
+
+        // Generic op replies
+        if (doc.HasMember("op") && doc["op"].IsString()) {
+            const std::string op = doc["op"].GetString();
             if (op == "pong") {
                 last_pong_time_ = std::chrono::steady_clock::now();
+                spdlog::debug("[BybitClient] WS pong received");
+                return;
+            }
+            if (op == "auth") {
+                bool ok = doc.HasMember("success") && doc["success"].IsBool() && doc["success"].GetBool();
+                spdlog::info("[BybitClient] WS auth ack success={}", ok);
+                return;
+            }
+            if (op == "subscribe") {
+                bool ok = doc.HasMember("success") && doc["success"].IsBool() && doc["success"].GetBool();
+                spdlog::info("[BybitClient] WS subscribe ack success={}", ok);
+                return;
             }
         }
-        
+
+        // Topic-based routing (supports dotted variants like "order.linear")
+        if (doc.HasMember("topic") && doc["topic"].IsString()) {
+            const std::string topic = doc["topic"].GetString();
+            const bool is_order = (topic.rfind("order", 0) == 0) || (topic.find(".order") != std::string::npos) || (topic.find("order.") != std::string::npos);
+            const bool is_exec  = (topic.rfind("execution", 0) == 0) || (topic.find(".execution") != std::string::npos) || (topic.find("execution.") != std::string::npos);
+
+            // If Bybit supplies a data array, emit per-item for better granularity
+            const rapidjson::Value* data_arr = get_data_array(doc);
+            if (data_arr) {
+                if (is_order) {
+                    for (auto it = data_arr->Begin(); it != data_arr->End(); ++it) {
+                        if (it->IsObject()) {
+                            emit_order_snapshot(*it);
+                        }
+                    }
+                    return;
+                }
+                if (is_exec) {
+                    for (auto it = data_arr->Begin(); it != data_arr->End(); ++it) {
+                        if (it->IsObject()) {
+                            emit_execution_snapshot(*it);
+                        }
+                    }
+                    return;
+                }
+            }
+
+            // Fallback to your existing handlers if no array or custom format
+            if (is_order) {
+                handle_order_update_message(doc);
+                return;
+            }
+            if (is_exec) {
+                for (auto it = data_arr->Begin(); it != data_arr->End(); ++it) {
+                    if (it->IsObject()) {
+                        emit_execution_snapshot(*it);
+
+                        // NEW: advance cursor from exec item if available
+                        const auto& row = *it;
+                        // Bybit v5: execTime is usually string or number (ms)
+                        if (row.HasMember("execTime")) {
+                            if (row["execTime"].IsUint64()) {
+                                maybe_advance_exec_cursor(row["execTime"].GetUint64());
+                            } else if (row["execTime"].IsString()) {
+                                try {
+                                    uint64_t t = std::stoull(row["execTime"].GetString());
+                                    maybe_advance_exec_cursor(t);
+                                } catch (...) {}
+                            }
+                        } else if (row.HasMember("time") && row["time"].IsUint64()) {
+                            // Some payloads use "time"
+                            maybe_advance_exec_cursor(row["time"].GetUint64());
+                        }
+                    }
+                }
+                return;
+            }
+        }
+
+        // Unhandled payload (keep low noise)
+        spdlog::debug("[BybitClient] WS message (unhandled): {}", message.substr(0, 256));
     } catch (const std::exception& e) {
         spdlog::error("[BybitClient] Error processing WebSocket message: {}", e.what());
     }
 }
+
+void BybitClient::backfill_recent_executions(uint64_t lookback_ms, const std::string& category_hint) {
+    try {
+        const uint64_t now_ms = std::stoull(get_timestamp_ms());
+        const uint64_t start_ms = (now_ms > lookback_ms) ? (now_ms - lookback_ms) : 0ULL;
+        const std::string cat = category_hint.empty() ? "linear" : category_hint;
+
+        // NOTE: use perform_rest_request_locked (shared socket), not make_rest_request (which may open ad-hoc sessions)
+        const std::string endpoint =
+            "/v5/execution/list?category=" + cat +
+            "&startTime=" + std::to_string(start_ms) +
+            "&limit=200";
+
+        std::string resp = perform_rest_request_locked("GET", endpoint, /*params_json*/"");
+        rapidjson::Document doc;
+        doc.Parse(resp.c_str());
+        if (doc.HasParseError() || !doc.HasMember("retCode") || doc["retCode"].GetInt() != 0) {
+            spdlog::warn("[BybitClient] exec backfill: bad response retCode ({}), skipping",
+                         doc.HasMember("retCode") ? doc["retCode"].GetInt() : -1);
+            return;
+        }
+        if (!doc.HasMember("result")) return;
+        const auto& result = doc["result"];
+        if (!result.HasMember("list") || !result["list"].IsArray()) return;
+
+        size_t emitted = 0;
+        for (const auto& row : result["list"].GetArray()) {
+            emit_execution_snapshot(row);
+            ++emitted;
+        }
+        spdlog::info("[BybitClient] exec backfill: emitted {} executions (lookback={} ms)", emitted, lookback_ms);
+    } catch (const std::exception& e) {
+        spdlog::warn("[BybitClient] exec backfill error: {}", e.what());
+    }
+}
+
 
 void BybitClient::handle_order_update_message(const rapidjson::Document& doc) {
     if (!doc.HasMember("data") || !doc["data"].IsArray()) {
@@ -986,54 +1575,83 @@ void BybitClient::handle_execution_message(const rapidjson::Document& doc) {
 }
 
 void BybitClient::emit_execution_snapshot(const rapidjson::Value& exec_data) {
-    if (!exec_data.HasMember("execId")) {
+    // Require execId and ensure it's a string
+    if (!exec_data.HasMember("execId") || !exec_data["execId"].IsString()) {
         return;
     }
 
     const std::string exec_id = exec_data["execId"].GetString();
+
+    // --- de-dup with soft cap ---
     {
-        std::lock_guard<std::mutex> lock(seen_exec_mutex_);
-        if (!seen_exec_ids_.insert(exec_id).second) {
-            return; // already processed
+        std::lock_guard<std::mutex> lk(seen_exec_mutex_);
+        constexpr size_t kMaxExecIds = 50000;  // tune as you like
+        if (seen_exec_ids_.size() >= kMaxExecIds) {
+            seen_exec_ids_.clear();            // simple prune
+            seen_exec_ids_.reserve(kMaxExecIds); // avoid rehash churn
+        }
+        if (!exec_id.empty()) {
+            if (!seen_exec_ids_.insert(exec_id).second) {
+                return; // already processed
+            }
         }
     }
 
     FillData fill;
     fill.exec_id = exec_id;
 
-    if (exec_data.HasMember("orderLinkId")) {
+    // Prefer client_order_id (orderLinkId); fallback to exchange orderId for manual/external actions
+    if (exec_data.HasMember("orderLinkId") && exec_data["orderLinkId"].IsString()) {
         fill.client_order_id = exec_data["orderLinkId"].GetString();
+    } else if (exec_data.HasMember("orderId") && exec_data["orderId"].IsString()) {
+        fill.client_order_id = exec_data["orderId"].GetString();
     }
-    if (exec_data.HasMember("orderId")) {
+
+    if (exec_data.HasMember("orderId") && exec_data["orderId"].IsString()) {
         fill.exchange_order_id = exec_data["orderId"].GetString();
     }
-    if (exec_data.HasMember("symbol")) {
+    if (exec_data.HasMember("symbol") && exec_data["symbol"].IsString()) {
         fill.symbol = exec_data["symbol"].GetString();
     }
-    if (exec_data.HasMember("side")) {
-        std::string side = exec_data["side"].GetString();
+    if (exec_data.HasMember("side") && exec_data["side"].IsString()) {
+        const std::string side = exec_data["side"].GetString();
         fill.side = (side == "Buy") ? "buy" : "sell";
     }
-    if (exec_data.HasMember("execPrice")) {
+    if (exec_data.HasMember("execPrice") && exec_data["execPrice"].IsString()) {
         fill.price = exec_data["execPrice"].GetString();
     }
-    if (exec_data.HasMember("execQty")) {
+    if (exec_data.HasMember("execQty") && exec_data["execQty"].IsString()) {
         fill.quantity = exec_data["execQty"].GetString();
     }
-    if (exec_data.HasMember("execFee")) {
+    if (exec_data.HasMember("execFee") && exec_data["execFee"].IsString()) {
         fill.fee = exec_data["execFee"].GetString();
     }
-    if (exec_data.HasMember("feeCurrency")) {
+    if (exec_data.HasMember("feeCurrency") && exec_data["feeCurrency"].IsString()) {
         fill.fee_currency = exec_data["feeCurrency"].GetString();
-    }
-    if (exec_data.HasMember("feeRate") && fill.fee_currency.empty()) {
+    } else if (exec_data.HasMember("feeRate")) {
+        // heuristic default if venue omits currency but provides a rate
         fill.fee_currency = "USDT";
     }
-    if (exec_data.HasMember("isMaker")) {
+    if (exec_data.HasMember("isMaker") && exec_data["isMaker"].IsBool()) {
         fill.liquidity = exec_data["isMaker"].GetBool() ? "maker" : "taker";
     }
+
+    // Timestamp (string or number); also advance the exec cursor so catch-ups get smaller
     if (exec_data.HasMember("execTime")) {
-        fill.timestamp_ms = std::stoull(exec_data["execTime"].GetString());
+        if (exec_data["execTime"].IsUint64()) {
+            fill.timestamp_ms = exec_data["execTime"].GetUint64();
+        } else if (exec_data["execTime"].IsString()) {
+            try {
+                fill.timestamp_ms = std::stoull(exec_data["execTime"].GetString());
+            } catch (...) { /* ignore parse errors */ }
+        }
+    } else if (exec_data.HasMember("time") && exec_data["time"].IsUint64()) {
+        fill.timestamp_ms = exec_data["time"].GetUint64();
+    }
+
+    // (If you added PR5’s cursor helper) keep the backfill cursor fresh
+    if (fill.timestamp_ms) {
+        maybe_advance_exec_cursor(fill.timestamp_ms);
     }
 
     if (fill_callback_) {
@@ -1041,22 +1659,148 @@ void BybitClient::emit_execution_snapshot(const rapidjson::Value& exec_data) {
     }
 }
 
+
 void BybitClient::send_websocket_ping() {
     try {
-        rapidjson::Document ping_msg;
-        ping_msg.SetObject();
-        ping_msg.AddMember("op", "ping", ping_msg.GetAllocator());
-        
-        rapidjson::StringBuffer buffer;
-        rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
-        ping_msg.Accept(writer);
-        
-        ws_->write(net::buffer(buffer.GetString(), buffer.GetSize()));
+        // Bybit expects {"op":"ping"} on private streams
+        static constexpr const char* kPing = "{\"op\":\"ping\"}";
+        beast::error_code ec;
+        ws_->text(true);
+        ws_->write(net::buffer(kPing, std::strlen(kPing)), ec);
+        if (ec) {
+            spdlog::warn("[BybitClient] WS ping write error: {}", ec.message());
+            return;
+        }
         last_ping_time_ = std::chrono::steady_clock::now();
-        
+        spdlog::debug("[BybitClient] WS ping sent");
     } catch (const std::exception& e) {
         spdlog::error("[BybitClient] Failed to send ping: {}", e.what());
     }
 }
+
+std::vector<OpenOrderBrief> BybitClient::list_open_orders(
+    const std::optional<std::string>& category,
+    const std::optional<std::string>& symbol,
+    const std::optional<std::string>& settle_coin,
+    const std::optional<std::string>& base_coin)
+{
+    std::vector<OpenOrderBrief> out;
+
+    auto build_endpoint = [](const std::string& cat,
+                             const std::optional<std::string>& sym,
+                             const std::optional<std::string>& settle,
+                             const std::optional<std::string>& base) {
+        std::string ep = "/v5/order/realtime?category=" + cat;
+        if (sym && !sym->empty())       ep += "&symbol="     + *sym;
+        else if (settle && !settle->empty()) ep += "&settleCoin=" + *settle;
+        else if (base && !base->empty())   ep += "&baseCoin="   + *base;
+        // Bybit default is open orders; no need to add openOnly=0
+        return ep;
+    };
+
+    struct Q { std::string endpoint; std::string cat; };
+    std::vector<Q> plan;
+
+    // If caller specified a category, honor it exactly.
+    if (category && !category->empty()) {
+        // On demo, most categories except linear/USDT will 10032. We'll still honor explicit asks.
+        std::string settle = (settle_coin && !settle_coin->empty())
+                               ? *settle_coin
+                               : (is_testnet_ ? std::string("USDT") : std::string());
+        plan.push_back({build_endpoint(*category, symbol, settle.empty() ? std::nullopt : std::optional<std::string>(settle), base_coin), *category});
+    } else {
+        // No category provided: choose a sensible default set.
+        if (is_testnet_) {
+            // Demo: keep it simple & supported.
+            plan.push_back({build_endpoint("linear", symbol, std::string("USDT"), std::nullopt), "linear"});
+        } else {
+            // Mainnet: try linear USDT and USDC; spot/inverse only if symbol/base provided.
+            plan.push_back({build_endpoint("linear", symbol, std::string("USDT"), std::nullopt), "linear"});
+            plan.push_back({build_endpoint("linear", symbol, std::string("USDC"), std::nullopt), "linear"});
+            if (symbol && !symbol->empty()) {
+                plan.push_back({build_endpoint("spot", symbol, std::nullopt, std::nullopt), "spot"});
+            }
+            if (base_coin && !base_coin->empty()) {
+                plan.push_back({build_endpoint("inverse", std::nullopt, std::nullopt, base_coin), "inverse"});
+            }
+        }
+    }
+
+    for (const auto& q : plan) {
+        std::string body;
+        try {
+            // IMPORTANT: GET with querystring; do not send a JSON body for GET.
+            body = perform_rest_request_locked("GET", q.endpoint, "");
+        } catch (const std::exception& e) {
+            spdlog::warn("[BybitClient] list_open_orders GET {} failed: {}", q.endpoint, e.what());
+            continue;
+        }
+
+        rapidjson::Document doc;
+        doc.Parse(body.c_str());
+        if (doc.HasParseError() || !doc.IsObject() || !doc.HasMember("retCode")) {
+            spdlog::warn("[BybitClient] list_open_orders: invalid JSON for {}", q.endpoint);
+            continue;
+        }
+
+        const int ret = doc["retCode"].IsInt() ? doc["retCode"].GetInt() : -1;
+        if (ret != 0) {
+            const char* msg = (doc.HasMember("retMsg") && doc["retMsg"].IsString())
+                                ? doc["retMsg"].GetString() : "";
+            // On demo, 10032 ("Demo trading are not supported.") is expected for some categories; downgrade to info.
+            if (ret == 10032 && is_testnet_) {
+                spdlog::info("[BybitClient] list_open_orders (demo) skipped {}: retCode={} retMsg='{}'", q.endpoint, ret, msg);
+            } else {
+                spdlog::warn("[BybitClient] list_open_orders: retCode={} retMsg='{}' for {}", ret, msg, q.endpoint);
+            }
+            continue;
+        }
+
+        const rapidjson::Value* list = nullptr;
+        if (doc.HasMember("result") && doc["result"].IsObject()) {
+            const auto& res = doc["result"];
+            if (res.HasMember("list") && res["list"].IsArray()) list = &res["list"];
+            else if (res.HasMember("orders") && res["orders"].IsArray()) list = &res["orders"];
+        } else if (doc.HasMember("data") && doc["data"].IsArray()) {
+            list = &doc["data"];
+        }
+
+        if (!list) {
+            spdlog::info("[BybitClient] list_open_orders: empty list for {}", q.endpoint);
+            continue;
+        }
+
+        for (auto it = list->Begin(); it != list->End(); ++it) {
+            if (!it->IsObject()) continue;
+
+            OpenOrderBrief b;
+            if (it->HasMember("orderLinkId") && (*it)["orderLinkId"].IsString())
+                b.client_order_id = (*it)["orderLinkId"].GetString();
+            if (b.client_order_id.empty()) continue; // we rehydrate by cl_id
+
+            if (it->HasMember("symbol") && (*it)["symbol"].IsString())
+                b.symbol = (*it)["symbol"].GetString();
+            if (it->HasMember("category") && (*it)["category"].IsString())
+                b.category = (*it)["category"].GetString();
+            else
+                b.category = q.cat;
+
+            if (it->HasMember("side") && (*it)["side"].IsString())
+                b.side = (*it)["side"].GetString(); // "Buy"/"Sell"
+            if (it->HasMember("orderType") && (*it)["orderType"].IsString())
+                b.order_type = (*it)["orderType"].GetString();
+            if (it->HasMember("qty") && (*it)["qty"].IsString())
+                b.qty = (*it)["qty"].GetString();
+            if (it->HasMember("reduceOnly") && (*it)["reduceOnly"].IsBool())
+                b.reduce_only = (*it)["reduceOnly"].GetBool();
+
+            out.emplace_back(std::move(b));
+        }
+    }
+
+    return out;
+}
+
+
 
 } // namespace latentspeed
