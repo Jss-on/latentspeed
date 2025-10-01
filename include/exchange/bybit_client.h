@@ -151,6 +151,20 @@ private:
     std::string ws_port_;
     std::string ws_target_;
 
+    // --- WS DNS cache & preferences ---
+    // Prefer IPv4 first (v6 can be fine, but some ISPs or CGNAT environments blackhole it)
+    bool prefer_ipv4_{true};
+    // Cache of the last successfully resolved WS endpoints
+    std::vector<tcp::endpoint> ws_endpoints_cache_;
+    // When the cache was last refreshed successfully
+    std::chrono::steady_clock::time_point ws_dns_last_ok_{};
+    // How long we consider the cache "fresh" before we try to re-resolve
+    std::chrono::seconds ws_dns_ttl_{std::chrono::seconds(1800)};
+
+    // Resolve WS endpoints with caching & IPv4-first ordering
+    // Throws if resolution fails and there is no usable cache.
+    const std::vector<tcp::endpoint>& resolve_ws_endpoints(bool force_refresh = false);
+
     // Network components
     std::unique_ptr<net::io_context> ioc_;
     std::unique_ptr<ssl::context> ssl_ctx_;

@@ -826,7 +826,7 @@ void TradingEngineService::stats_monitoring_thread() {
     uint64_t last_orders_processed = 0;
     
     while (running_.load(std::memory_order_acquire)) {
-        std::this_thread::sleep_for(std::chrono::seconds(5));
+        std::this_thread::sleep_for(std::chrono::seconds(10));
         
         const auto now = std::chrono::steady_clock::now();
         const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(

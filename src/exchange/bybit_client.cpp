@@ -618,7 +618,14 @@ bool BybitClient::ensure_rest_connection_locked() {
     if (rest_endpoints_.empty()) {
         try {
             auto results = rest_resolver_->resolve(rest_host_, rest_port_);
-            for (const auto& e : results) rest_endpoints_.push_back(e.endpoint());
+            std::vector<tcp::endpoint> v4, v6;
+             for (const auto& r : results) {
+                 const auto ep = r.endpoint();
+                 (ep.address().is_v4() ? v4 : v6).push_back(ep);
+             }
+             rest_endpoints_.clear();
+             rest_endpoints_.insert(rest_endpoints_.end(), v4.begin(), v4.end());
+             rest_endpoints_.insert(rest_endpoints_.end(), v6.begin(), v6.end());
         } catch (const std::exception& e) {
             spdlog::error("[BybitClient] REST resolve failed: {}", e.what());
             return false;
@@ -680,7 +687,7 @@ void BybitClient::configure_endpoints(bool testnet) {
         rest_port_ = "443";
         ws_host_ = "stream-demo.bybit.com";
         ws_port_ = "443";
-        ws_target_ = "/v5/private?max_active_time=1m";
+        ws_target_ = "/v5/private";
     } else {
         // Bybit production endpoints
         rest_host_ = "api.bybit.com";
@@ -1046,6 +1053,57 @@ std::string BybitClient::perform_rest_request_locked(const std::string& method,
     throw std::runtime_error("REST connection failure");
 }
 
+const std::vector<tcp::endpoint>& BybitClient::resolve_ws_endpoints(bool force_refresh) {
+    auto now = std::chrono::steady_clock::now();
+
+    const bool cache_fresh =
+        !ws_endpoints_cache_.empty() &&
+        (now - ws_dns_last_ok_) < ws_dns_ttl_;
+
+    if (cache_fresh && !force_refresh) {
+        return ws_endpoints_cache_;
+    }
+
+    try {
+        tcp::resolver resolver(*ioc_);
+        auto results = resolver.resolve(ws_host_, ws_port_);
+
+        std::vector<tcp::endpoint> v4, v6;
+        v4.reserve(8);
+        v6.reserve(8);
+        for (const auto& r : results) {
+            const auto ep = r.endpoint();
+            (ep.address().is_v4() ? v4 : v6).push_back(ep);
+        }
+
+        ws_endpoints_cache_.clear();
+        if (prefer_ipv4_) {
+            ws_endpoints_cache_.insert(ws_endpoints_cache_.end(), v4.begin(), v4.end());
+            ws_endpoints_cache_.insert(ws_endpoints_cache_.end(), v6.begin(), v6.end());
+        } else {
+            ws_endpoints_cache_.insert(ws_endpoints_cache_.end(), v6.begin(), v6.end());
+            ws_endpoints_cache_.insert(ws_endpoints_cache_.end(), v4.begin(), v4.end());
+        }
+
+        ws_dns_last_ok_ = now;
+        return ws_endpoints_cache_;
+
+    } catch (const std::exception& e) {
+        if (!ws_endpoints_cache_.empty()) {
+            spdlog::warn(
+                "[BybitClient] DNS resolve failed ({}); reusing cached WS endpoints ({} addrs, age={}s)",
+                e.what(),
+                ws_endpoints_cache_.size(),
+                std::chrono::duration_cast<std::chrono::seconds>(now - ws_dns_last_ok_).count()
+            );
+            return ws_endpoints_cache_;
+        }
+        spdlog::error("[BybitClient] DNS resolve failed and no cached WS endpoints are available: {}", e.what());
+        throw; // caller will back off & retry
+    }
+}
+
+
 std::string BybitClient::hmac_sha256(const std::string& key, const std::string& data) const {
     unsigned char hash[EVP_MAX_MD_SIZE];
     unsigned int hash_len;
@@ -1156,9 +1214,9 @@ void BybitClient::websocket_thread_func() {
                     "Failed to set SNI hostname");
             }
 
-            // --- CONNECT FIRST ---
-            auto const results = resolver.resolve(ws_host_, ws_port_);
-            boost::asio::connect(beast::get_lowest_layer(*ws_), results);
+            // Connect TCP socket (IPv4-first, with DNS cache fallback)
+            auto const& endpoints = resolve_ws_endpoints(false);
+            boost::asio::connect(beast::get_lowest_layer(*ws_), endpoints);
 
             // Now the TCP socket is open → set TCP keepalive safely
             beast::get_lowest_layer(*ws_).set_option(net::socket_base::keep_alive(true));
@@ -1297,7 +1355,7 @@ bool BybitClient::send_websocket_auth() {
         // Keep expires tight (now + 1000 ms).
         const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
-        const auto expires_ms = now_ms + 1000;
+        const auto expires_ms = now_ms + 5000;
 
         const std::string expires = std::to_string(expires_ms);
         const std::string sign_payload = std::string("GET/realtime") + expires;
