@@ -18,8 +18,11 @@
 #include <thread>
 #include <chrono>
 #include <filesystem>
+#include <vector>
+#include <algorithm>
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
+#include <args.hxx>
 
 /**
  * @brief Global pointer to trading engine instance for signal handling
@@ -28,6 +31,103 @@
  * receiving termination signals (Ctrl+C, SIGTERM, etc.)
  */
 latentspeed::TradingEngineService* g_trading_engine = nullptr;
+
+/**
+ * @brief Parse command line arguments using args library
+ * @param argc Argument count
+ * @param argv Argument vector
+ * @return TradingEngineConfig with parsed values
+ */
+latentspeed::TradingEngineConfig parse_command_line_args(int argc, char* argv[]) {
+    args::ArgumentParser parser("Latentspeed Trading Engine Service", 
+                                "Ultra-low latency trading engine for cryptocurrency exchanges.");
+    
+    args::HelpFlag help(parser, "help", "Display this help menu", {'h', "help"});
+    args::ValueFlag<std::string> exchange(parser, "name", "Exchange name (e.g., bybit) [REQUIRED]", 
+                                         {"exchange"});
+    args::ValueFlag<std::string> api_key(parser, "key", "Exchange API key [REQUIRED]", 
+                                        {"api-key"});
+    args::ValueFlag<std::string> api_secret(parser, "secret", "Exchange API secret [REQUIRED]", 
+                                           {"api-secret"});
+    args::Flag live_trade(parser, "live-trade", "Enable live trading (default: demo/testnet)", 
+                         {"live-trade"});
+    args::Flag demo_mode(parser, "demo", "Use demo/testnet mode (default)", 
+                        {"demo"});
+    
+    latentspeed::TradingEngineConfig config;
+    
+    try {
+        parser.ParseCLI(argc, argv);
+    } catch (const args::Completion& e) {
+        std::cout << e.what();
+        std::exit(0);
+    } catch (const args::Help&) {
+        std::cout << parser;
+        std::cout << "\nExamples:\n";
+        std::cout << "  # Demo trading (testnet)\n";
+        std::cout << "  " << argv[0] << " --exchange bybit --api-key YOUR_KEY --api-secret YOUR_SECRET\n\n";
+        std::cout << "  # Live trading\n";
+        std::cout << "  " << argv[0] << " --exchange bybit --api-key YOUR_KEY --api-secret YOUR_SECRET --live-trade\n\n";
+        std::exit(0);
+    } catch (const args::ParseError& e) {
+        std::cerr << e.what() << std::endl;
+        std::cerr << parser;
+        std::exit(1);
+    }
+    
+    // Extract values
+    if (exchange) config.exchange = args::get(exchange);
+    if (api_key) config.api_key = args::get(api_key);
+    if (api_secret) config.api_secret = args::get(api_secret);
+    
+    // Handle trading mode flags
+    if (live_trade && demo_mode) {
+        std::cerr << "Error: Cannot specify both --live-trade and --demo\n";
+        std::exit(1);
+    }
+    
+    config.live_trade = live_trade ? true : false;
+    
+    return config;
+}
+
+/**
+ * @brief Validate command line configuration
+ * @param config Configuration to validate
+ * @return true if valid, false otherwise
+ */
+bool validate_config(const latentspeed::TradingEngineConfig& config) {
+    std::vector<std::string> errors;
+    
+    if (config.exchange.empty()) {
+        errors.push_back("--exchange is required");
+    }
+    
+    if (config.api_key.empty()) {
+        errors.push_back("--api-key is required");
+    }
+    
+    if (config.api_secret.empty()) {
+        errors.push_back("--api-secret is required");
+    }
+    
+    // Check for supported exchanges
+    std::vector<std::string> supported_exchanges = {"bybit"};
+    if (!config.exchange.empty() && 
+        std::find(supported_exchanges.begin(), supported_exchanges.end(), config.exchange) == supported_exchanges.end()) {
+        errors.push_back("Unsupported exchange '" + config.exchange + "'. Supported: bybit");
+    }
+    
+    if (!errors.empty()) {
+        std::cerr << "Configuration errors:\n";
+        for (const auto& error : errors) {
+            std::cerr << "  - " << error << "\n";
+        }
+        return false;
+    }
+    
+    return true;
+}
 
 /**
  * @brief Signal handler for graceful shutdown
@@ -50,16 +150,18 @@ void signal_handler(int signal) {
 
 /**
  * @brief Main entry point for the trading engine service
- * @param argc Argument count (currently unused)
- * @param argv Argument vector (currently unused)
+ * @param argc Argument count
+ * @param argv Argument vector containing command line arguments
  * @return Exit code: 0 for success, 1 for failure
  * 
  * Main function performs the complete service lifecycle:
  * 
  * **Initialization Phase:**
- * 1. Sets up signal handlers for graceful shutdown (SIGINT, SIGTERM)
- * 2. Creates TradingEngineService instance
- * 3. Initializes all components (ZeroMQ, ccapi, market data feeds)
+ * 1. Parses command line arguments (--exchange, --api-key, --api-secret, --live-trade)
+ * 2. Validates configuration parameters
+ * 3. Sets up signal handlers for graceful shutdown (SIGINT, SIGTERM)
+ * 4. Creates TradingEngineService instance with configuration
+ * 5. Initializes all components (ZeroMQ, exchange clients, market data feeds)
  * 
  * **Runtime Phase:**
  * 1. Starts all worker threads (order processing, market data, publishing)
@@ -81,6 +183,20 @@ void signal_handler(int signal) {
  * The service returns non-zero exit codes on failure for proper system integration.
  */
 int main(int argc, char* argv[]) {
+    // Parse command line arguments
+    latentspeed::TradingEngineConfig config;
+    try {
+        config = parse_command_line_args(argc, argv);
+    } catch (const std::exception& e) {
+        std::cerr << "Error parsing command line arguments: " << e.what() << std::endl;
+        return 1;
+    }
+    
+    // Validate configuration
+    if (!validate_config(config)) {
+        std::cerr << "Use --help for usage information." << std::endl;
+        return 1;
+    }
     // Create logs directory if it doesn't exist
     try {
         std::filesystem::create_directories("logs");
@@ -124,8 +240,16 @@ int main(int argc, char* argv[]) {
     signal(SIGTERM, signal_handler);
 
     try {
-        // Create and initialize trading engine
-        latentspeed::TradingEngineService trading_engine(latentspeed::CpuMode::ECO);
+        // Display configuration summary
+        spdlog::info("[Main] Configuration Summary:");
+        spdlog::info("[Main]   Exchange: {}", config.exchange);
+        spdlog::info("[Main]   Trading Mode: {}", config.live_trade ? "LIVE" : "DEMO/TESTNET");
+        spdlog::info("[Main]   API Key: {}...{} (masked)", 
+                     config.api_key.substr(0, 4), 
+                     config.api_key.length() > 8 ? config.api_key.substr(config.api_key.length() - 4) : "");
+        
+        // Create and initialize trading engine with configuration
+        latentspeed::TradingEngineService trading_engine(config);
         g_trading_engine = &trading_engine;
 
         if (!trading_engine.initialize()) {

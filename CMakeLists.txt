@@ -24,8 +24,12 @@ find_package(CURL REQUIRED)
 find_package(spdlog REQUIRED)
 find_package(Boost REQUIRED COMPONENTS system)
 find_package(RapidJSON REQUIRED)
+find_package(args REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(ZMQ REQUIRED libzmq)
+
+# WebSocket++ is header-only, no find_package needed
+# It will be available through vcpkg include directories
 
 # Add subdirectories
 add_subdirectory(benchmark)
@@ -34,11 +38,24 @@ add_subdirectory(benchmark)
 add_executable(trading_engine_service
   src/main.cpp
   src/trading_engine_service.cpp
+  src/market_data_provider.cpp
   src/exchange/exchange_client.cpp
   src/exchange/bybit_client.cpp
 )
 
+# Market Data Test executable
+add_executable(test_market_data
+  src/test_market_data.cpp
+  src/market_data_provider.cpp
+)
+
 target_include_directories(trading_engine_service PRIVATE include)
+target_include_directories(test_market_data PRIVATE include)
+
+# Header-only libraries
+if(TARGET args)
+    target_link_libraries(trading_engine_service PRIVATE args)
+endif()
 
 # HFT-optimized link libraries
 target_link_libraries(trading_engine_service PRIVATE 
@@ -52,9 +69,25 @@ target_link_libraries(trading_engine_service PRIVATE
   spdlog::spdlog
 )
 
+# Test Market Data executable libraries
+target_link_libraries(test_market_data PRIVATE 
+  OpenSSL::SSL 
+  OpenSSL::Crypto 
+  Threads::Threads 
+  ${ZMQ_LIBRARIES} 
+  Boost::system
+  rapidjson
+  spdlog::spdlog
+)
+
 # Linux-specific libraries for HFT features
 if(UNIX AND NOT APPLE)
     target_link_libraries(trading_engine_service PRIVATE 
+        pthread  # POSIX threads for CPU affinity
+        rt       # Real-time extensions for scheduling
+    )
+    
+    target_link_libraries(test_market_data PRIVATE 
         pthread  # POSIX threads for CPU affinity
         rt       # Real-time extensions for scheduling
     )

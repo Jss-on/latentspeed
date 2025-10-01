@@ -1,0 +1,325 @@
+/**
+ * @file market_data_provider.h
+ * @brief Ultra-low latency market data provider with ZMQ publishing
+ * @author jessiondiwangan@gmail.com
+ * @date 2025
+ * 
+ * HFT-OPTIMIZED FEATURES:
+ * - Lock-free market data processing
+ * - Zero-copy ZMQ publishing to ports 5556 (trades) and 5557 (orderbook)
+ * - 10-level orderbook depth with microsecond timestamps
+ * - Memory pools for data structures to avoid allocations
+ * - CPU affinity for dedicated market data threads
+ */
+
+#pragma once
+
+#include <string>
+#include <memory>
+#include <thread>
+#include <atomic>
+#include <functional>
+#include <map>
+#include <unordered_map>
+#include <vector>
+#include <cstdint>
+#include <string_view>
+#include <chrono>
+#include <mutex>
+
+// ZeroMQ for market data publishing
+#include <zmq.hpp>
+
+// JSON processing
+#include <rapidjson/document.h>
+#include <rapidjson/writer.h>
+#include <rapidjson/stringbuffer.h>
+
+// WebSocket client using Boost.Beast
+#include <boost/beast/core.hpp>
+#include <boost/beast/ssl.hpp>
+#include <boost/beast/websocket.hpp>
+#include <boost/beast/websocket/ssl.hpp>
+#include <boost/asio/connect.hpp>
+#include <boost/asio/ip/tcp.hpp>
+#include <boost/asio/ssl/stream.hpp>
+
+// HFT data structures
+#include "hft_data_structures.h"
+#include <spdlog/spdlog.h>
+
+namespace latentspeed {
+
+/**
+ * @struct MarketTick
+ * @brief HFT-optimized trade tick data structure
+ */
+struct MarketTick {
+    uint64_t timestamp_ns;           ///< Nanosecond timestamp
+    hft::FixedString<32> symbol;     ///< Trading symbol (e.g., "BTCUSDT")
+    hft::FixedString<16> exchange;   ///< Exchange name (e.g., "bybit")
+    double price;                    ///< Trade price
+    double quantity;                 ///< Trade quantity
+    hft::FixedString<8> side;        ///< Trade side: "buy" or "sell"
+    hft::FixedString<64> trade_id;   ///< Exchange trade ID
+    
+    MarketTick() : timestamp_ns(0), price(0.0), quantity(0.0) {}
+};
+
+/**
+ * @struct OrderBookLevel
+ * @brief Single orderbook level (price/quantity pair)
+ */
+struct OrderBookLevel {
+    double price;
+    double quantity;
+    
+    OrderBookLevel() : price(0.0), quantity(0.0) {}
+    OrderBookLevel(double p, double q) : price(p), quantity(q) {}
+};
+
+/**
+ * @struct OrderBookSnapshot
+ * @brief HFT-optimized L2 orderbook snapshot (10 levels each side)
+ */
+struct OrderBookSnapshot {
+    uint64_t timestamp_ns;                    ///< Nanosecond timestamp
+    hft::FixedString<32> symbol;              ///< Trading symbol
+    hft::FixedString<16> exchange;            ///< Exchange name
+    std::array<OrderBookLevel, 10> bids;      ///< Bid levels (highest to lowest)
+    std::array<OrderBookLevel, 10> asks;      ///< Ask levels (lowest to highest)
+    uint64_t sequence_number;                 ///< Sequence for ordering
+    
+    OrderBookSnapshot() : timestamp_ns(0), sequence_number(0) {}
+};
+
+/**
+ * @brief WebSocket client configuration
+ */
+struct WSConfig {
+    std::string url;
+    std::vector<std::string> symbols;
+    bool enable_trades = true;
+    bool enable_orderbook = true;
+    int orderbook_depth = 10;
+};
+
+/**
+ * @brief Market data callbacks interface
+ */
+class MarketDataCallbacks {
+public:
+    virtual ~MarketDataCallbacks() = default;
+    virtual void on_trade(const MarketTick& tick) = 0;
+    virtual void on_orderbook(const OrderBookSnapshot& snapshot) = 0;
+    virtual void on_error(const std::string& error) = 0;
+};
+
+/**
+ * @class MarketDataProvider
+ * @brief Ultra-low latency market data provider with ZMQ publishing
+ * 
+ * Features:
+ * - Direct WebSocket connections to exchanges
+ * - Lock-free data processing pipelines
+ * - ZMQ publishing on separate ports for trades and orderbook
+ * - Memory pools to avoid allocations in hot path
+ * - Sub-microsecond processing latency targets
+ */
+class MarketDataProvider {
+public:
+    /**
+     * @brief Constructor with exchange-specific configuration
+     * @param exchange Exchange name (e.g., "bybit", "binance")
+     * @param symbols List of symbols to subscribe to
+     */
+    explicit MarketDataProvider(const std::string& exchange, 
+                              const std::vector<std::string>& symbols);
+    
+    /**
+     * @brief Destructor
+     */
+    ~MarketDataProvider();
+    
+    /**
+     * @brief Initialize ZMQ publishers and WebSocket connections
+     * @return true if initialization successful
+     */
+    bool initialize();
+    
+    /**
+     * @brief Start market data streaming
+     */
+    void start();
+    
+    /**
+     * @brief Stop market data streaming
+     */
+    void stop();
+    
+    /**
+     * @brief Check if provider is running
+     */
+    bool is_running() const { return running_.load(std::memory_order_acquire); }
+    
+    /**
+     * @brief Set market data callback handler
+     */
+    void set_callbacks(std::shared_ptr<MarketDataCallbacks> callbacks);
+    
+    /**
+     * @brief Get current statistics
+     */
+    struct Stats {
+        std::atomic<uint64_t> trades_processed{0};
+        std::atomic<uint64_t> orderbooks_processed{0};
+        std::atomic<uint64_t> messages_published{0};
+        std::atomic<uint64_t> errors{0};
+    };
+    
+    const Stats& get_stats() const { return stats_; }
+
+private:
+    // Boost.Beast WebSocket type aliases
+    using tcp = boost::asio::ip::tcp;
+    using WSStream = boost::beast::websocket::stream<boost::beast::ssl_stream<boost::beast::tcp_stream>>;
+    using WSBuffer = boost::beast::flat_buffer;
+    
+    /**
+     * @brief WebSocket thread for handling connections
+     */
+    void websocket_thread();
+    
+    /**
+     * @brief Data processing thread
+     */
+    void processing_thread();
+    
+    /**
+     * @brief ZMQ publishing thread
+     */
+    void publishing_thread();
+    
+    /**
+     * @brief WebSocket connection management
+     */
+    void connect_websocket();
+    void handle_websocket_message(const std::string& message);
+    void send_subscription();
+    
+    /**
+     * @brief Exchange-specific message parsing
+     */
+    void parse_bybit_message(const std::string& message);
+    void parse_binance_message(const std::string& message);
+    
+    /**
+     * @brief Parse trade data from JSON
+     */
+    bool parse_trade_data(const rapidjson::Value& doc, MarketTick& tick);
+    
+    /**
+     * @brief Parse orderbook data from JSON
+     */
+    bool parse_orderbook_data(const rapidjson::Value& doc, OrderBookSnapshot& snapshot);
+    
+    /**
+     * @brief Publish trade data to ZMQ port 5556
+     */
+    void publish_trade(const MarketTick& tick);
+    
+    /**
+     * @brief Publish orderbook data to ZMQ port 5557
+     */
+    void publish_orderbook(const OrderBookSnapshot& snapshot);
+    
+    /**
+     * @brief Serialize market tick to JSON
+     */
+    std::string serialize_trade(const MarketTick& tick);
+    
+    /**
+     * @brief Serialize orderbook snapshot to JSON
+     */
+    std::string serialize_orderbook(const OrderBookSnapshot& snapshot);
+    
+    /**
+     * @brief Get current timestamp in nanoseconds
+     */
+    uint64_t get_timestamp_ns();
+    
+    /**
+     * @brief Build WebSocket subscription message
+     */
+    std::string build_subscription_message();
+
+private:
+    // Configuration
+    std::string exchange_;
+    std::vector<std::string> symbols_;
+    std::atomic<bool> running_{false};
+    
+    // Boost.Beast WebSocket components
+    std::unique_ptr<boost::asio::io_context> io_context_;
+    std::unique_ptr<boost::asio::ssl::context> ssl_context_;
+    std::unique_ptr<WSStream> ws_stream_;
+    std::unique_ptr<std::thread> ws_thread_;
+    WSBuffer ws_buffer_;
+    
+    // ZMQ components
+    std::unique_ptr<zmq::context_t> zmq_context_;
+    std::unique_ptr<zmq::socket_t> trades_publisher_;    // Port 5556
+    std::unique_ptr<zmq::socket_t> orderbook_publisher_; // Port 5557
+    
+    // Processing threads
+    std::unique_ptr<std::thread> processing_thread_;
+    std::unique_ptr<std::thread> publishing_thread_;
+    
+    // Memory pools for zero-allocation processing
+    std::unique_ptr<hft::MemoryPool<MarketTick, 1024>> tick_pool_;
+    std::unique_ptr<hft::MemoryPool<OrderBookSnapshot, 512>> orderbook_pool_;
+    
+    // Lock-free queues for inter-thread communication
+    std::unique_ptr<hft::LockFreeSPSCQueue<MarketTick, 4096>> tick_queue_;
+    std::unique_ptr<hft::LockFreeSPSCQueue<OrderBookSnapshot, 2048>> orderbook_queue_;
+    
+    // Raw message queue from WebSocket
+    // Fixed-size message buffer for lock-free queue (std::string is not trivially copyable)
+    using MessageBuffer = std::array<char, 4096>;
+    std::unique_ptr<hft::LockFreeSPSCQueue<MessageBuffer, 8192>> message_queue_;
+    
+    // Callback handler
+    std::shared_ptr<MarketDataCallbacks> callbacks_;
+    
+    // Statistics
+    mutable Stats stats_;
+    
+    // Synchronization
+    std::mutex connection_mutex_;
+};
+
+/**
+ * @class SimpleMarketDataCallback
+ * @brief Simple callback implementation for testing
+ */
+class SimpleMarketDataCallback : public MarketDataCallbacks {
+public:
+    void on_trade(const MarketTick& tick) override {
+        spdlog::info("[MarketData] Trade: {} {} @ {} x {} ({})", 
+                     tick.exchange.c_str(), tick.symbol.c_str(), 
+                     tick.price, tick.quantity, tick.side.c_str());
+    }
+    
+    void on_orderbook(const OrderBookSnapshot& snapshot) override {
+        spdlog::info("[MarketData] OrderBook: {} {} - Best bid: {:.4f} @ {:.4f}, Best ask: {:.4f} @ {:.4f}",
+                     snapshot.exchange.c_str(), snapshot.symbol.c_str(),
+                     snapshot.bids[0].price, snapshot.bids[0].quantity,
+                     snapshot.asks[0].price, snapshot.asks[0].quantity);
+    }
+    
+    void on_error(const std::string& error) override {
+        spdlog::error("[MarketData] Error: {}", error);
+    }
+};
+
+} // namespace latentspeed

@@ -1,7 +1,7 @@
 #!/bin/bash
 # ==========================================================
 # Latentspeed Trading Engine build helper (Linux/WSL)
-#   build.sh [--debug|--release] [--clean] [--docs]
+#   run.sh [--debug|--release] [--clean] [--docs] [--market-data] [--test]
 # ==========================================================
 
 # ---- defaults ----
@@ -9,6 +9,8 @@ BUILD_TYPE="Debug"
 PRESET_NAME="linux-debug"
 CLEAN=""
 BUILD_DOCS=""
+BUILD_MARKET_DATA=""
+RUN_TESTS=""
 
 # ---- parse CLI flags ----
 while [[ $# -gt 0 ]]; do
@@ -31,8 +33,23 @@ while [[ $# -gt 0 ]]; do
             BUILD_DOCS="1"
             shift
             ;;
+        --market-data)
+            BUILD_MARKET_DATA="1"
+            shift
+            ;;
+        --test)
+            RUN_TESTS="1"
+            shift
+            ;;
         *)
             echo "Unknown option $1"
+            echo "Usage: $0 [--debug|--release] [--clean] [--docs] [--market-data] [--test]"
+            echo "  --debug       Build in Debug mode (default)"
+            echo "  --release     Build in Release mode"
+            echo "  --clean       Clean build directory first"
+            echo "  --docs        Build documentation"
+            echo "  --market-data Build and test market data provider"
+            echo "  --test        Run market data tests after build"
             exit 1
             ;;
     esac
@@ -157,9 +174,61 @@ fi
 echo
 echo "Build completed successfully!"
 echo "Preset used: $PRESET_NAME"
-echo "Executable location: $SCRIPT_DIR/build/$PRESET_NAME/trading_engine_service"
+echo "Executables built:"
+echo "  Trading Engine: $SCRIPT_DIR/build/$PRESET_NAME/trading_engine_service"
+echo "  Market Data Test: $SCRIPT_DIR/build/$PRESET_NAME/test_market_data"
 echo
+
+# ---- market data provider testing ----
+if [ -n "$BUILD_MARKET_DATA" ] || [ -n "$RUN_TESTS" ]; then
+    echo "=== Market Data Provider Setup ==="
+    
+    # Check if test executable exists
+    if [ -x "$SCRIPT_DIR/build/$PRESET_NAME/test_market_data" ]; then
+        echo "Market data test executable ready!"
+        echo
+        echo "ZMQ Ports:"
+        echo "  5556 - Trades stream"
+        echo "  5557 - OrderBook stream (10 levels)"
+        echo
+        echo "Usage examples:"
+        echo "  # Test with Bybit (default symbols BTCUSDT,ETHUSDT)"
+        echo "  cd $SCRIPT_DIR/build/$PRESET_NAME"
+        echo "  ./test_market_data bybit"
+        echo
+        echo "  # Test with custom symbols"
+        echo "  ./test_market_data bybit BTCUSDT,ETHUSDT,SOLUSDT"
+        echo
+        echo "  # Subscribe to ZMQ streams (requires Python pyzmq)"
+        echo "  python3 ../../test_zmq_subscriber.py --duration 30"
+        echo
+        
+        if [ -n "$RUN_TESTS" ]; then
+            echo "=== Running Market Data Tests ==="
+            
+            # Check if Python ZMQ is available
+            if python3 -c "import zmq" 2>/dev/null; then
+                echo "Running comprehensive market data test (30 seconds)..."
+                chmod +x "$SCRIPT_DIR/run_market_data_test.sh"
+                "$SCRIPT_DIR/run_market_data_test.sh" bybit BTCUSDT,ETHUSDT 30
+            else
+                echo "Python ZMQ not available. Running basic test..."
+                echo "Starting market data provider for 10 seconds..."
+                cd "$SCRIPT_DIR/build/$PRESET_NAME"
+                timeout 10s ./test_market_data bybit BTCUSDT,ETHUSDT || echo "Test completed"
+                cd "$SCRIPT_DIR"
+            fi
+        fi
+    else
+        echo "Market data test executable not found at $SCRIPT_DIR/build/$PRESET_NAME/test_market_data"
+        echo "Make sure the build completed successfully."
+    fi
+    echo
+fi
+
 echo "To run the trading engine service:"
 echo "  cd $SCRIPT_DIR/build/$PRESET_NAME"
-echo "  ./trading_engine_service"
+echo "  ./trading_engine_service --exchange bybit --api-key YOUR_KEY --api-secret YOUR_SECRET"
+echo
+echo "To enable market data in trading engine, add: --enable-market-data"
 echo

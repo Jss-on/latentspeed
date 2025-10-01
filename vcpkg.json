@@ -5,10 +5,13 @@
   "dependencies": [
     "openssl",
     "boost-asio",
-    "boost-beast",
+    "boost-beast", 
+    "boost-system",
     "rapidjson",
     "zeromq",
-    "spdlog"
+    "cppzmq",
+    "spdlog",
+    "args",
+    "curl"
   ]
-  
 }
