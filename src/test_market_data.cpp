@@ -126,7 +126,7 @@ int main(int argc, char* argv[]) {
         }
         
         spdlog::info("Starting market data streaming...");
-        spdlog::info("ZMQ Ports: 5556 (trades), 5557 (orderbook)");
+        spdlog::info("ZMQ Ports: 5558 (trades), 5559 (orderbook)");
         spdlog::info("Using Boost.Beast WebSocket client");
         spdlog::info("Press Ctrl+C to stop");
         

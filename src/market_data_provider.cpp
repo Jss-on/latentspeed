@@ -51,17 +51,17 @@ bool MarketDataProvider::initialize() {
         // Initialize ZMQ context
         zmq_context_ = std::make_unique<zmq::context_t>(1);
         
-        // Initialize trades publisher (port 5556)
+        // Initialize trades publisher (port 5558)
         trades_publisher_ = std::make_unique<zmq::socket_t>(*zmq_context_, ZMQ_PUB);
         trades_publisher_->set(zmq::sockopt::sndhwm, 1000);
         trades_publisher_->set(zmq::sockopt::sndtimeo, 0);
-        trades_publisher_->bind("tcp://*:5556");
+        trades_publisher_->bind("tcp://*:5558");
         
-        // Initialize orderbook publisher (port 5557)
+        // Initialize orderbook publisher (port 5559)
         orderbook_publisher_ = std::make_unique<zmq::socket_t>(*zmq_context_, ZMQ_PUB);
         orderbook_publisher_->set(zmq::sockopt::sndhwm, 1000);
         orderbook_publisher_->set(zmq::sockopt::sndtimeo, 0);
-        orderbook_publisher_->bind("tcp://*:5557");
+        orderbook_publisher_->bind("tcp://*:5559");
         
         // Initialize Boost.Beast WebSocket components
         io_context_ = std::make_unique<boost::asio::io_context>();
@@ -71,7 +71,7 @@ bool MarketDataProvider::initialize() {
         ssl_context_->set_default_verify_paths();
         ssl_context_->set_verify_mode(boost::asio::ssl::verify_peer);
         
-        spdlog::info("[MarketData] ZMQ publishers bound to ports 5556 (trades) and 5557 (orderbook)");
+        spdlog::info("[MarketData] ZMQ publishers bound to ports 5558 (trades) and 5559 (orderbook)");
         spdlog::info("[MarketData] WebSocket client initialized");
         
         return true;
@@ -231,18 +231,25 @@ void MarketDataProvider::connect_websocket() {
     }));
     
     // Perform WebSocket handshake
+    spdlog::info("[MarketData] Performing WebSocket handshake...");
     ws_stream_->handshake(host, target);
+    spdlog::info("[MarketData] WebSocket handshake completed");
     
     // Send subscription
+    spdlog::info("[MarketData] Sending subscription message...");
     send_subscription();
+    spdlog::info("[MarketData] Starting message read loop...");
     
     // Start reading messages
+    int message_count = 0;
     while (running_.load()) {
         try {
             ws_buffer_.clear();
             ws_stream_->read(ws_buffer_);
+            message_count++;
             
             std::string message = boost::beast::buffers_to_string(ws_buffer_.data());
+            spdlog::debug("[MarketData] Received message #{}: {}", message_count, message.substr(0, 200));
             
             // Copy message to fixed-size buffer for lock-free queue
             MessageBuffer msg_buffer;
@@ -339,11 +346,14 @@ void MarketDataProvider::publishing_thread() {
 void MarketDataProvider::send_subscription() {
     std::string sub_msg = build_subscription_message();
     
+    spdlog::info("[MarketData] Subscription message: {}", sub_msg);
+    
     try {
-        ws_stream_->write(boost::asio::buffer(sub_msg));
-        spdlog::info("[MarketData] Subscription sent: {}", sub_msg);
+        size_t bytes_written = ws_stream_->write(boost::asio::buffer(sub_msg));
+        spdlog::info("[MarketData] Subscription sent successfully ({} bytes)", bytes_written);
     } catch (const std::exception& e) {
         spdlog::error("[MarketData] Failed to send subscription: {}", e.what());
+        throw;
     }
 }
 
@@ -551,7 +561,7 @@ void MarketDataProvider::publish_trade(const MarketTick& tick) {
         zmq::message_t data_msg(json_data.size());
         std::memcpy(data_msg.data(), json_data.c_str(), json_data.size());
         
-        // Publish to trades port (5556)
+        // Publish to trades port (5558)
         if (trades_publisher_->send(topic_msg, zmq::send_flags::sndmore | zmq::send_flags::dontwait) &&
             trades_publisher_->send(data_msg, zmq::send_flags::dontwait)) {
             stats_.messages_published.fetch_add(1);
@@ -574,7 +584,7 @@ void MarketDataProvider::publish_orderbook(const OrderBookSnapshot& snapshot) {
         zmq::message_t data_msg(json_data.size());
         std::memcpy(data_msg.data(), json_data.c_str(), json_data.size());
         
-        // Publish to orderbook port (5557)
+        // Publish to orderbook port (5559)
         if (orderbook_publisher_->send(topic_msg, zmq::send_flags::sndmore | zmq::send_flags::dontwait) &&
             orderbook_publisher_->send(data_msg, zmq::send_flags::dontwait)) {
             stats_.messages_published.fetch_add(1);
