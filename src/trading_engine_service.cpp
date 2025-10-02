@@ -372,65 +372,23 @@ TradingEngineService::TradingEngineService(const TradingEngineConfig& config)
         throw std::invalid_argument("Invalid trading engine configuration: exchange, api_key, and api_secret are required");
     }
     
-#ifdef HFT_NUMA_SUPPORT
-    // Initialize NUMA if available
-    if (numa_available() >= 0) {
-        // Bind to local NUMA node for better memory locality
-        numa_set_localalloc();
-        spdlog::info("[HFT-Engine] NUMA support enabled, using local allocation");
+// #ifdef HFT_NUMA_SUPPORT
+//     // Initialize NUMA if available
+//     if (numa_available() >= 0) {
+//         // Bind to local NUMA node for better memory locality
+//         numa_set_localalloc();
+//         spdlog::info("[HFT-Engine] NUMA support enabled, using local allocation");
         
-        // Get NUMA node count and current node
-        int num_nodes = numa_num_configured_nodes();
-        int current_node = numa_node_of_cpu(sched_getcpu());
-        spdlog::info("[HFT-Engine] NUMA nodes: {}, current node: {}", num_nodes, current_node);
-    }
-#endif
+//         // Get NUMA node count and current node
+//         int num_nodes = numa_num_configured_nodes();
+//         int current_node = numa_node_of_cpu(sched_getcpu());
+//         spdlog::info("[HFT-Engine] NUMA nodes: {}, current node: {}", num_nodes, current_node);
+//     }
+// #endif
 
     // ============================================================================
-    // REAL-TIME OPTIMIZATIONS
+    // REAL-TIME OPTIMIZATIONS (thread-level only; avoid process-wide RT/affinity)
     // ============================================================================
-    
-    // Set real-time scheduling for main process
-    struct sched_param param;
-    param.sched_priority = 80; // High priority (1-99 range)
-    
-    if (sched_setscheduler(0, SCHED_FIFO, &param) == 0) {
-        spdlog::info("[HFT-Engine] Real-time FIFO scheduling enabled (priority: {})", param.sched_priority);
-    } else {
-        spdlog::warn("[HFT-Engine] Failed to set real-time scheduling (requires root/CAP_SYS_NICE)");
-    }
-    
-    // Set process to highest nice priority
-    if (setpriority(PRIO_PROCESS, 0, -20) == 0) {
-        spdlog::info("[HFT-Engine] Process priority set to highest (-20)");
-    } else {
-        spdlog::warn("[HFT-Engine] Failed to set process priority");
-    }
-    
-    // CPU affinity - bind to isolated cores (cores 2-7 typically isolated)
-    cpu_set_t cpuset;
-    CPU_ZERO(&cpuset);
-    
-    // Check for isolated CPUs from kernel command line
-    // In production, use: isolcpus=2-7 nohz_full=2-7 rcu_nocbs=2-7
-    const std::vector<int> isolated_cpus = {2, 3, 4, 5}; // Configure based on your system
-    
-    for (int cpu : isolated_cpus) {
-        CPU_SET(cpu, &cpuset);
-    }
-    
-    if (sched_setaffinity(0, sizeof(cpuset), &cpuset) == 0) {
-        spdlog::info("[HFT-Engine] CPU affinity set to isolated cores: 2-5");
-    } else {
-        spdlog::warn("[HFT-Engine] Failed to set CPU affinity");
-    }
-    
-    // Disable address space randomization for deterministic performance
-#ifdef HFT_LINUX_FEATURES
-    if (personality(ADDR_NO_RANDOMIZE) != -1) {
-        spdlog::info("[HFT-Engine] Address space randomization disabled");
-    }
-#endif
 
     // Initialize memory pools with NUMA awareness
     publish_queue_ = std::make_unique<LockFreeSPSCQueue<PublishMessage, 8192>>();
@@ -704,7 +662,7 @@ void TradingEngineService::start() {
     #ifdef __linux__
     // Set real-time scheduling for order processing thread
     struct sched_param param;
-    param.sched_priority = 99;
+    param.sched_priority = 80;
     if (pthread_setschedparam(order_receiver_thread_->native_handle(), SCHED_FIFO, &param) != 0) {
         spdlog::warn("[HFT-Engine] Failed to set real-time scheduling for order thread");
     }
@@ -712,11 +670,12 @@ void TradingEngineService::start() {
     // Pin threads to specific CPU cores to avoid cache misses
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
-    CPU_SET(0, &cpuset); // Core 0 for order processing
+    // Avoid CPU0 to prevent starving kernel/network IRQ handling on many systems
+    CPU_SET(2, &cpuset); // Core 2 for order processing
     pthread_setaffinity_np(order_receiver_thread_->native_handle(), sizeof(cpu_set_t), &cpuset);
     
     CPU_ZERO(&cpuset);
-    CPU_SET(1, &cpuset); // Core 1 for publishing
+    CPU_SET(3, &cpuset); // Core 3 for publishing
     pthread_setaffinity_np(publisher_thread_->native_handle(), sizeof(cpu_set_t), &cpuset);
     #endif
     
