@@ -24,7 +24,9 @@
 #include <mutex>
 #include <condition_variable>
 #include <chrono>
+#include <unordered_set>
 #include <spdlog/spdlog.h>
+#include <deque>
 
 namespace latentspeed {
 
@@ -58,7 +60,8 @@ public:
     
     OrderResponse place_order(const OrderRequest& request) override;
     OrderResponse cancel_order(const std::string& client_order_id,
-                              const std::optional<std::string>& symbol = std::nullopt) override;
+                              const std::optional<std::string>& symbol = std::nullopt,
+                              const std::optional<std::string>& exchange_order_id = std::nullopt) override;
     OrderResponse modify_order(const std::string& client_order_id,
                               const std::optional<std::string>& new_quantity = std::nullopt,
                               const std::optional<std::string>& new_price = std::nullopt) override;
@@ -71,6 +74,12 @@ public:
     std::string get_exchange_name() const override { return "bybit"; }
     
     bool subscribe_to_orders(const std::vector<std::string>& symbols = {}) override;
+
+    std::vector<OpenOrderBrief> list_open_orders(
+    const std::optional<std::string>& category,
+    const std::optional<std::string>& symbol,
+    const std::optional<std::string>& settle_coin,
+    const std::optional<std::string>& base_coin) override;
     
 private:
     // REST API methods
@@ -99,10 +108,38 @@ private:
     OrderResponse parse_order_response(const std::string& json_response);
     std::string map_order_status(const std::string& bybit_status) const;
     
+    struct RateLimiter {
+        std::mutex mutex;
+        std::deque<std::chrono::steady_clock::time_point> history;
+        size_t max_per_window{8};
+        std::chrono::milliseconds window{1000};
+
+        void throttle();
+    };
+
+    bool ensure_rest_connection_locked();
+    std::string perform_rest_request_locked(const std::string& method,
+                                            const std::string& endpoint,
+                                            const std::string& params_json);
+    http::request<http::string_body> build_signed_request(const std::string& method,
+                                                          const std::string& endpoint,
+                                                          const std::string& params_json,
+                                                          std::string& timestamp_out);
+    void close_rest_connection_locked();
+    void resync_pending_orders();
+    void resync_order(const std::string& client_order_id, const OrderRequest& snapshot);
+    void emit_order_snapshot(const rapidjson::Value& order_data);
+    void emit_execution_snapshot(const rapidjson::Value& exec_data);
+
     // Connection state
     std::atomic<bool> connected_{false};
     std::atomic<bool> ws_connected_{false};
     std::atomic<bool> should_stop_{false};
+    
+    // Endpoint configuration (centralized; PR1 — no behavior change)
+    void configure_endpoints(bool testnet);
+    bool demo_mode_{false}; // derived from configured endpoints
+    bool build_ws_auth_payload(std::string& out_json);
     
     // REST API configuration
     std::string rest_host_;
@@ -113,13 +150,35 @@ private:
     std::string ws_host_;
     std::string ws_port_;
     std::string ws_target_;
-    
+
+    // --- WS DNS cache & preferences ---
+    // Prefer IPv4 first (v6 can be fine, but some ISPs or CGNAT environments blackhole it)
+    bool prefer_ipv4_{true};
+    // Cache of the last successfully resolved WS endpoints
+    std::vector<tcp::endpoint> ws_endpoints_cache_;
+    // When the cache was last refreshed successfully
+    std::chrono::steady_clock::time_point ws_dns_last_ok_{};
+    // How long we consider the cache "fresh" before we try to re-resolve
+    std::chrono::seconds ws_dns_ttl_{std::chrono::seconds(1800)};
+
+    // Resolve WS endpoints with caching & IPv4-first ordering
+    // Throws if resolution fails and there is no usable cache.
+    const std::vector<tcp::endpoint>& resolve_ws_endpoints(bool force_refresh = false);
+
     // Network components
     std::unique_ptr<net::io_context> ioc_;
     std::unique_ptr<ssl::context> ssl_ctx_;
-    std::unique_ptr<std::thread> ws_thread_;
+    std::unique_ptr<net::io_context> rest_ioc_;
+    std::unique_ptr<tcp::resolver> rest_resolver_;
     std::unique_ptr<websocket::stream<ssl::stream<tcp::socket>>> ws_;
-    
+    std::unique_ptr<ssl::stream<tcp::socket>> rest_stream_;
+    std::vector<tcp::endpoint> rest_endpoints_;
+    std::mutex rest_mutex_;
+    bool rest_connected_{false};
+    RateLimiter rest_rate_limiter_;
+    std::chrono::steady_clock::time_point last_rest_connect_attempt_{};
+    std::unique_ptr<std::thread> ws_thread_;
+
     // Message queue for WebSocket
     std::queue<std::string> ws_send_queue_;
     std::mutex ws_send_mutex_;
@@ -128,12 +187,19 @@ private:
     // Order tracking
     std::map<std::string, OrderRequest> pending_orders_;
     std::mutex orders_mutex_;
-    
+    std::unordered_set<std::string> seen_exec_ids_;
+    std::mutex seen_exec_mutex_;
+
+    // Backfill recent executions
+    void backfill_recent_executions(uint64_t lookback_ms, const std::string& category_hint);
+
     // Ping/Pong for WebSocket keepalive
     std::chrono::steady_clock::time_point last_ping_time_;
     std::chrono::steady_clock::time_point last_pong_time_;
     static constexpr int PING_INTERVAL_SEC = 20;
     static constexpr int PONG_TIMEOUT_SEC = 30;
+    std::chrono::steady_clock::time_point last_rx_time_;
+    std::atomic<bool> ws_healthy_{false};
 };
 
 } // namespace latentspeed

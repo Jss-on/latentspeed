@@ -2,6 +2,9 @@ cmake_minimum_required(VERSION 3.20)
 
 project(latentspeed VERSION 0.1.0 LANGUAGES CXX)
 
+# Enable CTest even though we keep dependencies minimal
+include(CTest)
+
 # C++ standard
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -113,4 +116,12 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
     set_target_properties(trading_engine_service PROPERTIES
         INTERPROCEDURAL_OPTIMIZATION TRUE  # Enable LTO
     )
+endif()
+
+if(BUILD_TESTING)
+    add_executable(action_dispatch_tests
+        tests/action_dispatch_test.cpp
+    )
+    target_include_directories(action_dispatch_tests PRIVATE include)
+    add_test(NAME action_dispatch_tests COMMAND action_dispatch_tests)
 endif()

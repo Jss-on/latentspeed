@@ -82,6 +82,22 @@ struct OrderUpdate {
 };
 
 /**
+ * @struct OpenOrderBrief
+ * @brief Brief information about an open order
+ */
+struct OpenOrderBrief {
+    std::string client_order_id;
+    std::string symbol;
+    std::string side;
+    std::string order_type;
+    std::string qty;
+    bool        reduce_only{false};
+    std::string category; // "spot" | "linear" | "inverse"
+    std::map<std::string, std::string> extra;
+};
+
+
+/**
  * @class ExchangeClient
  * @brief Abstract base class for exchange client implementations
  * 
@@ -139,7 +155,8 @@ public:
      * @return Order response with result
      */
     virtual OrderResponse cancel_order(const std::string& client_order_id,
-                                      const std::optional<std::string>& symbol = std::nullopt) = 0;
+                                      const std::optional<std::string>& symbol = std::nullopt,
+                                      const std::optional<std::string>& exchange_order_id = std::nullopt) = 0;
     
     /**
      * @brief Modify an existing order
@@ -189,6 +206,23 @@ public:
      * @return true if subscription successful
      */
     virtual bool subscribe_to_orders(const std::vector<std::string>& symbols = {}) = 0;
+
+    /**
+     * @brief List all open orders with optional filters
+     * @param category Optional category filter (e.g. "spot", "linear", "inverse")
+     * @param symbol Optional symbol filter (e.g. "BTCUSDT")
+     * @param settle_coin Optional settlement coin filter (e.g. "USDT", "USD")
+     * @param base_coin Optional base coin filter (e.g. "BTC", "ETH")
+     * @return Vector of open orders matching the filters
+     */
+    virtual std::vector<OpenOrderBrief> list_open_orders(
+    const std::optional<std::string>& category    = std::nullopt,
+    const std::optional<std::string>& symbol      = std::nullopt,
+    const std::optional<std::string>& settle_coin = std::nullopt,
+    const std::optional<std::string>& base_coin   = std::nullopt) 
+{
+    return {};
+}
     
 protected:
     OrderUpdateCallback order_update_callback_;
@@ -201,3 +235,4 @@ protected:
 };
 
 } // namespace latentspeed
+
