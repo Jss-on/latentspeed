@@ -87,6 +87,7 @@ struct OrderUpdate {
  */
 struct OpenOrderBrief {
     std::string client_order_id;
+    std::string exchange_order_id; // exchange-assigned order id if available
     std::string symbol;
     std::string side;
     std::string order_type;
@@ -235,4 +236,3 @@ protected:
 };
 
 } // namespace latentspeed
-

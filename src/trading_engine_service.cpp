@@ -361,8 +361,8 @@ template<typename T>
  * @brief Ultra-low latency constructor with pre-allocated memory pools
  */
 TradingEngineService::TradingEngineService(const TradingEngineConfig& config)
-    : config_(config)
-    , running_(false)
+    : running_(false)
+    , config_(config)
     , order_endpoint_("tcp://127.0.0.1:5601")
     , report_endpoint_("tcp://127.0.0.1:5602")
     , cpu_mode_(config.cpu_mode)
