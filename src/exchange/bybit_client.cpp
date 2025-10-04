@@ -1832,6 +1832,8 @@ std::vector<OpenOrderBrief> BybitClient::list_open_orders(
             if (!it->IsObject()) continue;
 
             OpenOrderBrief b;
+            if (it->HasMember("orderId") && (*it)["orderId"].IsString())
+                b.exchange_order_id = (*it)["orderId"].GetString();
             if (it->HasMember("orderLinkId") && (*it)["orderLinkId"].IsString())
                 b.client_order_id = (*it)["orderLinkId"].GetString();
             if (b.client_order_id.empty()) continue; // we rehydrate by cl_id
