@@ -32,7 +32,7 @@ public:
     void on_trade(const MarketTick& tick) override {
         spdlog::info("[TRADE] {} {} @ {:.8f} x {:.8f} {} [{}]", 
                      tick.exchange.c_str(), tick.symbol.c_str(), 
-                     tick.price, tick.quantity, tick.side.c_str(),
+                     tick.price, tick.amount, tick.side.c_str(),
                      tick.trade_id.c_str());
         
         trade_count_++;

@@ -469,7 +469,7 @@ bool MarketDataProvider::parse_trade_data(const rapidjson::Value& doc, MarketTic
                 tick.price = std::stod(doc["p"].GetString());
             }
             if (doc.HasMember("v") && doc["v"].IsString()) {
-                tick.quantity = std::stod(doc["v"].GetString());
+                tick.amount = std::stod(doc["v"].GetString());
             }
             if (doc.HasMember("S") && doc["S"].IsString()) {
                 tick.side.assign(doc["S"].GetString());
@@ -486,7 +486,7 @@ bool MarketDataProvider::parse_trade_data(const rapidjson::Value& doc, MarketTic
                 tick.price = std::stod(doc["p"].GetString());
             }
             if (doc.HasMember("q") && doc["q"].IsString()) {
-                tick.quantity = std::stod(doc["q"].GetString());
+                tick.amount = std::stod(doc["q"].GetString());
             }
             if (doc.HasMember("m") && doc["m"].IsBool()) {
                 tick.side.assign(doc["m"].GetBool() ? "sell" : "buy");
@@ -496,7 +496,18 @@ bool MarketDataProvider::parse_trade_data(const rapidjson::Value& doc, MarketTic
             }
         }
         
-        return !tick.symbol.empty() && tick.price > 0 && tick.quantity > 0;
+        if (!tick.symbol.empty() && tick.price > 0 && tick.amount > 0) {
+            // Compute derived features
+            compute_trade_features(tick);
+            
+            // Assign sequence number
+            std::string seq_key = std::string(tick.exchange.c_str()) + ":preprocessed_trades:" + std::string(tick.symbol.c_str());
+            tick.seq = get_next_seq(seq_key);
+            
+            return true;
+        }
+        
+        return false;
         
     } catch (const std::exception& e) {
         spdlog::warn("[MarketData] Trade parse error: {}", e.what());
@@ -542,7 +553,18 @@ bool MarketDataProvider::parse_orderbook_data(const rapidjson::Value& doc, Order
             }
         }
         
-        return !snapshot.symbol.empty();
+        if (!snapshot.symbol.empty() && snapshot.bids[0].price > 0 && snapshot.asks[0].price > 0) {
+            // Compute derived features
+            compute_book_features(snapshot);
+            
+            // Assign sequence number
+            std::string seq_key = std::string(snapshot.exchange.c_str()) + ":preprocessed_book:" + std::string(snapshot.symbol.c_str());
+            snapshot.seq = get_next_seq(seq_key);
+            
+            return true;
+        }
+        
+        return false;
         
     } catch (const std::exception& e) {
         spdlog::warn("[MarketData] OrderBook parse error: {}", e.what());
@@ -554,9 +576,12 @@ void MarketDataProvider::publish_trade(const MarketTick& tick) {
     try {
         std::string json_data = serialize_trade(tick);
         
+        // Create topic in format: "{EXCHANGE}-preprocessed_trades-{SYMBOL}"
+        std::string topic = std::string(tick.exchange.c_str()) + "-preprocessed_trades-" + std::string(tick.symbol.c_str());
+        
         // Create ZMQ message
-        zmq::message_t topic_msg(tick.symbol.size());
-        std::memcpy(topic_msg.data(), tick.symbol.c_str(), tick.symbol.size());
+        zmq::message_t topic_msg(topic.size());
+        std::memcpy(topic_msg.data(), topic.c_str(), topic.size());
         
         zmq::message_t data_msg(json_data.size());
         std::memcpy(data_msg.data(), json_data.c_str(), json_data.size());
@@ -577,9 +602,12 @@ void MarketDataProvider::publish_orderbook(const OrderBookSnapshot& snapshot) {
     try {
         std::string json_data = serialize_orderbook(snapshot);
         
+        // Create topic in format: "{EXCHANGE}-preprocessed_book-{SYMBOL}"
+        std::string topic = std::string(snapshot.exchange.c_str()) + "-preprocessed_book-" + std::string(snapshot.symbol.c_str());
+        
         // Create ZMQ message
-        zmq::message_t topic_msg(snapshot.symbol.size());
-        std::memcpy(topic_msg.data(), snapshot.symbol.c_str(), snapshot.symbol.size());
+        zmq::message_t topic_msg(topic.size());
+        std::memcpy(topic_msg.data(), topic.c_str(), topic.size());
         
         zmq::message_t data_msg(json_data.size());
         std::memcpy(data_msg.data(), json_data.c_str(), json_data.size());
@@ -601,13 +629,31 @@ std::string MarketDataProvider::serialize_trade(const MarketTick& tick) {
     rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
     
     writer.StartObject();
-    writer.Key("timestamp_ns"); writer.Uint64(tick.timestamp_ns);
+    
+    // Core fields (matching Python schema)
+    writer.Key("receipt_timestamp_ns"); writer.Uint64(tick.timestamp_ns);
     writer.Key("symbol"); writer.String(tick.symbol.c_str());
     writer.Key("exchange"); writer.String(tick.exchange.c_str());
     writer.Key("price"); writer.Double(tick.price);
-    writer.Key("quantity"); writer.Double(tick.quantity);
+    writer.Key("amount"); writer.Double(tick.amount);  // renamed from quantity
     writer.Key("side"); writer.String(tick.side.c_str());
     writer.Key("trade_id"); writer.String(tick.trade_id.c_str());
+    
+    // Derived features
+    writer.Key("transaction_price"); writer.Double(tick.transaction_price);
+    writer.Key("trading_volume"); writer.Double(tick.trading_volume);
+    
+    // Metadata
+    writer.Key("seq"); writer.Uint64(tick.seq);
+    writer.Key("schema_version"); writer.Int(1);
+    
+    // Preprocessing timestamp (ISO format)
+    auto now = std::chrono::system_clock::now();
+    auto time_t_now = std::chrono::system_clock::to_time_t(now);
+    std::stringstream ss;
+    ss << std::put_time(std::gmtime(&time_t_now), "%Y-%m-%dT%H:%M:%SZ");
+    writer.Key("preprocessing_timestamp"); writer.String(ss.str().c_str());
+    
     writer.EndObject();
     
     return buffer.GetString();
@@ -618,12 +664,41 @@ std::string MarketDataProvider::serialize_orderbook(const OrderBookSnapshot& sna
     rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
     
     writer.StartObject();
-    writer.Key("timestamp_ns"); writer.Uint64(snapshot.timestamp_ns);
+    
+    // Core fields (matching Python schema)
+    writer.Key("receipt_timestamp_ns"); writer.Uint64(snapshot.timestamp_ns);
     writer.Key("symbol"); writer.String(snapshot.symbol.c_str());
     writer.Key("exchange"); writer.String(snapshot.exchange.c_str());
-    writer.Key("sequence"); writer.Uint64(snapshot.sequence_number);
+    writer.Key("seq"); writer.Uint64(snapshot.seq);
     
-    // Bids
+    // Top of book (Level 1)
+    writer.Key("best_bid_price"); writer.Double(snapshot.bids[0].price);
+    writer.Key("best_bid_size"); writer.Double(snapshot.bids[0].quantity);
+    writer.Key("best_ask_price"); writer.Double(snapshot.asks[0].price);
+    writer.Key("best_ask_size"); writer.Double(snapshot.asks[0].quantity);
+    
+    // Derived L1 features
+    writer.Key("midpoint"); writer.Double(snapshot.midpoint);
+    writer.Key("relative_spread"); writer.Double(snapshot.relative_spread);
+    writer.Key("breadth"); writer.Double(snapshot.breadth);
+    writer.Key("imbalance_lvl1"); writer.Double(snapshot.imbalance_lvl1);
+    
+    // Derived depth features
+    writer.Key("bid_depth_n"); writer.Double(snapshot.bid_depth_n);
+    writer.Key("ask_depth_n"); writer.Double(snapshot.ask_depth_n);
+    writer.Key("depth_n"); writer.Double(snapshot.depth_n);
+    
+    // Metadata
+    writer.Key("schema_version"); writer.Int(1);
+    
+    // Preprocessing timestamp (ISO format)
+    auto now = std::chrono::system_clock::now();
+    auto time_t_now = std::chrono::system_clock::to_time_t(now);
+    std::stringstream ss;
+    ss << std::put_time(std::gmtime(&time_t_now), "%Y-%m-%dT%H:%M:%SZ");
+    writer.Key("preprocessing_timestamp"); writer.String(ss.str().c_str());
+    
+    // Full depth (optional - include for downstream consumers)
     writer.Key("bids");
     writer.StartArray();
     for (const auto& bid : snapshot.bids) {
@@ -636,7 +711,6 @@ std::string MarketDataProvider::serialize_orderbook(const OrderBookSnapshot& sna
     }
     writer.EndArray();
     
-    // Asks
     writer.Key("asks");
     writer.StartArray();
     for (const auto& ask : snapshot.asks) {
@@ -710,6 +784,51 @@ std::string MarketDataProvider::build_subscription_message() {
     }
     
     return buffer.GetString();
+}
+
+uint64_t MarketDataProvider::get_next_seq(const std::string& stream_key) {
+    std::lock_guard<std::mutex> lock(seq_mutex_);
+    return ++sequence_counters_[stream_key];
+}
+
+void MarketDataProvider::compute_book_features(OrderBookSnapshot& snapshot) {
+    // Get top of book
+    double best_bid_price = snapshot.bids[0].price;
+    double best_bid_size = snapshot.bids[0].quantity;
+    double best_ask_price = snapshot.asks[0].price;
+    double best_ask_size = snapshot.asks[0].quantity;
+    
+    // Derived L1 features
+    snapshot.midpoint = (best_bid_price + best_ask_price) / 2.0;
+    snapshot.relative_spread = (best_ask_price - best_bid_price) / snapshot.midpoint;
+    snapshot.breadth = best_bid_price * best_bid_size + best_ask_price * best_ask_size;
+    
+    // L1 imbalance
+    double total_vol = best_bid_size + best_ask_size;
+    snapshot.imbalance_lvl1 = (total_vol > 0) ? ((best_bid_size - best_ask_size) / total_vol) : 0.0;
+    
+    // Compute depth N (sum price * size across top N levels)
+    snapshot.bid_depth_n = 0.0;
+    snapshot.ask_depth_n = 0.0;
+    
+    for (int i = 0; i < 10; ++i) {
+        if (snapshot.bids[i].price > 0 && snapshot.bids[i].quantity > 0) {
+            snapshot.bid_depth_n += snapshot.bids[i].price * snapshot.bids[i].quantity;
+        }
+        if (snapshot.asks[i].price > 0 && snapshot.asks[i].quantity > 0) {
+            snapshot.ask_depth_n += snapshot.asks[i].price * snapshot.asks[i].quantity;
+        }
+    }
+    
+    snapshot.depth_n = snapshot.bid_depth_n + snapshot.ask_depth_n;
+}
+
+void MarketDataProvider::compute_trade_features(MarketTick& tick) {
+    // For a single fill trade, transaction_price = price
+    tick.transaction_price = tick.price;
+    
+    // Trading volume = price * amount
+    tick.trading_volume = tick.price * tick.amount;
 }
 
 } // namespace latentspeed

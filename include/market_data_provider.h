@@ -55,15 +55,21 @@ namespace latentspeed {
  * @brief HFT-optimized trade tick data structure
  */
 struct MarketTick {
-    uint64_t timestamp_ns;           ///< Nanosecond timestamp
+    uint64_t timestamp_ns;           ///< Nanosecond timestamp (receipt_timestamp_ns)
     hft::FixedString<32> symbol;     ///< Trading symbol (e.g., "BTCUSDT")
     hft::FixedString<16> exchange;   ///< Exchange name (e.g., "bybit")
     double price;                    ///< Trade price
-    double quantity;                 ///< Trade quantity
+    double amount;                   ///< Trade amount (renamed from quantity)
     hft::FixedString<8> side;        ///< Trade side: "buy" or "sell"
     hft::FixedString<64> trade_id;   ///< Exchange trade ID
     
-    MarketTick() : timestamp_ns(0), price(0.0), quantity(0.0) {}
+    // Derived fields (computed from raw data)
+    double transaction_price;        ///< Transaction price (= price for single fill)
+    double trading_volume;           ///< Trading volume (price * amount)
+    uint64_t seq;                    ///< Sequence number per stream
+    
+    MarketTick() : timestamp_ns(0), price(0.0), amount(0.0), 
+                   transaction_price(0.0), trading_volume(0.0), seq(0) {}
 };
 
 /**
@@ -83,14 +89,27 @@ struct OrderBookLevel {
  * @brief HFT-optimized L2 orderbook snapshot (10 levels each side)
  */
 struct OrderBookSnapshot {
-    uint64_t timestamp_ns;                    ///< Nanosecond timestamp
+    uint64_t timestamp_ns;                    ///< Nanosecond timestamp (receipt_timestamp_ns)
     hft::FixedString<32> symbol;              ///< Trading symbol
     hft::FixedString<16> exchange;            ///< Exchange name
     std::array<OrderBookLevel, 10> bids;      ///< Bid levels (highest to lowest)
     std::array<OrderBookLevel, 10> asks;      ///< Ask levels (lowest to highest)
-    uint64_t sequence_number;                 ///< Sequence for ordering
+    uint64_t seq;                             ///< Sequence number per stream
     
-    OrderBookSnapshot() : timestamp_ns(0), sequence_number(0) {}
+    // Derived Level 1 features (computed from top of book)
+    double midpoint;                          ///< (best_bid + best_ask) / 2
+    double relative_spread;                   ///< (ask - bid) / mid
+    double breadth;                           ///< bid_px*bid_sz + ask_px*ask_sz
+    double imbalance_lvl1;                    ///< (bid_sz - ask_sz) / total
+    
+    // Derived depth features (sum across N levels)
+    double bid_depth_n;                       ///< sum(price_i * size_i) for bids
+    double ask_depth_n;                       ///< sum(price_i * size_i) for asks
+    double depth_n;                           ///< total depth (bid + ask)
+    
+    OrderBookSnapshot() : timestamp_ns(0), seq(0), midpoint(0.0), 
+                         relative_spread(0.0), breadth(0.0), imbalance_lvl1(0.0),
+                         bid_depth_n(0.0), ask_depth_n(0.0), depth_n(0.0) {}
 };
 
 /**
@@ -296,6 +315,25 @@ private:
     
     // Synchronization
     std::mutex connection_mutex_;
+    
+    // Sequence counters per stream (exchange:stream_type:symbol)
+    std::unordered_map<std::string, uint64_t> sequence_counters_;
+    std::mutex seq_mutex_;
+    
+    /**
+     * @brief Get next sequence number for a stream
+     */
+    uint64_t get_next_seq(const std::string& stream_key);
+    
+    /**
+     * @brief Compute derived book features
+     */
+    void compute_book_features(OrderBookSnapshot& snapshot);
+    
+    /**
+     * @brief Compute derived trade features
+     */
+    void compute_trade_features(MarketTick& tick);
 };
 
 /**
@@ -307,7 +345,7 @@ public:
     void on_trade(const MarketTick& tick) override {
         spdlog::info("[MarketData] Trade: {} {} @ {} x {} ({})", 
                      tick.exchange.c_str(), tick.symbol.c_str(), 
-                     tick.price, tick.quantity, tick.side.c_str());
+                     tick.price, tick.amount, tick.side.c_str());
     }
     
     void on_orderbook(const OrderBookSnapshot& snapshot) override {
