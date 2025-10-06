@@ -1851,6 +1851,10 @@ std::vector<OpenOrderBrief> BybitClient::list_open_orders(
                 b.qty = (*it)["qty"].GetString();
             if (it->HasMember("reduceOnly") && (*it)["reduceOnly"].IsBool())
                 b.reduce_only = (*it)["reduceOnly"].GetBool();
+            
+            // Store exchange order ID in extra map for future reference
+            if (it->HasMember("orderId") && (*it)["orderId"].IsString())
+                b.extra["orderId"] = (*it)["orderId"].GetString();
 
             out.emplace_back(std::move(b));
         }
