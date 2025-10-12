@@ -122,7 +122,13 @@ OrderResponse BinanceClient::place_order(const OrderRequest& request) {
             if (auto itd = request.extra_params.find("triggerDirection"); itd != request.extra_params.end()) dir = itd->second;
             const bool is_buy = (map_side(request.side) == "BUY");
             bool is_stop = false;
-            if (dir == "1") is_stop = !is_buy; else if (dir == "2") is_stop = is_buy; else is_stop = !is_buy;
+            // Binance semantics: triggerDirection "1" (rising) = STOP, "2" (falling) = TAKE_PROFIT
+            if (dir == "1") is_stop = true; 
+            else if (dir == "2") is_stop = false; 
+            else {
+                // Fallback heuristic: if we don't know, use side-based default to keep previous behavior
+                is_stop = !is_buy; 
+            }
             if (request.order_type == "market") {
                 q << (is_stop ? "&type=STOP_MARKET" : "&type=TAKE_PROFIT_MARKET");
             } else {
@@ -197,7 +203,9 @@ OrderResponse BinanceClient::place_order(const OrderRequest& request) {
             if (auto itd = request.extra_params.find("triggerDirection"); itd != request.extra_params.end()) dir = itd->second;
             const bool is_buy = (map_side(request.side) == "BUY");
             bool is_stop = false;
-            if (dir == "1") is_stop = !is_buy; else if (dir == "2") is_stop = is_buy; else is_stop = !is_buy;
+            if (dir == "1") is_stop = true; 
+            else if (dir == "2") is_stop = false; 
+            else { is_stop = !is_buy; }
             if (request.order_type == "market") {
                 q << (is_stop ? "&type=STOP_MARKET" : "&type=TAKE_PROFIT_MARKET");
             } else {
