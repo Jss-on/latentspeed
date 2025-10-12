@@ -318,11 +318,17 @@ use_testnet = true;                            // Use testnet/mainnet
 - **Bybit**: Full support for spot and perpetual trading
   - Testnet: `testnet.bybit.com`
   - Mainnet: `api.bybit.com`
+- **Binance Futures (UM/USDT-M)**: Trading via REST + real-time user-data WS updates
+  - Testnet REST: `https://testnet.binancefuture.com` (prefix `/fapi/v1`)
+  - Mainnet REST: `https://fapi.binance.com` (prefix `/fapi/v1`)
+  - User Data WS (updates/fills):
+    - Testnet: `wss://stream.binancefuture.com/ws/<listenKey>`
+    - Mainnet: `wss://fstream.binance.com/ws/<listenKey>`
 
 #### Adding New Exchanges:
 1. Implement the `ExchangeClient` interface
 2. Add REST API and WebSocket handlers
-3. Register in `TradingEngineService::initialize()`
+3. Register in `TradingEngineService::initialize()` (now exchange-agnostic, add to `exchange_clients_` map)
 
 ### API Authentication
 
@@ -330,6 +336,13 @@ use_testnet = true;                            // Use testnet/mainnet
 1. Create API key on Bybit (testnet or mainnet)
 2. Configure with appropriate permissions (spot/perpetual trading)
 3. Update credentials in `TradingEngineService::initialize()`
+
+#### Binance Futures API Setup:
+1. Create UM Futures API key (testnet or mainnet) with TRADE and USER_DATA permissions
+2. Configure env vars:
+   - `LATENTSPEED_BINANCE_API_KEY`, `LATENTSPEED_BINANCE_API_SECRET`
+   - `LATENTSPEED_BINANCE_USE_TESTNET=1|0`
+3. Optional: `LATENTSPEED_BINANCE_USE_WS_TRADE=1` (WS-API trading stub; REST trading is default)
 
 #### Security Notes:
 - API credentials are currently hardcoded for demo

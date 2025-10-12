@@ -41,6 +41,7 @@ add_executable(trading_engine_service
   src/market_data_provider.cpp
   src/exchange/exchange_client.cpp
   src/exchange/bybit_client.cpp
+  src/exchange/binance_client.cpp
 )
 
 # Market Data Test executable

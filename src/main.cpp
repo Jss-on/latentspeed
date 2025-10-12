@@ -79,6 +79,21 @@ latentspeed::TradingEngineConfig parse_command_line_args(int argc, char* argv[])
     if (exchange) config.exchange = args::get(exchange);
     if (api_key) config.api_key = args::get(api_key);
     if (api_secret) config.api_secret = args::get(api_secret);
+
+    // Fallback: populate missing API credentials from environment
+    // LATENTSPEED_<EXCHANGE>_API_KEY / LATENTSPEED_<EXCHANGE>_API_SECRET
+    if (!config.exchange.empty()) {
+        auto to_upper = [](std::string s){ for (auto& c : s) c = static_cast<char>(::toupper(c)); return s; };
+        const std::string upper = to_upper(config.exchange);
+        const std::string key_env    = std::string("LATENTSPEED_") + upper + "_API_KEY";
+        const std::string secret_env = std::string("LATENTSPEED_") + upper + "_API_SECRET";
+        if (config.api_key.empty()) {
+            if (const char* v = std::getenv(key_env.c_str())) config.api_key = v;
+        }
+        if (config.api_secret.empty()) {
+            if (const char* v = std::getenv(secret_env.c_str())) config.api_secret = v;
+        }
+    }
     
     // Handle trading mode flags
     if (live_trade && demo_mode) {
@@ -112,10 +127,10 @@ bool validate_config(const latentspeed::TradingEngineConfig& config) {
     }
     
     // Check for supported exchanges
-    std::vector<std::string> supported_exchanges = {"bybit"};
+    std::vector<std::string> supported_exchanges = {"bybit", "binance"};
     if (!config.exchange.empty() && 
         std::find(supported_exchanges.begin(), supported_exchanges.end(), config.exchange) == supported_exchanges.end()) {
-        errors.push_back("Unsupported exchange '" + config.exchange + "'. Supported: bybit");
+        errors.push_back("Unsupported exchange '" + config.exchange + "'. Supported: bybit, binance");
     }
     
     if (!errors.empty()) {

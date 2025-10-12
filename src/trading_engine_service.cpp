@@ -16,6 +16,7 @@
 #include "hft_data_structures.h"
 #include "action_dispatch.h"
 #include "reason_code_mapper.h"
+#include "exchange/binance_client.h"
 #include <chrono>
 #include <iomanip>
 #include <sstream>
@@ -109,6 +110,68 @@ std::string trim_trailing_zeros(std::string value) {
     return value;
 }
 
+// Normalize venue names coming from various upstreams to engine client keys
+std::string normalize_venue_key(std::string_view venue) {
+    std::string v = to_lower_ascii(venue);
+    if (v == "binance_futures" || v == "binanceusdm" || v == "binance-perp" || v == "binance_um" || v == "binance_umfutures") {
+        return std::string{"binance"};
+    }
+    if (v == "bybit_futures" || v == "bybit-perp" || v == "bybit_um" || v == "bybit_umfutures") {
+        return std::string{"bybit"};
+    }
+    return v;
+}
+
+// Try to split a compact symbol like BNBUSDT into (BNB, USDT)
+std::optional<std::pair<std::string,std::string>> split_compact_symbol(std::string_view sym) {
+    static const std::array<const char*, 8> quotes = {
+        "USDT","USDC","BTC","ETH","USD","EUR","DAI","FDUSD"
+    };
+    std::string s(sym.begin(), sym.end());
+    for (auto q : quotes) {
+        const size_t qlen = std::strlen(q);
+        if (s.size() > qlen && s.rfind(q) == s.size() - qlen) {
+            return std::make_pair(s.substr(0, s.size() - qlen), std::string(q));
+        }
+    }
+    return std::nullopt;
+}
+
+// Convert various symbol forms to hyphen style: BASE-QUOTE or BASE-QUOTE-PERP
+std::string to_hyphen_symbol(std::string_view symbol, bool is_perp) {
+    std::string s(symbol.begin(), symbol.end());
+    if (s.empty()) return s;
+
+    // If ccxt perp style: BASE/QUOTE:SETTLE
+    if (auto colon = s.find(':'); colon != std::string::npos) {
+        std::string left = s.substr(0, colon);
+        if (auto slash = left.find('/'); slash != std::string::npos) {
+            std::string base = left.substr(0, slash);
+            std::string quote = left.substr(slash+1);
+            return base + "-" + quote + (is_perp ? "-PERP" : "");
+        }
+    }
+    // If ccxt spot style: BASE/QUOTE
+    if (auto slash = s.find('/'); slash != std::string::npos) {
+        std::string base = s.substr(0, slash);
+        std::string quote = s.substr(slash+1);
+        return base + "-" + quote + (is_perp ? "-PERP" : "");
+    }
+    // If already hyphenated
+    if (s.find('-') != std::string::npos) {
+        // Ensure PERP suffix if requested
+        if (is_perp && s.rfind("-PERP") != s.size() - 5) {
+            return s + "-PERP";
+        }
+        return s;
+    }
+    // Compact form like BNBUSDT
+    if (auto parts = split_compact_symbol(s)) {
+        return parts->first + std::string("-") + parts->second + (is_perp ? "-PERP" : "");
+    }
+    return s;
+}
+
 std::string format_decimal(double value, int precision = 12) {
     if (!std::isfinite(value)) {
         return std::string{"0"};
@@ -119,7 +182,8 @@ std::string format_decimal(double value, int precision = 12) {
     return trim_trailing_zeros(oss.str());
 }
 
-std::string normalize_symbol_for_bybit(std::string_view symbol, [[maybe_unused]] std::string_view product_type) {
+// Compact symbol normalization suitable for multiple CEXes (e.g., Bybit/Binance)
+std::string normalize_symbol_compact(std::string_view symbol, [[maybe_unused]] std::string_view product_type) {
     std::string s(symbol.begin(), symbol.end());
     if (s.empty()) {
         return s;
@@ -486,10 +550,6 @@ bool TradingEngineService::initialize() {
         spdlog::info("[HFT-Engine] Initializing exchange clients...");
 
         // Prefer config, but allow env override if missing
-        auto getenv_string = [](const char* key) -> std::string {
-            if (const char* v = std::getenv(key)) return std::string(v);
-            return {};
-        };
         auto getenv_bool = [](const char* key, bool def) -> bool {
             const char* v = std::getenv(key);
             if (!v) return def;
@@ -500,29 +560,32 @@ bool TradingEngineService::initialize() {
             return def;
         };
 
-        // Resolve credentials & testnet flag
-        std::string api_key   = !config_.api_key.empty()   ? config_.api_key   : getenv_string("LATENTSPEED_BYBIT_API_KEY");
-        std::string api_secret= !config_.api_secret.empty()? config_.api_secret: getenv_string("LATENTSPEED_BYBIT_API_SECRET");
+        // Resolve credentials & testnet flag (exchange-agnostic env key names)
+        auto getenv_string_dyn = [&](const std::string& key) -> std::string {
+            if (const char* v = std::getenv(key.c_str())) return std::string(v);
+            return {};
+        };
+        const std::string exch_upper = to_upper_ascii(config_.exchange);
+        const std::string key_api     = std::string("LATENTSPEED_") + exch_upper + "_API_KEY";
+        const std::string key_secret  = std::string("LATENTSPEED_") + exch_upper + "_API_SECRET";
+        const std::string key_testnet = std::string("LATENTSPEED_") + exch_upper + "_USE_TESTNET";
 
-        // If the app is configured with live_trade=false, we default to testnet.
-        // Allow env override LATENTSPEED_BYBIT_USE_TESTNET to force one or the other.
+        std::string api_key    = !config_.api_key.empty()    ? config_.api_key    : getenv_string_dyn(key_api);
+        std::string api_secret = !config_.api_secret.empty() ? config_.api_secret : getenv_string_dyn(key_secret);
+
+        // If the app is configured with live_trade=false, default to testnet.
         bool use_testnet_default = !config_.live_trade;
-        bool use_testnet = getenv_bool("LATENTSPEED_BYBIT_USE_TESTNET", use_testnet_default);
+        bool use_testnet = getenv_bool(key_testnet.c_str(), use_testnet_default);
 
         spdlog::info("[HFT-Engine] Exchange: {}, Live trading: {}, Testnet: {}",
                      config_.exchange, config_.live_trade, use_testnet);
 
-        if (config_.exchange != "bybit") {
-            throw std::runtime_error("Unsupported exchange: " + config_.exchange + ". Currently supported: bybit");
-        }
-
-        // ---- Bybit client wiring ----------------------------------------------------
-        {
+        // ---- Exchange client wiring -------------------------------------------------
+        if (config_.exchange == "bybit") {
             auto bybit_client = std::make_unique<BybitClient>();
 
             if (api_key.empty() || api_secret.empty()) {
-                spdlog::error("[HFT-Engine] Missing Bybit credentials. "
-                              "Provide via config or env: LATENTSPEED_BYBIT_API_KEY / LATENTSPEED_BYBIT_API_SECRET");
+                spdlog::error("[HFT-Engine] Missing Bybit credentials. Provide via config or env: LATENTSPEED_BYBIT_API_KEY / LATENTSPEED_BYBIT_API_SECRET");
                 return false;
             }
 
@@ -531,23 +594,44 @@ bool TradingEngineService::initialize() {
                 return false;
             }
 
-            // Callbacks into the HFT engine
             bybit_client->set_order_update_callback([this](const OrderUpdate& u) { this->on_order_update_hft(u); });
             bybit_client->set_fill_callback([this](const FillData& f) { this->on_fill_hft(f); });
 
-            // Connect WS (optional but recommended for timely updates)
             if (!bybit_client->connect()) {
                 spdlog::warn("[HFT-Engine] Bybit WebSocket not connected; fills/updates may be delayed");
             }
 
-            // Register the client
             exchange_clients_["bybit"] = std::move(bybit_client);
             spdlog::info("[HFT-Engine] Exchange client initialized: bybit");
+        } else if (config_.exchange == "binance") {
+            auto binance_client = std::make_unique<BinanceClient>();
+
+            if (api_key.empty() || api_secret.empty()) {
+                spdlog::error("[HFT-Engine] Missing Binance credentials. Provide via config or env: LATENTSPEED_BINANCE_API_KEY / LATENTSPEED_BINANCE_API_SECRET");
+                return false;
+            }
+
+            if (!binance_client->initialize(api_key, api_secret, use_testnet)) {
+                spdlog::error("[HFT-Engine] Failed to initialize Binance client with provided credentials");
+                return false;
+            }
+
+            binance_client->set_order_update_callback([this](const OrderUpdate& u) { this->on_order_update_hft(u); });
+            binance_client->set_fill_callback([this](const FillData& f) { this->on_fill_hft(f); });
+
+            if (!binance_client->connect()) {
+                spdlog::warn("[HFT-Engine] Binance WebSocket not connected; fills/updates may be delayed");
+            }
+
+            exchange_clients_["binance"] = std::move(binance_client);
+            spdlog::info("[HFT-Engine] Exchange client initialized: binance");
+        } else {
+            throw std::runtime_error("Unsupported exchange: " + config_.exchange + ". Supported: bybit, binance");
         }
 
         // ---- Post-connect open-order rehydration (seeds pending_orders_) ------------
         {
-            auto& client = *exchange_clients_.at("bybit");
+            auto& client = *exchange_clients_.at(config_.exchange);
 
             struct Req { std::string category; std::optional<std::string> settle; };
             std::vector<Req> batches = {
@@ -579,7 +663,7 @@ bool TradingEngineService::initialize() {
 
                     o->version = 1;
                     o->cl_id.assign(x.client_order_id.c_str());
-                    o->venue.assign("bybit");
+                    o->venue.assign(config_.exchange.c_str());
                     o->venue_type.assign("cex");
                     o->product_type.assign((x.category == "spot") ? "spot" : "perpetual");
                     o->symbol.assign(x.symbol.c_str());
@@ -1091,7 +1175,7 @@ HFTExecutionOrder* TradingEngineService::parse_execution_order_hft(std::string_v
 void TradingEngineService::place_cex_order_hft(const HFTExecutionOrder& order) {
     try {
         // Fast exchange client lookup
-        auto client_it = exchange_clients_.find(std::string(order.venue.view()));
+        auto client_it = exchange_clients_.find(normalize_venue_key(order.venue.view()));
         if (client_it == exchange_clients_.end()) {
             send_rejection_report_hft(order, "unknown_venue", "Exchange not supported");
             return;
@@ -1116,9 +1200,16 @@ void TradingEngineService::place_cex_order_hft(const HFTExecutionOrder& order) {
 
         // Normalise symbol for Bybit requirements and ensure lowercase side/order type
         const std::string product_type_lower = to_lower_ascii(order.product_type.view());
-        const std::string category = product_type_lower.empty() || product_type_lower == "spot" ? "spot" : "linear";
+        std::string category = product_type_lower.empty() || product_type_lower == "spot" ? "spot" : "linear";
+        // Infer derivatives category if symbol indicates a perpetual and product_type is missing/spot
+        if (category == "spot") {
+            std::string sym_upper = to_upper_ascii(order.symbol.view());
+            if (sym_upper.find(":") != std::string::npos || sym_upper.rfind("-PERP") == sym_upper.size() - 5) {
+                category = "linear";
+            }
+        }
         req.category = category;
-        req.symbol = normalize_symbol_for_bybit(order.symbol.view(), order.product_type.view());
+        req.symbol = normalize_symbol_compact(order.symbol.view(), order.product_type.view());
         req.side = to_lower_ascii(order.side.view());
 
         auto order_type_lower = to_lower_ascii(order.order_type.view());
@@ -1242,7 +1333,7 @@ void TradingEngineService::place_cex_order_hft(const HFTExecutionOrder& order) {
  */
 void TradingEngineService::cancel_cex_order_hft(const HFTExecutionOrder& order) {
     try {
-        auto client_it = exchange_clients_.find(std::string(order.venue.view()));
+        auto client_it = exchange_clients_.find(normalize_venue_key(order.venue.view()));
         if (client_it == exchange_clients_.end()) {
             send_rejection_report_hft(order, "unknown_venue", "Exchange not supported");
             return;
@@ -1271,14 +1362,14 @@ void TradingEngineService::cancel_cex_order_hft(const HFTExecutionOrder& order) 
 
         std::optional<std::string> symbol;
         if (!order.symbol.empty()) {
-            symbol = normalize_symbol_for_bybit(order.symbol.view(), order.product_type.view());
+            symbol = normalize_symbol_compact(order.symbol.view(), order.product_type.view());
         }
 
         // Fallback to cached pending order metadata when not supplied in request
         OrderId original_id_lookup(cl_to_cancel_str.c_str());
         if (!symbol.has_value()) {
             if (auto* pending_order = pending_orders_->find(original_id_lookup); pending_order && *pending_order) {
-                symbol = normalize_symbol_for_bybit((*pending_order)->symbol.view(), (*pending_order)->product_type.view());
+                symbol = normalize_symbol_compact((*pending_order)->symbol.view(), (*pending_order)->product_type.view());
             }
         }
         if (!exchange_order_id.has_value()) {
@@ -1347,7 +1438,7 @@ void TradingEngineService::cancel_cex_order_hft(const HFTExecutionOrder& order) 
  */
 void TradingEngineService::replace_cex_order_hft(const HFTExecutionOrder& order) {
     try {
-        auto client_it = exchange_clients_.find(std::string(order.venue.view()));
+        auto client_it = exchange_clients_.find(normalize_venue_key(order.venue.view()));
         if (client_it == exchange_clients_.end()) {
             send_rejection_report_hft(order, "unknown_venue", "Exchange not supported");
             return;
@@ -1429,8 +1520,12 @@ void TradingEngineService::on_order_update_hft(const OrderUpdate& update) {
                 // single venue configured
                 client_raw = exchange_clients_.begin()->second.get();
             } else {
-                auto it = exchange_clients_.find(std::string("bybit"));
-                if (it != exchange_clients_.end()) client_raw = it->second.get();
+                auto it = exchange_clients_.find(config_.exchange);
+                if (it != exchange_clients_.end()) {
+                    client_raw = it->second.get();
+                } else if (!exchange_clients_.empty()) {
+                    client_raw = exchange_clients_.begin()->second.get();
+                }
             }
 
             if (client_raw) {
@@ -1452,7 +1547,7 @@ void TradingEngineService::on_order_update_hft(const OrderUpdate& update) {
                             new (o) HFTExecutionOrder(); // placement new
                             o->version = 1;
                             o->cl_id.assign(update.client_order_id.c_str());
-                            o->venue.assign("bybit");          // we queried bybit
+                            o->venue.assign(client_raw->get_exchange_name().c_str()); // venue from the queried client
                             o->venue_type.assign("cex");
                             // category → product_type
                             // spot → "spot"; otherwise treat as perpetual
@@ -1568,16 +1663,27 @@ void TradingEngineService::on_fill_hft(const FillData& fill_data) {
 
         // Copy tags from original order if available
         OrderId lookup_id(fill->cl_id.c_str());
+        bool is_perp = false;
         if (auto* order_ptr = pending_orders_->find(lookup_id); order_ptr && *order_ptr) {
             fill->tags = (*order_ptr)->tags;
             if (!(*order_ptr)->symbol.empty()) {
                 fill->symbol_or_pair.assign((*order_ptr)->symbol.c_str());
             }
             fill->tags.insert(FixedString<32>("execution_type"), FixedString<64>("live"));
+            // Determine perp from original order's product_type
+            std::string pt = to_lower_ascii((*order_ptr)->product_type.view());
+            is_perp = (pt == "perpetual");
         } else {
             // External/manual action: still publish with clear tagging
             fill->tags.insert(FixedString<32>("execution_type"), FixedString<64>("external"));
+            // Infer perp if ccxt style present (BASE/QUOTE:SETTLE)
+            std::string cur = std::string(fill->symbol_or_pair.c_str());
+            is_perp = (cur.find(':') != std::string::npos);
         }
+
+        // Normalize to hyphen symbol regardless of source form
+        std::string hyphen = to_hyphen_symbol(fill->symbol_or_pair.c_str(), is_perp);
+        fill->symbol_or_pair.assign(hyphen.c_str());
 
         publish_fill_hft(*fill);
         stats_->fills_received.fetch_add(1, std::memory_order_relaxed);
