@@ -61,9 +61,18 @@ add_executable(multi_exchange_provider
   src/feed_handler.cpp
 )
 
+# dYdX Provider example
+add_executable(dydx_provider
+  examples/dydx_provider.cpp
+  src/market_data_provider.cpp
+  src/exchange_interface.cpp
+  src/feed_handler.cpp
+)
+
 target_include_directories(trading_engine_service PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_include_directories(test_market_data PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_include_directories(multi_exchange_provider PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_include_directories(dydx_provider PRIVATE ${CMAKE_SOURCE_DIR}/include)
 
 if(TARGET args)
     target_link_libraries(trading_engine_service PRIVATE args)
@@ -105,6 +114,18 @@ target_link_libraries(multi_exchange_provider PRIVATE
   spdlog::spdlog
 )
 
+# dYdX Provider executable libraries
+target_link_libraries(dydx_provider PRIVATE 
+  OpenSSL::SSL 
+  OpenSSL::Crypto 
+  Threads::Threads 
+  ${ZMQ_LIBRARIES} 
+  Boost::system
+  rapidjson
+  yaml-cpp
+  spdlog::spdlog
+)
+
 # Linux-specific libraries for HFT features
 if(UNIX AND NOT APPLE)
     target_link_libraries(trading_engine_service PRIVATE 
@@ -118,6 +139,11 @@ if(UNIX AND NOT APPLE)
     )
     
     target_link_libraries(multi_exchange_provider PRIVATE 
+        pthread  # POSIX threads for CPU affinity
+        rt       # Real-time extensions for scheduling
+    )
+    
+    target_link_libraries(dydx_provider PRIVATE 
         pthread  # POSIX threads for CPU affinity
         rt       # Real-time extensions for scheduling
     )
