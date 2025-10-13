@@ -24,11 +24,11 @@ find_package(CURL REQUIRED)
 find_package(spdlog REQUIRED)
 find_package(Boost REQUIRED COMPONENTS system)
 find_package(RapidJSON REQUIRED)
+find_package(yaml-cpp REQUIRED)
 find_package(args REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(ZMQ REQUIRED libzmq)
 
-# WebSocket++ is header-only, no find_package needed
 # It will be available through vcpkg include directories
 
 # Add subdirectories
@@ -39,6 +39,8 @@ add_executable(trading_engine_service
   src/main.cpp
   src/trading_engine_service.cpp
   src/market_data_provider.cpp
+  src/exchange_interface.cpp
+  src/feed_handler.cpp
   src/exchange/exchange_client.cpp
   src/exchange/bybit_client.cpp
 )
@@ -47,12 +49,22 @@ add_executable(trading_engine_service
 add_executable(test_market_data
   src/test_market_data.cpp
   src/market_data_provider.cpp
+  src/exchange_interface.cpp
+  src/feed_handler.cpp
 )
 
-target_include_directories(trading_engine_service PRIVATE include)
-target_include_directories(test_market_data PRIVATE include)
+# Multi-Exchange Provider example
+add_executable(multi_exchange_provider
+  examples/multi_exchange_provider.cpp
+  src/market_data_provider.cpp
+  src/exchange_interface.cpp
+  src/feed_handler.cpp
+)
 
-# Header-only libraries
+target_include_directories(trading_engine_service PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_include_directories(test_market_data PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_include_directories(multi_exchange_provider PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
 if(TARGET args)
     target_link_libraries(trading_engine_service PRIVATE args)
 endif()
@@ -60,12 +72,12 @@ endif()
 # HFT-optimized link libraries
 target_link_libraries(trading_engine_service PRIVATE 
   OpenSSL::SSL 
-  OpenSSL::Crypto 
   Threads::Threads 
   ${ZMQ_LIBRARIES} 
   CURL::libcurl
   Boost::system
   rapidjson
+  yaml-cpp
   spdlog::spdlog
 )
 
@@ -77,6 +89,19 @@ target_link_libraries(test_market_data PRIVATE
   ${ZMQ_LIBRARIES} 
   Boost::system
   rapidjson
+  yaml-cpp
+  spdlog::spdlog
+)
+
+# Multi-Exchange Provider executable libraries
+target_link_libraries(multi_exchange_provider PRIVATE 
+  OpenSSL::SSL 
+  OpenSSL::Crypto 
+  Threads::Threads 
+  ${ZMQ_LIBRARIES} 
+  Boost::system
+  rapidjson
+  yaml-cpp
   spdlog::spdlog
 )
 
@@ -88,6 +113,11 @@ if(UNIX AND NOT APPLE)
     )
     
     target_link_libraries(test_market_data PRIVATE 
+        pthread  # POSIX threads for CPU affinity
+        rt       # Real-time extensions for scheduling
+    )
+    
+    target_link_libraries(multi_exchange_provider PRIVATE 
         pthread  # POSIX threads for CPU affinity
         rt       # Real-time extensions for scheduling
     )

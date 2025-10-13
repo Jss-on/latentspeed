@@ -46,6 +46,7 @@
 
 // HFT data structures
 #include "hft_data_structures.h"
+#include "rolling_stats.h"
 #include <spdlog/spdlog.h>
 
 namespace latentspeed {
@@ -68,8 +69,13 @@ struct MarketTick {
     double trading_volume;           ///< Trading volume (price * amount)
     uint64_t seq;                    ///< Sequence number per stream
     
+    // Rolling statistics
+    double volatility_transaction_price;  ///< Rolling volatility of transaction price
+    int window_size;                      ///< Window size used for stats
+    
     MarketTick() : timestamp_ns(0), price(0.0), amount(0.0), 
-                   transaction_price(0.0), trading_volume(0.0), seq(0) {}
+                   transaction_price(0.0), trading_volume(0.0), seq(0),
+                   volatility_transaction_price(0.0), window_size(20) {}
 };
 
 /**
@@ -107,9 +113,15 @@ struct OrderBookSnapshot {
     double ask_depth_n;                       ///< sum(price_i * size_i) for asks
     double depth_n;                           ///< total depth (bid + ask)
     
+    // Rolling statistics
+    double volatility_mid;                    ///< Rolling volatility of midpoint
+    double ofi_rolling;                       ///< Rolling order flow imbalance
+    int window_size;                          ///< Window size used for stats
+    
     OrderBookSnapshot() : timestamp_ns(0), seq(0), midpoint(0.0), 
                          relative_spread(0.0), breadth(0.0), imbalance_lvl1(0.0),
-                         bid_depth_n(0.0), ask_depth_n(0.0), depth_n(0.0) {}
+                         bid_depth_n(0.0), ask_depth_n(0.0), depth_n(0.0),
+                         volatility_mid(0.0), ofi_rolling(0.0), window_size(20) {}
 };
 
 /**
@@ -145,15 +157,20 @@ public:
  * - Memory pools to avoid allocations in hot path
  * - Sub-microsecond processing latency targets
  */
+// Forward declaration
+class ExchangeInterface;
+
 class MarketDataProvider {
 public:
     /**
-     * @brief Constructor with exchange-specific configuration
+     * @brief Constructor
      * @param exchange Exchange name (e.g., "bybit", "binance")
-     * @param symbols List of symbols to subscribe to
+     * @param symbols List of symbols to subscribe
+     * @param exchange_interface Optional exchange interface (for multi-exchange support)
      */
-    explicit MarketDataProvider(const std::string& exchange, 
-                              const std::vector<std::string>& symbols);
+    MarketDataProvider(const std::string& exchange, 
+                      const std::vector<std::string>& symbols,
+                      ExchangeInterface* exchange_interface = nullptr);
     
     /**
      * @brief Destructor
@@ -277,6 +294,7 @@ private:
     std::string exchange_;
     std::vector<std::string> symbols_;
     std::atomic<bool> running_{false};
+    ExchangeInterface* exchange_interface_;  ///< Exchange abstraction (optional)
     
     // Boost.Beast WebSocket components
     std::unique_ptr<boost::asio::io_context> io_context_;
@@ -320,6 +338,11 @@ private:
     std::unordered_map<std::string, uint64_t> sequence_counters_;
     std::mutex seq_mutex_;
     
+    // Rolling statistics per symbol
+    std::unordered_map<std::string, RollingStats> mid_stats_;      // For book midpoint volatility
+    std::unordered_map<std::string, RollingStats> trade_stats_;    // For trade price volatility
+    std::mutex stats_mutex_;
+    
     /**
      * @brief Get next sequence number for a stream
      */
@@ -334,6 +357,16 @@ private:
      * @brief Compute derived trade features
      */
     void compute_trade_features(MarketTick& tick);
+    
+    /**
+     * @brief Normalize symbol (underscore to dash)
+     */
+    std::string normalize_symbol(const std::string& symbol);
+    
+    /**
+     * @brief Check if topic is a heartbeat message
+     */
+    bool is_heartbeat(const std::string& topic);
 };
 
 /**

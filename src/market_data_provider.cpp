@@ -6,6 +6,7 @@
  */
 
 #include "market_data_provider.h"
+#include "exchange_interface.h"
 #include <spdlog/spdlog.h>
 #include <rapidjson/error/en.h>
 #include <iomanip>
@@ -20,10 +21,12 @@
 namespace latentspeed {
 
 MarketDataProvider::MarketDataProvider(const std::string& exchange, 
-                                     const std::vector<std::string>& symbols)
+                                     const std::vector<std::string>& symbols,
+                                     ExchangeInterface* exchange_interface)
     : exchange_(exchange)
     , symbols_(symbols)
-    , running_(false) {
+    , running_(false)
+    , exchange_interface_(exchange_interface) {
     
     spdlog::info("[MarketData] Initializing provider for exchange: {}", exchange_);
     
@@ -51,17 +54,17 @@ bool MarketDataProvider::initialize() {
         // Initialize ZMQ context
         zmq_context_ = std::make_unique<zmq::context_t>(1);
         
-        // Initialize trades publisher (port 5558)
+        // Initialize trades publisher (port 5556)
         trades_publisher_ = std::make_unique<zmq::socket_t>(*zmq_context_, ZMQ_PUB);
         trades_publisher_->set(zmq::sockopt::sndhwm, 1000);
         trades_publisher_->set(zmq::sockopt::sndtimeo, 0);
-        trades_publisher_->bind("tcp://*:5558");
+        trades_publisher_->bind("tcp://*:5556");
         
-        // Initialize orderbook publisher (port 5559)
+        // Initialize orderbook publisher (port 5557)
         orderbook_publisher_ = std::make_unique<zmq::socket_t>(*zmq_context_, ZMQ_PUB);
         orderbook_publisher_->set(zmq::sockopt::sndhwm, 1000);
         orderbook_publisher_->set(zmq::sockopt::sndtimeo, 0);
-        orderbook_publisher_->bind("tcp://*:5559");
+        orderbook_publisher_->bind("tcp://*:5557");
         
         // Initialize Boost.Beast WebSocket components
         io_context_ = std::make_unique<boost::asio::io_context>();
@@ -71,7 +74,7 @@ bool MarketDataProvider::initialize() {
         ssl_context_->set_default_verify_paths();
         ssl_context_->set_verify_mode(boost::asio::ssl::verify_peer);
         
-        spdlog::info("[MarketData] ZMQ publishers bound to ports 5558 (trades) and 5559 (orderbook)");
+        spdlog::info("[MarketData] ZMQ publishers bound to ports 5556 (trades) and 5557 (orderbook)");
         spdlog::info("[MarketData] WebSocket client initialized");
         
         return true;
@@ -188,17 +191,24 @@ void MarketDataProvider::websocket_thread() {
 void MarketDataProvider::connect_websocket() {
     std::string host, port, target;
     
-    // Exchange-specific WebSocket URLs
-    if (exchange_ == "bybit") {
-        host = "stream.bybit.com";
-        port = "443";
-        target = "/v5/public/spot";
-    } else if (exchange_ == "binance") {
-        host = "stream.binance.com";
-        port = "9443";
-        target = "/ws";
+    // Use exchange interface if available, otherwise fallback to hardcoded
+    if (exchange_interface_) {
+        host = exchange_interface_->get_websocket_host();
+        port = exchange_interface_->get_websocket_port();
+        target = exchange_interface_->get_websocket_target();
     } else {
-        throw std::runtime_error("Unsupported exchange: " + exchange_);
+        // Fallback: Exchange-specific WebSocket URLs
+        if (exchange_ == "bybit") {
+            host = "stream.bybit.com";
+            port = "443";
+            target = "/v5/public/spot";
+        } else if (exchange_ == "binance") {
+            host = "stream.binance.com";
+            port = "9443";
+            target = "/ws";
+        } else {
+            throw std::runtime_error("Unsupported exchange: " + exchange_);
+        }
     }
     
     spdlog::info("[MarketData] Connecting to WebSocket: wss://{}:{}{}", host, port, target);
@@ -251,6 +261,13 @@ void MarketDataProvider::connect_websocket() {
             std::string message = boost::beast::buffers_to_string(ws_buffer_.data());
             spdlog::debug("[MarketData] Received message #{}: {}", message_count, message.substr(0, 200));
             
+            // Skip heartbeat messages early to save processing
+            if (message.find("-heartbeat") != std::string::npos || 
+                message.find("heartbeat") != std::string::npos) {
+                spdlog::trace("[MarketData] Skipping heartbeat message");
+                continue;
+            }
+            
             // Copy message to fixed-size buffer for lock-free queue
             MessageBuffer msg_buffer;
             std::memcpy(msg_buffer.data(), message.c_str(), 
@@ -285,11 +302,50 @@ void MarketDataProvider::processing_thread() {
                 std::string message_str(message.data());
                 message_str = message_str.substr(0, message_str.find('\0')); // Remove null terminators
                 
-                // Parse message based on exchange
-                if (exchange_ == "bybit") {
-                    parse_bybit_message(message_str);
-                } else if (exchange_ == "binance") {
-                    parse_binance_message(message_str);
+                // Parse message using exchange interface if available
+                if (exchange_interface_) {
+                    MarketTick tick;
+                    OrderBookSnapshot snapshot;
+                    
+                    auto msg_type = exchange_interface_->parse_message(message_str, tick, snapshot);
+                    
+                    if (msg_type == ExchangeInterface::MessageType::TRADE) {
+                        // Compute derived features
+                        compute_trade_features(tick);
+                        
+                        // Get sequence number
+                        std::string stream_key = std::string(tick.exchange.c_str()) + ":trade:" + 
+                                                std::string(tick.symbol.c_str());
+                        tick.seq = get_next_seq(stream_key);
+                        
+                        // Push to queue
+                        if (!tick_queue_->try_push(tick)) {
+                            spdlog::warn("[MarketData] Trade queue full");
+                        }
+                        stats_.trades_processed.fetch_add(1);
+                    } 
+                    else if (msg_type == ExchangeInterface::MessageType::BOOK) {
+                        // Compute derived features
+                        compute_book_features(snapshot);
+                        
+                        // Get sequence number
+                        std::string stream_key = std::string(snapshot.exchange.c_str()) + ":book:" + 
+                                                std::string(snapshot.symbol.c_str());
+                        snapshot.seq = get_next_seq(stream_key);
+                        
+                        // Push to queue
+                        if (!orderbook_queue_->try_push(snapshot)) {
+                            spdlog::warn("[MarketData] Orderbook queue full");
+                        }
+                        stats_.orderbooks_processed.fetch_add(1);
+                    }
+                } else {
+                    // Fallback: Parse message based on exchange
+                    if (exchange_ == "bybit") {
+                        parse_bybit_message(message_str);
+                    } else if (exchange_ == "binance") {
+                        parse_binance_message(message_str);
+                    }
                 }
             } else {
                 std::this_thread::sleep_for(std::chrono::microseconds(10));
@@ -349,6 +405,31 @@ void MarketDataProvider::send_subscription() {
     spdlog::info("[MarketData] Subscription message: {}", sub_msg);
     
     try {
+        // For dYdX, the subscription message is a JSON array of individual subscriptions
+        // We need to send each one separately
+        if (exchange_interface_ && exchange_interface_->get_name() == "DYDX") {
+            rapidjson::Document doc;
+            doc.Parse(sub_msg.c_str());
+            
+            if (doc.IsArray()) {
+                for (auto& sub : doc.GetArray()) {
+                    rapidjson::StringBuffer buffer;
+                    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+                    sub.Accept(writer);
+                    
+                    std::string individual_sub = buffer.GetString();
+                    size_t bytes = ws_stream_->write(boost::asio::buffer(individual_sub));
+                    spdlog::info("[MarketData] Sent dYdX subscription ({} bytes): {}", bytes, individual_sub);
+                    
+                    // Small delay between subscriptions
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+                spdlog::info("[MarketData] All dYdX subscriptions sent");
+                return;
+            }
+        }
+        
+        // Standard single-message subscription (Bybit, Binance)
         size_t bytes_written = ws_stream_->write(boost::asio::buffer(sub_msg));
         spdlog::info("[MarketData] Subscription sent successfully ({} bytes)", bytes_written);
     } catch (const std::exception& e) {
@@ -463,7 +544,7 @@ bool MarketDataProvider::parse_trade_data(const rapidjson::Value& doc, MarketTic
         if (exchange_ == "bybit") {
             // Bybit trade format
             if (doc.HasMember("S") && doc["S"].IsString()) {
-                tick.symbol.assign(doc["S"].GetString());
+                tick.symbol.assign(normalize_symbol(doc["S"].GetString()));
             }
             if (doc.HasMember("p") && doc["p"].IsString()) {
                 tick.price = std::stod(doc["p"].GetString());
@@ -480,7 +561,7 @@ bool MarketDataProvider::parse_trade_data(const rapidjson::Value& doc, MarketTic
         } else if (exchange_ == "binance") {
             // Binance trade format
             if (doc.HasMember("s") && doc["s"].IsString()) {
-                tick.symbol.assign(doc["s"].GetString());
+                tick.symbol.assign(normalize_symbol(doc["s"].GetString()));
             }
             if (doc.HasMember("p") && doc["p"].IsString()) {
                 tick.price = std::stod(doc["p"].GetString());
@@ -523,7 +604,7 @@ bool MarketDataProvider::parse_orderbook_data(const rapidjson::Value& doc, Order
         if (exchange_ == "bybit") {
             // Bybit orderbook format
             if (doc.HasMember("s") && doc["s"].IsString()) {
-                snapshot.symbol.assign(doc["s"].GetString());
+                snapshot.symbol.assign(normalize_symbol(doc["s"].GetString()));
             }
             
             // Parse bids
@@ -586,7 +667,7 @@ void MarketDataProvider::publish_trade(const MarketTick& tick) {
         zmq::message_t data_msg(json_data.size());
         std::memcpy(data_msg.data(), json_data.c_str(), json_data.size());
         
-        // Publish to trades port (5558)
+        // Publish to trades port (5556)
         if (trades_publisher_->send(topic_msg, zmq::send_flags::sndmore | zmq::send_flags::dontwait) &&
             trades_publisher_->send(data_msg, zmq::send_flags::dontwait)) {
             stats_.messages_published.fetch_add(1);
@@ -612,7 +693,7 @@ void MarketDataProvider::publish_orderbook(const OrderBookSnapshot& snapshot) {
         zmq::message_t data_msg(json_data.size());
         std::memcpy(data_msg.data(), json_data.c_str(), json_data.size());
         
-        // Publish to orderbook port (5559)
+        // Publish to orderbook port (5557)
         if (orderbook_publisher_->send(topic_msg, zmq::send_flags::sndmore | zmq::send_flags::dontwait) &&
             orderbook_publisher_->send(data_msg, zmq::send_flags::dontwait)) {
             stats_.messages_published.fetch_add(1);
@@ -642,6 +723,10 @@ std::string MarketDataProvider::serialize_trade(const MarketTick& tick) {
     // Derived features
     writer.Key("transaction_price"); writer.Double(tick.transaction_price);
     writer.Key("trading_volume"); writer.Double(tick.trading_volume);
+    
+    // Rolling statistics
+    writer.Key("volatility_transaction_price"); writer.Double(tick.volatility_transaction_price);
+    writer.Key("window_size"); writer.Int(tick.window_size);
     
     // Metadata
     writer.Key("seq"); writer.Uint64(tick.seq);
@@ -687,6 +772,11 @@ std::string MarketDataProvider::serialize_orderbook(const OrderBookSnapshot& sna
     writer.Key("bid_depth_n"); writer.Double(snapshot.bid_depth_n);
     writer.Key("ask_depth_n"); writer.Double(snapshot.ask_depth_n);
     writer.Key("depth_n"); writer.Double(snapshot.depth_n);
+    
+    // Rolling statistics
+    writer.Key("volatility_mid"); writer.Double(snapshot.volatility_mid);
+    writer.Key("ofi_rolling"); writer.Double(snapshot.ofi_rolling);
+    writer.Key("window_size"); writer.Int(snapshot.window_size);
     
     // Metadata
     writer.Key("schema_version"); writer.Int(1);
@@ -734,6 +824,12 @@ uint64_t MarketDataProvider::get_timestamp_ns() {
 }
 
 std::string MarketDataProvider::build_subscription_message() {
+    // Use exchange interface if available
+    if (exchange_interface_) {
+        return exchange_interface_->generate_subscription(symbols_, true, true);
+    }
+    
+    // Fallback to hardcoded logic
     rapidjson::StringBuffer buffer;
     rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
     
@@ -821,6 +917,24 @@ void MarketDataProvider::compute_book_features(OrderBookSnapshot& snapshot) {
     }
     
     snapshot.depth_n = snapshot.bid_depth_n + snapshot.ask_depth_n;
+    
+    // Update rolling statistics
+    std::string symbol_key = std::string(snapshot.symbol.c_str());
+    {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        auto& stats = mid_stats_[symbol_key];
+        
+        // Update with new midpoint
+        stats.update_mid(snapshot.midpoint);
+        
+        // Update OFI
+        stats.update_ofi(best_bid_size, best_ask_size);
+        
+        // Get computed values
+        snapshot.volatility_mid = stats.volatility();
+        snapshot.ofi_rolling = stats.ofi_rolling();
+        snapshot.window_size = static_cast<int>(stats.window_size());
+    }
 }
 
 void MarketDataProvider::compute_trade_features(MarketTick& tick) {
@@ -829,6 +943,32 @@ void MarketDataProvider::compute_trade_features(MarketTick& tick) {
     
     // Trading volume = price * amount
     tick.trading_volume = tick.price * tick.amount;
+    
+    // Update rolling statistics
+    std::string symbol_key = std::string(tick.symbol.c_str());
+    {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        auto& stats = trade_stats_[symbol_key];
+        
+        // Update with new transaction price
+        stats.update_trade(tick.transaction_price);
+        
+        // Get computed volatility
+        tick.volatility_transaction_price = stats.volatility();
+        tick.window_size = static_cast<int>(stats.window_size());
+    }
+}
+
+std::string MarketDataProvider::normalize_symbol(const std::string& symbol) {
+    std::string normalized = symbol;
+    // Replace underscore with dash for consistency
+    std::replace(normalized.begin(), normalized.end(), '_', '-');
+    return normalized;
+}
+
+bool MarketDataProvider::is_heartbeat(const std::string& topic) {
+    return topic.find("-heartbeat") != std::string::npos || 
+           topic.find("heartbeat") != std::string::npos;
 }
 
 } // namespace latentspeed
