@@ -309,6 +309,10 @@ void MarketDataProvider::processing_thread() {
                     
                     auto msg_type = exchange_interface_->parse_message(message_str, tick, snapshot);
                     
+                    // Log message type for debugging
+                    spdlog::debug("[MarketData] Parsed message type: {} (msg: {})", 
+                                 static_cast<int>(msg_type), message_str.substr(0, 100));
+                    
                     if (msg_type == ExchangeInterface::MessageType::TRADE) {
                         // Compute derived features
                         compute_trade_features(tick);
@@ -338,6 +342,15 @@ void MarketDataProvider::processing_thread() {
                             spdlog::warn("[MarketData] Orderbook queue full");
                         }
                         stats_.orderbooks_processed.fetch_add(1);
+                    }
+                    else if (msg_type == ExchangeInterface::MessageType::HEARTBEAT) {
+                        spdlog::debug("[MarketData] Received heartbeat/subscription message");
+                    }
+                    else if (msg_type == ExchangeInterface::MessageType::UNKNOWN) {
+                        spdlog::warn("[MarketData] Unknown message type: {}", message_str.substr(0, 200));
+                    }
+                    else if (msg_type == ExchangeInterface::MessageType::ERROR) {
+                        spdlog::error("[MarketData] Error parsing message: {}", message_str.substr(0, 200));
                     }
                 } else {
                     // Fallback: Parse message based on exchange

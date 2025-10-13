@@ -57,7 +57,7 @@ int main(int argc, char** argv) {
     // Setup logging
     auto console = spdlog::stdout_color_mt("console");
     spdlog::set_default_logger(console);
-    spdlog::set_level(spdlog::level::info);
+    spdlog::set_level(spdlog::level::debug);  // Enable debug to see all messages
     
     // Signal handler
     signal(SIGINT, signal_handler);
