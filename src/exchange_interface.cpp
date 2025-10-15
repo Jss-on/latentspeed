@@ -671,4 +671,215 @@ ExchangeInterface::MessageType DydxExchange::parse_message(
     }
 }
 
+// ============================================================================
+// HyperliquidExchange Implementation
+// ============================================================================
+
+std::string HyperliquidExchange::generate_subscription(
+    const std::vector<std::string>& symbols,
+    bool enable_trades,
+    bool enable_orderbook
+) const {
+    // Hyperliquid uses individual subscribe messages
+    // Format: { "method": "subscribe", "subscription": { "type": "...", "coin": "..." } }
+    rapidjson::StringBuffer buffer;
+    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+    
+    // Start array for multiple subscriptions
+    writer.StartArray();
+    
+    for (const auto& symbol : symbols) {
+        std::string normalized = normalize_symbol(symbol);
+        
+        if (enable_trades) {
+            // Subscribe to trades channel
+            writer.StartObject();
+            writer.Key("method");
+            writer.String("subscribe");
+            writer.Key("subscription");
+            writer.StartObject();
+            writer.Key("type");
+            writer.String("trades");
+            writer.Key("coin");
+            writer.String(normalized.c_str());
+            writer.EndObject();
+            writer.EndObject();
+        }
+        
+        if (enable_orderbook) {
+            // Subscribe to l2Book channel
+            writer.StartObject();
+            writer.Key("method");
+            writer.String("subscribe");
+            writer.Key("subscription");
+            writer.StartObject();
+            writer.Key("type");
+            writer.String("l2Book");
+            writer.Key("coin");
+            writer.String(normalized.c_str());
+            writer.EndObject();
+            writer.EndObject();
+        }
+    }
+    
+    writer.EndArray();
+    
+    return buffer.GetString();
+}
+
+ExchangeInterface::MessageType HyperliquidExchange::parse_message(
+    const std::string& message,
+    MarketTick& tick,
+    OrderBookSnapshot& snapshot
+) const {
+    try {
+        rapidjson::Document doc;
+        doc.Parse(message.c_str());
+        
+        if (doc.HasParseError()) {
+            spdlog::debug("[HyperliquidExchange] JSON parse error at offset {}", doc.GetErrorOffset());
+            return MessageType::ERROR;
+        }
+        
+        // Check for subscription response
+        if (doc.HasMember("channel") && doc["channel"].IsString()) {
+            std::string channel = doc["channel"].GetString();
+            
+            if (channel == "subscriptionResponse") {
+                return MessageType::HEARTBEAT;
+            }
+            
+            // Parse data messages
+            if (!doc.HasMember("data")) {
+                return MessageType::UNKNOWN;
+            }
+            
+            const auto& data = doc["data"];
+            
+            // Trade message (channel: "trades")
+            if (channel == "trades") {
+                if (!data.IsArray() || data.GetArray().Empty()) {
+                    return MessageType::UNKNOWN;
+                }
+                
+                // Take first trade from array
+                const auto& trade = data[0];
+                
+                if (!trade.HasMember("coin") || !trade["coin"].IsString()) {
+                    return MessageType::ERROR;
+                }
+                
+                tick.timestamp_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()
+                ).count();
+                tick.exchange.assign("HYPERLIQUID");
+                tick.symbol.assign(trade["coin"].GetString());
+                
+                // Parse price (px)
+                if (trade.HasMember("px") && trade["px"].IsString()) {
+                    tick.price = std::stod(trade["px"].GetString());
+                }
+                
+                // Parse size (sz)
+                if (trade.HasMember("sz") && trade["sz"].IsString()) {
+                    tick.amount = std::stod(trade["sz"].GetString());
+                }
+                
+                // Parse side
+                if (trade.HasMember("side") && trade["side"].IsString()) {
+                    std::string side = trade["side"].GetString();
+                    tick.side.assign(side == "A" ? "sell" : "buy"); // A=Ask(sell), B=Bid(buy)
+                }
+                
+                // Parse trade ID (tid)
+                if (trade.HasMember("tid") && trade["tid"].IsNumber()) {
+                    tick.trade_id = std::to_string(trade["tid"].GetInt64());
+                }
+                
+                // Parse timestamp if available
+                if (trade.HasMember("time") && trade["time"].IsNumber()) {
+                    tick.timestamp_ns = trade["time"].GetInt64() * 1000000; // Convert ms to ns
+                }
+                
+                return MessageType::TRADE;
+            }
+            
+            // Order book message (channel: "l2Book")
+            if (channel == "l2Book") {
+                if (!data.IsObject()) {
+                    return MessageType::ERROR;
+                }
+                
+                if (!data.HasMember("coin") || !data["coin"].IsString()) {
+                    return MessageType::ERROR;
+                }
+                
+                snapshot.timestamp_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()
+                ).count();
+                snapshot.exchange.assign("HYPERLIQUID");
+                snapshot.symbol.assign(data["coin"].GetString());
+                
+                // Parse timestamp if available
+                if (data.HasMember("time") && data["time"].IsNumber()) {
+                    snapshot.timestamp_ns = data["time"].GetInt64() * 1000000; // Convert ms to ns
+                }
+                
+                // Parse levels: [Array<WsLevel>, Array<WsLevel>]
+                // WsLevel format: { px: string, sz: string, n: number }
+                if (!data.HasMember("levels") || !data["levels"].IsArray()) {
+                    return MessageType::ERROR;
+                }
+                
+                const auto& levels = data["levels"].GetArray();
+                if (levels.Size() < 2) {
+                    return MessageType::ERROR;
+                }
+                
+                // Parse bids (first array)
+                if (levels[0].IsArray()) {
+                    const auto& bids = levels[0].GetArray();
+                    size_t bid_idx = 0;
+                    for (const auto& level : bids) {
+                        if (bid_idx >= 10) break; // Take top 10
+                        
+                        if (level.IsObject() && level.HasMember("px") && level.HasMember("sz")) {
+                            if (level["px"].IsString() && level["sz"].IsString()) {
+                                snapshot.bids[bid_idx].price = std::stod(level["px"].GetString());
+                                snapshot.bids[bid_idx].quantity = std::stod(level["sz"].GetString());
+                                bid_idx++;
+                            }
+                        }
+                    }
+                }
+                
+                // Parse asks (second array)
+                if (levels[1].IsArray()) {
+                    const auto& asks = levels[1].GetArray();
+                    size_t ask_idx = 0;
+                    for (const auto& level : asks) {
+                        if (ask_idx >= 10) break; // Take top 10
+                        
+                        if (level.IsObject() && level.HasMember("px") && level.HasMember("sz")) {
+                            if (level["px"].IsString() && level["sz"].IsString()) {
+                                snapshot.asks[ask_idx].price = std::stod(level["px"].GetString());
+                                snapshot.asks[ask_idx].quantity = std::stod(level["sz"].GetString());
+                                ask_idx++;
+                            }
+                        }
+                    }
+                }
+                
+                return MessageType::BOOK;
+            }
+        }
+        
+        return MessageType::UNKNOWN;
+        
+    } catch (const std::exception& e) {
+        spdlog::error("[HyperliquidExchange] Exception in parse_message: {}", e.what());
+        return MessageType::ERROR;
+    }
+}
+
 } // namespace latentspeed

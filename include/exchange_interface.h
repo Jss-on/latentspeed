@@ -238,6 +238,70 @@ public:
 };
 
 /**
+ * @class HyperliquidExchange
+ * @brief Hyperliquid exchange implementation
+ */
+class HyperliquidExchange : public ExchangeInterface {
+public:
+    std::string get_name() const override { return "HYPERLIQUID"; }
+    
+    std::string get_websocket_host() const override {
+        return "api.hyperliquid.xyz";
+    }
+    
+    std::string get_websocket_port() const override {
+        return "443";
+    }
+    
+    std::string get_websocket_target() const override {
+        return "/ws";
+    }
+    
+    std::string generate_subscription(
+        const std::vector<std::string>& symbols,
+        bool enable_trades,
+        bool enable_orderbook
+    ) const override;
+    
+    MessageType parse_message(
+        const std::string& message,
+        MarketTick& tick,
+        OrderBookSnapshot& snapshot
+    ) const override;
+    
+    std::string normalize_symbol(const std::string& symbol) const override {
+        // Hyperliquid uses simple coin symbols: BTC, ETH, SOL
+        // Remove common suffixes and convert to uppercase
+        std::string normalized = symbol;
+        
+        // Remove separators
+        normalized.erase(std::remove(normalized.begin(), normalized.end(), '-'), 
+                        normalized.end());
+        
+        // Convert to uppercase
+        std::transform(normalized.begin(), normalized.end(), normalized.begin(), ::toupper);
+        
+        // Remove USDT/USD/PERP suffixes if present
+        size_t usdt_pos = normalized.find("USDT");
+        if (usdt_pos != std::string::npos) {
+            normalized = normalized.substr(0, usdt_pos);
+        } else {
+            size_t usd_pos = normalized.find("USD");
+            if (usd_pos != std::string::npos) {
+                normalized = normalized.substr(0, usd_pos);
+            }
+        }
+        
+        size_t perp_pos = normalized.find("PERP");
+        if (perp_pos != std::string::npos) {
+            normalized = normalized.substr(0, perp_pos);
+        }
+        
+        return normalized;
+    }
+};
+
+/**
  * @class ExchangeFactory
  * @brief Factory for creating exchange instances
  */
@@ -258,6 +322,8 @@ public:
             return std::make_unique<BinanceExchange>();
         } else if (lower_name == "dydx") {
             return std::make_unique<DydxExchange>();
+        } else if (lower_name == "hyperliquid") {
+            return std::make_unique<HyperliquidExchange>();
         } else {
             throw std::runtime_error("Unsupported exchange: " + name);
         }
@@ -267,7 +333,7 @@ public:
      * @brief Get list of supported exchanges
      */
     static std::vector<std::string> supported_exchanges() {
-        return {"bybit", "binance", "dydx"};
+        return {"bybit", "binance", "dydx", "hyperliquid"};
     }
 };
 

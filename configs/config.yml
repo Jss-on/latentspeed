@@ -24,17 +24,30 @@ log:
 
 # Feed configurations
 feeds:
-  # dYdX V4 Feed
-  - exchange: dydx
+  # Hyperliquid Feed (Perpetual Futures)
+  - exchange: hyperliquid
     symbols:
-      - BTC-USD
-      - ETH-USD
-      - SOL-USD
-      - DOGE-USD
-      - AVAX-USD
+      - BTC      # Bitcoin perpetual
+      - ETH      # Ethereum perpetual
+      - SOL      # Solana perpetual
+      - AVAX     # Avalanche perpetual
+      - ARB      # Arbitrum perpetual
     enable_trades: true
     enable_orderbook: true
     snapshots_only: true
+    snapshot_interval: 1
+
+  # # dYdX V4 Feed
+  # - exchange: dydx
+  #   symbols:
+  #     - BTC-USD
+  #     - ETH-USD
+  #     - SOL-USD
+  #     - DOGE-USD
+  #     - AVAX-USD
+  #   enable_trades: true
+  #   enable_orderbook: true
+  #   snapshots_only: true
 
   # Bybit Feed (commented out - enable as needed)
   # - exchange: bybit

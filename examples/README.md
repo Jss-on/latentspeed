@@ -1,20 +1,45 @@
 # Latentspeed Trading Engine Examples
 
-This directory contains Python examples demonstrating how to interact with the Latentspeed Trading Engine.
+This directory contains examples demonstrating how to use the Latentspeed Trading Engine for both market data streaming and order execution.
 
 ## Prerequisites
 
-1. **Trading Engine Running**: Ensure the Latentspeed Trading Engine is running
+1. **Build the Project**: Ensure the project is built
    ```bash
-   ./build/trading_engine_service
+   mkdir build && cd build
+   cmake ..
+   make
    ```
 
-2. **Python Dependencies**: Install required Python packages
+2. **Python Dependencies** (for Python examples): Install required Python packages
    ```bash
    pip install -r requirements.txt
    ```
 
 ## Available Examples
+
+### C++ Examples (Market Data Streaming)
+
+#### hyperliquid_example.cpp - Hyperliquid Exchange Integration
+Demonstrates market data streaming from Hyperliquid exchange:
+
+```bash
+# Build and run
+./build/hyperliquid_example
+```
+
+**Features:**
+- Basic Hyperliquid connection setup
+- Subscription message generation for trades and orderbook
+- Message parsing examples (trades and L2 orderbook)
+- Symbol normalization (BTC-USDT → BTC)
+- Live market data streaming setup
+
+**Supported Symbols:** BTC, ETH, SOL, AVAX, ARB (perpetuals)
+
+See `docs/HYPERLIQUID_INTEGRATION.md` for full documentation.
+
+### Python Examples (Order Execution)
 
 ### 1. send_order.py - Basic Order Sender
 A comprehensive order sending utility with multiple features:

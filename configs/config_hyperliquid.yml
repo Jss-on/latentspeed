@@ -1,0 +1,46 @@
+# Example configuration for Hyperliquid exchange market data streaming
+# Copy this to configs/config.yml or use with --config flag
+
+exchanges:
+  - name: hyperliquid
+    symbols:
+      - BTC      # Bitcoin perpetual
+      - ETH      # Ethereum perpetual
+      - SOL      # Solana perpetual
+      - AVAX     # Avalanche perpetual
+      - ARB      # Arbitrum perpetual
+    enable_trades: true
+    enable_orderbook: true
+    snapshots_only: true
+    snapshot_interval: 1  # seconds
+    reconnect_attempts: 10
+    reconnect_delay_ms: 5000
+
+# Multi-exchange configuration example
+# exchanges:
+#   - name: hyperliquid
+#     symbols: [BTC, ETH, SOL]
+#     enable_trades: true
+#     enable_orderbook: true
+#   
+#   - name: bybit
+#     symbols: [BTCUSDT, ETHUSDT, SOLUSDT]
+#     enable_trades: true
+#     enable_orderbook: true
+#   
+#   - name: dydx
+#     symbols: [BTC-USD, ETH-USD, SOL-USD]
+#     enable_trades: true
+#     enable_orderbook: true
+
+# Logging configuration
+logging:
+  level: info  # debug, info, warn, error
+  file: logs/hyperliquid.log
+  console: true
+
+# Performance settings
+performance:
+  buffer_size: 65536
+  max_message_size: 1048576
+  thread_pool_size: 4
