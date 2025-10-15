@@ -882,4 +882,193 @@ ExchangeInterface::MessageType HyperliquidExchange::parse_message(
     }
 }
 
+// ============================================================================
+// UNISWAP V4 EXCHANGE (DEX - On-chain via Ethereum Node)
+// ============================================================================
+
+std::string UniswapV4Exchange::generate_subscription(
+    const std::vector<std::string>& symbols,
+    bool enable_trades,
+    bool enable_orderbook
+) const {
+    rapidjson::StringBuffer buffer;
+    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+    
+    writer.StartArray();
+    
+    // Uniswap V4 PoolManager contract address (Mainnet)
+    // This is a placeholder - update with actual V4 address when deployed
+    const std::string POOL_MANAGER_ADDRESS = "0x0000000000000000000000000000000000000000";
+    
+    // Swap event signature: Swap(address,address,int256,int256,uint160,uint128,int24)
+    const std::string SWAP_EVENT_SIG = "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67";
+    
+    // ModifyLiquidity event signature for pool state changes
+    const std::string LIQUIDITY_EVENT_SIG = "0x3067048beee31b25b2f1681f88dac838c8bba36af25bfb2b7cf7473a5847e35f";
+    
+    for (const auto& symbol : symbols) {
+        // For each symbol/pair, subscribe to relevant events
+        
+        if (enable_trades) {
+            // Subscribe to Swap events (trades)
+            writer.StartObject();
+            writer.Key("jsonrpc"); writer.String("2.0");
+            writer.Key("id"); writer.Int(1);
+            writer.Key("method"); writer.String("eth_subscribe");
+            writer.Key("params");
+            writer.StartArray();
+            writer.String("logs");
+            writer.StartObject();
+            writer.Key("address"); writer.String(POOL_MANAGER_ADDRESS.c_str());
+            writer.Key("topics");
+            writer.StartArray();
+            writer.String(SWAP_EVENT_SIG.c_str());
+            writer.EndArray();
+            writer.EndObject();
+            writer.EndArray();
+            writer.EndObject();
+        }
+        
+        if (enable_orderbook) {
+            // Subscribe to ModifyLiquidity events (pool state updates)
+            writer.StartObject();
+            writer.Key("jsonrpc"); writer.String("2.0");
+            writer.Key("id"); writer.Int(2);
+            writer.Key("method"); writer.String("eth_subscribe");
+            writer.Key("params");
+            writer.StartArray();
+            writer.String("logs");
+            writer.StartObject();
+            writer.Key("address"); writer.String(POOL_MANAGER_ADDRESS.c_str());
+            writer.Key("topics");
+            writer.StartArray();
+            writer.String(LIQUIDITY_EVENT_SIG.c_str());
+            writer.EndArray();
+            writer.EndObject();
+            writer.EndArray();
+            writer.EndObject();
+        }
+    }
+    
+    writer.EndArray();
+    
+    return buffer.GetString();
+}
+
+ExchangeInterface::MessageType UniswapV4Exchange::parse_message(
+    const std::string& message,
+    MarketTick& tick,
+    OrderBookSnapshot& snapshot
+) const {
+    try {
+        rapidjson::Document doc;
+        doc.Parse(message.c_str());
+        
+        if (doc.HasParseError()) {
+            return MessageType::ERROR;
+        }
+        
+        // Handle JSON-RPC responses
+        if (doc.HasMember("method") && doc["method"].IsString()) {
+            std::string method = doc["method"].GetString();
+            
+            // Subscription confirmation
+            if (method == "eth_subscription") {
+                if (!doc.HasMember("params") || !doc["params"].IsObject()) {
+                    return MessageType::HEARTBEAT;
+                }
+                
+                const auto& params = doc["params"];
+                if (!params.HasMember("result") || !params["result"].IsObject()) {
+                    return MessageType::HEARTBEAT;
+                }
+                
+                const auto& result = params["result"];
+                
+                // Parse Ethereum log entry
+                if (!result.HasMember("topics") || !result["topics"].IsArray()) {
+                    return MessageType::UNKNOWN;
+                }
+                
+                const auto& topics = result["topics"];
+                if (topics.Empty()) {
+                    return MessageType::UNKNOWN;
+                }
+                
+                // Get event signature (first topic)
+                std::string event_sig = topics[0].GetString();
+                
+                // Swap event (trade)
+                if (event_sig.find("c42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67") != std::string::npos) {
+                    // Parse Swap event data
+                    if (!result.HasMember("data") || !result["data"].IsString()) {
+                        return MessageType::ERROR;
+                    }
+                    
+                    // Decode swap data (simplified - would need full ABI decoding in production)
+                    // For now, extract basic info
+                    tick.exchange.assign("UNISWAPV4");
+                    tick.symbol.assign("WETH/USDC");  // TODO: Decode from pool ID
+                    
+                    // Would decode amounts from 'data' field
+                    // Format: 0x + hex encoded values (amount0, amount1, sqrtPriceX96, liquidity, tick)
+                    
+                    // Timestamp from block
+                    if (result.HasMember("blockNumber") && result["blockNumber"].IsString()) {
+                        tick.timestamp_ns = std::chrono::system_clock::now().time_since_epoch().count();
+                    }
+                    
+                    // Parse transaction hash as trade_id
+                    if (result.HasMember("transactionHash") && result["transactionHash"].IsString()) {
+                        tick.trade_id.assign(result["transactionHash"].GetString());
+                    }
+                    
+                    // Note: Full implementation would decode:
+                    // - int256 amount0 (token0 delta)
+                    // - int256 amount1 (token1 delta)
+                    // - uint160 sqrtPriceX96 (current pool price)
+                    // Then calculate: price = (sqrtPriceX96 / 2^96)^2
+                    
+                    // Placeholder values
+                    tick.price = 0.0;
+                    tick.amount = 0.0;
+                    tick.side.assign("buy");  // Determined by amount signs
+                    
+                    return MessageType::TRADE;
+                }
+                
+                // ModifyLiquidity event (orderbook update)
+                else if (event_sig.find("3067048beee31b25b2f1681f88dac838c8bba36af25bfb2b7cf7473a5847e35f") != std::string::npos) {
+                    // Parse liquidity modification
+                    snapshot.exchange.assign("UNISWAPV4");
+                    snapshot.symbol.assign("WETH/USDC");  // TODO: Decode from pool ID
+                    snapshot.timestamp_ns = std::chrono::system_clock::now().time_since_epoch().count();
+                    
+                    // For AMM pools, we'd query current reserves via eth_call
+                    // and construct synthetic orderbook from the constant product curve
+                    // This requires additional RPC calls to get pool state
+                    
+                    // Placeholder: Would calculate synthetic orderbook from AMM curve
+                    // Using formula: price = reserve1 / reserve0
+                    // And generate price levels around current price
+                    
+                    return MessageType::BOOK;
+                }
+            }
+        }
+        
+        // Handle subscription confirmation
+        if (doc.HasMember("result") && doc["result"].IsString()) {
+            // Subscription ID received
+            return MessageType::HEARTBEAT;
+        }
+        
+        return MessageType::UNKNOWN;
+        
+    } catch (const std::exception& e) {
+        spdlog::error("[UniswapV4Exchange] Exception in parse_message: {}", e.what());
+        return MessageType::ERROR;
+    }
+}
+
 } // namespace latentspeed

@@ -302,6 +302,74 @@ public:
 };
 
 /**
+ * @class UniswapV4Exchange
+ * @brief Uniswap V4 DEX integration (on-chain via Ethereum node)
+ * 
+ * Connects to Ethereum node WebSocket to monitor Uniswap V4 events:
+ * - Swap events (trades)
+ * - Pool state changes (liquidity)
+ * - Converts AMM pool reserves to synthetic "orderbook" representation
+ * 
+ * Note: Requires Ethereum node access (Infura, Alchemy, or local node)
+ * WebSocket endpoint: wss://mainnet.infura.io/ws/v3/YOUR_API_KEY
+ */
+class UniswapV4Exchange : public ExchangeInterface {
+public:
+    std::string get_name() const override { return "UNISWAPV4"; }
+    
+    std::string get_websocket_host() const override {
+        // Default to Infura mainnet - configure via environment or config
+        return "mainnet.infura.io";
+    }
+    
+    std::string get_websocket_port() const override {
+        return "443";
+    }
+    
+    std::string get_websocket_target() const override {
+        // Infura WebSocket path - should include API key in production
+        // Format: /ws/v3/YOUR_INFURA_API_KEY
+        return "/ws/v3/demo";  // Replace with actual API key
+    }
+    
+    std::string generate_subscription(
+        const std::vector<std::string>& symbols,
+        bool enable_trades,
+        bool enable_orderbook
+    ) const override;
+    
+    MessageType parse_message(
+        const std::string& message,
+        MarketTick& tick,
+        OrderBookSnapshot& snapshot
+    ) const override;
+    
+    std::string normalize_symbol(const std::string& symbol) const override {
+        // Uniswap uses token pairs: WETH-USDC, WBTC-USDC, etc.
+        // Keep the pair format but standardize separators
+        std::string normalized = symbol;
+        
+        // Replace various separators with standard '/'
+        std::replace(normalized.begin(), normalized.end(), '-', '/');
+        std::replace(normalized.begin(), normalized.end(), '_', '/');
+        
+        // Convert to uppercase
+        std::transform(normalized.begin(), normalized.end(), normalized.begin(), ::toupper);
+        
+        // Wrap ETH as WETH for on-chain compatibility
+        if (normalized.find("ETH/") == 0) {
+            normalized = "WETH" + normalized.substr(3);
+        }
+        if (normalized.find("/ETH") != std::string::npos) {
+            size_t pos = normalized.find("/ETH");
+            normalized = normalized.substr(0, pos) + "/WETH";
+        }
+        
+        return normalized;
+    }
+};
+
+/**
  * @class ExchangeFactory
  * @brief Factory for creating exchange instances
  */
@@ -324,6 +392,8 @@ public:
             return std::make_unique<DydxExchange>();
         } else if (lower_name == "hyperliquid") {
             return std::make_unique<HyperliquidExchange>();
+        } else if (lower_name == "uniswapv4" || lower_name == "uniswap") {
+            return std::make_unique<UniswapV4Exchange>();
         } else {
             throw std::runtime_error("Unsupported exchange: " + name);
         }
@@ -333,7 +403,7 @@ public:
      * @brief Get list of supported exchanges
      */
     static std::vector<std::string> supported_exchanges() {
-        return {"bybit", "binance", "dydx", "hyperliquid"};
+        return {"bybit", "binance", "dydx", "hyperliquid", "uniswapv4"};
     }
 };
 

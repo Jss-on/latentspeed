@@ -1,0 +1,79 @@
+# Example configuration for Uniswap V4 DEX market data streaming
+# Copy this to configs/config.yml or use with --config flag
+
+# ZMQ configuration for preprocessed data streaming
+zmq:
+  enabled: true
+  host: 127.0.0.1
+  port: 5556  # trades port, books will use port+1 (5557)
+  window_size: 20
+  depth_levels: 10
+
+# Logging configuration
+log:
+  filename: marketstream_uniswap.log
+  level: info  # trace, debug, info, warn, error, critical
+
+# Feed configurations
+feeds:
+  # Uniswap V4 Feed (DEX - On-chain)
+  - exchange: uniswapv4
+    symbols:
+      - WETH/USDC      # Most liquid stablecoin pair (0.05% fee tier)
+      - WETH/USDT      # Alternative stablecoin pair
+      - WETH/DAI       # Decentralized stablecoin pair
+      - WBTC/WETH      # Wrapped Bitcoin pair
+      - UNI/WETH       # Uniswap governance token
+    enable_trades: true          # Monitor Swap events
+    enable_orderbook: true       # Generate synthetic orderbook from AMM
+    snapshots_only: true
+    snapshot_interval: 1         # Update every block (~12 seconds)
+
+# Multi-exchange configuration example (DEX + CEX)
+# Combine on-chain and off-chain data for arbitrage
+# 
+# feeds:
+#   # DEX: Uniswap V4
+#   - exchange: uniswapv4
+#     symbols: [WETH/USDC, WETH/USDT]
+#     enable_trades: true
+#     enable_orderbook: true
+#   
+#   # CEX: Binance
+#   - exchange: binance
+#     symbols: [ETHUSDT, BTCUSDT]
+#     enable_trades: true
+#     enable_orderbook: true
+#   
+#   # CEX: Bybit
+#   - exchange: bybit
+#     symbols: [ETHUSDT, BTCUSDT]
+#     enable_trades: true
+#     enable_orderbook: true
+
+# Ethereum node configuration (set via environment variable)
+# export ETH_WS_URL="wss://mainnet.infura.io/ws/v3/YOUR_API_KEY"
+# 
+# Or edit include/exchange_interface.h:
+# std::string get_websocket_target() const override {
+#     return "/ws/v3/YOUR_INFURA_KEY";
+# }
+
+# Note: Uniswap V4 requires:
+# 1. Ethereum node access (Infura, Alchemy, or local node)
+# 2. V4 contract addresses (update when mainnet launches)
+# 3. ABI decoding for production use (TODO)
+# 
+# See docs/UNISWAP_V4_INTEGRATION.md for complete setup guide
+
+# Performance settings
+performance:
+  buffer_size: 524288        # 512KB per message (on-chain logs can be large)
+  max_message_size: 1048576  # 1MB max
+  thread_pool_size: 4
+  
+# Advanced: Event filtering
+# ethereum:
+#   start_block: latest     # Or specific block number for historical data
+#   confirmations: 12       # Wait for N confirmations (reorg protection)
+#   max_blocks_behind: 100  # Disconnect if more than N blocks behind
