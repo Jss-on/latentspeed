@@ -402,10 +402,20 @@ ExchangeInterface::MessageType DydxExchange::parse_message(
             return MessageType::ERROR;
         }
     
-    // Check for subscription response
+    // Check for connection/status messages without data
     if (doc.HasMember("type") && doc["type"].IsString()) {
         std::string type = doc["type"].GetString();
-        if (type == "subscribed" || type == "unsubscribed" || type == "connected") {
+        
+        // Only return HEARTBEAT if there's no actual data to parse
+        // "subscribed" and "channel_batch_data" contain actual market data in "contents"
+        if (type == "connected" || type == "unsubscribed") {
+            return MessageType::HEARTBEAT;
+        }
+        
+        // For "subscribed" and "channel_batch_data", continue parsing if contents exist
+        if ((type == "subscribed" || type == "channel_batch_data") && 
+            !doc.HasMember("contents")) {
+            // Acknowledgment without data
             return MessageType::HEARTBEAT;
         }
     }
@@ -425,21 +435,41 @@ ExchangeInterface::MessageType DydxExchange::parse_message(
     
     // Trade message (v4_trades)
     if (channel == "v4_trades") {
-        if (!doc.HasMember("contents") || !doc["contents"].IsObject()) {
+        if (!doc.HasMember("contents")) {
+            spdlog::error("[DydxExchange] Trade message missing 'contents' for {}", symbol);
             return MessageType::ERROR;
         }
         
         const auto& contents = doc["contents"];
+        const rapidjson::Value* trades_array = nullptr;
         
-        // Check if it's batched or single trade
-        if (contents.HasMember("trades") && contents["trades"].IsArray()) {
-            const auto& trades = contents["trades"].GetArray();
-            if (trades.Empty()) {
-                return MessageType::UNKNOWN;
+        spdlog::debug("[DydxExchange] Trade {} - contents is {}", 
+                     symbol, 
+                     contents.IsObject() ? "object" : (contents.IsArray() ? "array" : "unknown"));
+        
+        // Handle two formats:
+        // 1. Initial snapshot: contents is object with "trades" array
+        // 2. Real-time update: contents is array, each element has "trades" array
+        if (contents.IsObject() && contents.HasMember("trades") && contents["trades"].IsArray()) {
+            // Format 1: {"contents": {"trades": [...]}}
+            trades_array = &contents["trades"];
+            spdlog::debug("[DydxExchange] Trade {} - using format 1 (object)", symbol);
+        } else if (contents.IsArray() && !contents.GetArray().Empty()) {
+            // Format 2: {"contents": [{"trades": [...]}]}
+            const auto& first_update = contents[0];
+            if (first_update.IsObject() && first_update.HasMember("trades") && first_update["trades"].IsArray()) {
+                trades_array = &first_update["trades"];
+                spdlog::debug("[DydxExchange] Trade {} - using format 2 (array)", symbol);
+            } else {
+                spdlog::error("[DydxExchange] Trade {} - format 2 but no trades in first element", symbol);
             }
-            
+        } else {
+            spdlog::error("[DydxExchange] Trade {} - unrecognized contents format", symbol);
+        }
+        
+        if (trades_array && !trades_array->GetArray().Empty()) {
             // Take first trade from batch
-            const auto& trade = trades[0];
+            const auto& trade = (*trades_array)[0];
             
             tick.timestamp_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::system_clock::now().time_since_epoch()
@@ -471,13 +501,16 @@ ExchangeInterface::MessageType DydxExchange::parse_message(
             }
             
             return MessageType::TRADE;
+        } else {
+            spdlog::debug("[DydxExchange] Could not extract trades array from message for {}", symbol);
+            return MessageType::ERROR;
         }
     }
     
     // Orderbook message (v4_orderbook)
     if (channel == "v4_orderbook") {
         if (!doc.HasMember("contents")) {
-            spdlog::debug("[DydxExchange] Orderbook message missing 'contents' field");
+            spdlog::error("[DydxExchange] Orderbook message missing 'contents' field for {}", symbol);
             return MessageType::ERROR;
         }
         
@@ -487,85 +520,123 @@ ExchangeInterface::MessageType DydxExchange::parse_message(
         snapshot.exchange.assign("DYDX");
         snapshot.symbol.assign(symbol);
         
-        // Handle batch format: contents is an array of updates
         const auto& contents_value = doc["contents"];
         
-        if (!contents_value.IsArray()) {
-            spdlog::debug("[DydxExchange] Contents is not an array for symbol {}", symbol);
-            return MessageType::ERROR;
-        }
+        // Debug: log format type
+        spdlog::debug("[DydxExchange] Orderbook {} - contents is {}", 
+                     symbol, 
+                     contents_value.IsObject() ? "object" : (contents_value.IsArray() ? "array" : "unknown"));
         
-        const auto& contents_array = contents_value.GetArray();
-        if (contents_array.Empty()) {
-            spdlog::debug("[DydxExchange] Empty contents array for {}", symbol);
-            return MessageType::UNKNOWN;
-        }
-        
-        // Merge all updates in the batch (dYdX sends incremental updates)
-        // We'll collect all bid/ask updates across all batch elements
         std::map<double, double> merged_bids;  // price -> quantity
         std::map<double, double> merged_asks;
         
-        for (const auto& update : contents_array) {
-            if (!update.IsObject()) continue;
-            
+        // Handle two formats:
+        // 1. Initial snapshot: contents is object with "bids"/"asks" arrays of objects
+        // 2. Real-time updates: contents is array of update objects
+        
+        auto parse_book_levels = [&](const rapidjson::Value& book_obj) {
             // Parse bids from this update
-            if (update.HasMember("bids") && update["bids"].IsArray()) {
-                const auto& bids = update["bids"].GetArray();
+            if (book_obj.HasMember("bids") && book_obj["bids"].IsArray()) {
+                const auto& bids = book_obj["bids"].GetArray();
                 for (const auto& level : bids) {
+                    // Handle both formats: ["price", "size"] or {"price": "...", "size": "..."}
+                    double price = 0.0, quantity = 0.0;
+                    
                     if (level.IsArray() && level.GetArray().Size() >= 2) {
+                        // Format: [["price", "size"], ...]
                         try {
-                            double price = 0.0, quantity = 0.0;
                             if (level[0].IsString()) {
                                 price = std::stod(level[0].GetString());
                             }
                             if (level[1].IsString()) {
                                 quantity = std::stod(level[1].GetString());
                             }
-                            if (price > 0.0) {
-                                if (quantity == 0.0) {
-                                    // Remove level if quantity is 0
-                                    merged_bids.erase(price);
-                                } else {
-                                    merged_bids[price] = quantity;
-                                }
+                        } catch (const std::exception& e) {
+                            spdlog::warn("[DydxExchange] Failed to parse bid level (array): {}", e.what());
+                            continue;
+                        }
+                    } else if (level.IsObject()) {
+                        // Format: [{"price": "...", "size": "..."}, ...]
+                        try {
+                            if (level.HasMember("price") && level["price"].IsString()) {
+                                price = std::stod(level["price"].GetString());
+                            }
+                            if (level.HasMember("size") && level["size"].IsString()) {
+                                quantity = std::stod(level["size"].GetString());
                             }
                         } catch (const std::exception& e) {
-                            spdlog::warn("[DydxExchange] Failed to parse bid level: {}", e.what());
+                            spdlog::warn("[DydxExchange] Failed to parse bid level (object): {}", e.what());
                             continue;
+                        }
+                    }
+                    
+                    if (price > 0.0) {
+                        if (quantity == 0.0) {
+                            merged_bids.erase(price);
+                        } else {
+                            merged_bids[price] = quantity;
                         }
                     }
                 }
             }
             
-            // Parse asks from this update
-            if (update.HasMember("asks") && update["asks"].IsArray()) {
-                const auto& asks = update["asks"].GetArray();
+            // Parse asks from this update  
+            if (book_obj.HasMember("asks") && book_obj["asks"].IsArray()) {
+                const auto& asks = book_obj["asks"].GetArray();
                 for (const auto& level : asks) {
+                    double price = 0.0, quantity = 0.0;
+                    
                     if (level.IsArray() && level.GetArray().Size() >= 2) {
                         try {
-                            double price = 0.0, quantity = 0.0;
                             if (level[0].IsString()) {
                                 price = std::stod(level[0].GetString());
                             }
                             if (level[1].IsString()) {
                                 quantity = std::stod(level[1].GetString());
                             }
-                            if (price > 0.0) {
-                                if (quantity == 0.0) {
-                                    // Remove level if quantity is 0
-                                    merged_asks.erase(price);
-                                } else {
-                                    merged_asks[price] = quantity;
-                                }
+                        } catch (const std::exception& e) {
+                            spdlog::warn("[DydxExchange] Failed to parse ask level (array): {}", e.what());
+                            continue;
+                        }
+                    } else if (level.IsObject()) {
+                        try {
+                            if (level.HasMember("price") && level["price"].IsString()) {
+                                price = std::stod(level["price"].GetString());
+                            }
+                            if (level.HasMember("size") && level["size"].IsString()) {
+                                quantity = std::stod(level["size"].GetString());
                             }
                         } catch (const std::exception& e) {
-                            spdlog::warn("[DydxExchange] Failed to parse ask level: {}", e.what());
+                            spdlog::warn("[DydxExchange] Failed to parse ask level (object): {}", e.what());
                             continue;
+                        }
+                    }
+                    
+                    if (price > 0.0) {
+                        if (quantity == 0.0) {
+                            merged_asks.erase(price);
+                        } else {
+                            merged_asks[price] = quantity;
                         }
                     }
                 }
             }
+        };
+        
+        // Apply the parser to the appropriate format
+        if (contents_value.IsObject()) {
+            // Format 1: Initial snapshot - {"contents": {"bids": [...], "asks": [...]}}
+            parse_book_levels(contents_value);
+        } else if (contents_value.IsArray()) {
+            // Format 2: Real-time updates - {"contents": [{"bids": [...]}, {"asks": [...]}]}
+            for (const auto& update : contents_value.GetArray()) {
+                if (update.IsObject()) {
+                    parse_book_levels(update);
+                }
+            }
+        } else {
+            spdlog::debug("[DydxExchange] Unsupported contents format for {}", symbol);
+            return MessageType::ERROR;
         }
         
         // Convert merged bids to snapshot (top 10, highest to lowest)

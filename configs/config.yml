@@ -20,7 +20,7 @@ zmq:
 # Logging configuration
 log:
   filename: marketstream.log
-  level: info  # trace, debug, info, warn, error, critical
+  level: debug  # trace, debug, info, warn, error, critical
 
 # Feed configurations
 feeds:

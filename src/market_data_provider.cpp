@@ -37,8 +37,8 @@ MarketDataProvider::MarketDataProvider(const std::string& exchange,
     // Initialize lock-free queues
     tick_queue_ = std::make_unique<hft::LockFreeSPSCQueue<MarketTick, 4096>>();
     orderbook_queue_ = std::make_unique<hft::LockFreeSPSCQueue<OrderBookSnapshot, 2048>>();
-    // Initialize raw message queue from WebSocket (fixed-size buffer for lock-free queue)
-    message_queue_ = std::make_unique<hft::LockFreeSPSCQueue<MessageBuffer, 8192>>();
+    // Initialize raw message queue from WebSocket (256KB buffer, 4096 depth = ~1GB total)
+    message_queue_ = std::make_unique<hft::LockFreeSPSCQueue<MessageBuffer, 4096>>();
     
     spdlog::info("[MarketData] Memory pools and queues initialized");
 }
@@ -270,9 +270,16 @@ void MarketDataProvider::connect_websocket() {
             
             // Copy message to fixed-size buffer for lock-free queue
             MessageBuffer msg_buffer;
-            std::memcpy(msg_buffer.data(), message.c_str(), 
-                       std::min(message.size(), msg_buffer.size() - 1));
-            msg_buffer[std::min(message.size(), msg_buffer.size() - 1)] = '\0';
+            size_t copy_size = std::min(message.size(), msg_buffer.size() - 1);
+            
+            // Warn if message is truncated
+            if (message.size() >= msg_buffer.size()) {
+                spdlog::warn("[MarketData] Message too large ({} bytes), truncating to {} bytes", 
+                           message.size(), msg_buffer.size() - 1);
+            }
+            
+            std::memcpy(msg_buffer.data(), message.c_str(), copy_size);
+            msg_buffer[copy_size] = '\0';
             
             // Push to processing queue
             if (!message_queue_->try_push(msg_buffer)) {
