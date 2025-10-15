@@ -45,34 +45,24 @@ add_executable(trading_engine_service
   src/exchange/bybit_client.cpp
 )
 
-# Market Data Test executable
-add_executable(test_market_data
-  src/test_market_data.cpp
-  src/market_data_provider.cpp
-  src/exchange_interface.cpp
-  src/feed_handler.cpp
-)
+# # dYdX Provider example
+# add_executable(dydx_provider
+#   examples/dydx_provider.cpp
+#   src/market_data_provider.cpp
+#   src/exchange_interface.cpp
+#   src/feed_handler.cpp
+# )
 
-# Multi-Exchange Provider example
-add_executable(multi_exchange_provider
-  examples/multi_exchange_provider.cpp
-  src/market_data_provider.cpp
-  src/exchange_interface.cpp
-  src/feed_handler.cpp
-)
-
-# dYdX Provider example
-add_executable(dydx_provider
-  examples/dydx_provider.cpp
+# MarketStream - Production Market Data Provider (YAML-based)
+add_executable(marketstream
+  src/marketstream.cpp
   src/market_data_provider.cpp
   src/exchange_interface.cpp
   src/feed_handler.cpp
 )
 
 target_include_directories(trading_engine_service PRIVATE ${CMAKE_SOURCE_DIR}/include)
-target_include_directories(test_market_data PRIVATE ${CMAKE_SOURCE_DIR}/include)
-target_include_directories(multi_exchange_provider PRIVATE ${CMAKE_SOURCE_DIR}/include)
-target_include_directories(dydx_provider PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_include_directories(marketstream PRIVATE ${CMAKE_SOURCE_DIR}/include)
 
 if(TARGET args)
     target_link_libraries(trading_engine_service PRIVATE args)
@@ -90,32 +80,8 @@ target_link_libraries(trading_engine_service PRIVATE
   spdlog::spdlog
 )
 
-# Test Market Data executable libraries
-target_link_libraries(test_market_data PRIVATE 
-  OpenSSL::SSL 
-  OpenSSL::Crypto 
-  Threads::Threads 
-  ${ZMQ_LIBRARIES} 
-  Boost::system
-  rapidjson
-  yaml-cpp
-  spdlog::spdlog
-)
-
-# Multi-Exchange Provider executable libraries
-target_link_libraries(multi_exchange_provider PRIVATE 
-  OpenSSL::SSL 
-  OpenSSL::Crypto 
-  Threads::Threads 
-  ${ZMQ_LIBRARIES} 
-  Boost::system
-  rapidjson
-  yaml-cpp
-  spdlog::spdlog
-)
-
-# dYdX Provider executable libraries
-target_link_libraries(dydx_provider PRIVATE 
+# MarketStream executable libraries
+target_link_libraries(marketstream PRIVATE 
   OpenSSL::SSL 
   OpenSSL::Crypto 
   Threads::Threads 
@@ -133,17 +99,7 @@ if(UNIX AND NOT APPLE)
         rt       # Real-time extensions for scheduling
     )
     
-    target_link_libraries(test_market_data PRIVATE 
-        pthread  # POSIX threads for CPU affinity
-        rt       # Real-time extensions for scheduling
-    )
-    
-    target_link_libraries(multi_exchange_provider PRIVATE 
-        pthread  # POSIX threads for CPU affinity
-        rt       # Real-time extensions for scheduling
-    )
-    
-    target_link_libraries(dydx_provider PRIVATE 
+    target_link_libraries(marketstream PRIVATE 
         pthread  # POSIX threads for CPU affinity
         rt       # Real-time extensions for scheduling
     )

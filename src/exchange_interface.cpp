@@ -11,6 +11,7 @@
 #include <rapidjson/stringbuffer.h>
 #include <spdlog/spdlog.h>
 #include <sstream>
+#include <map>
 
 namespace latentspeed {
 
@@ -392,12 +393,14 @@ ExchangeInterface::MessageType DydxExchange::parse_message(
     MarketTick& tick,
     OrderBookSnapshot& snapshot
 ) const {
-    rapidjson::Document doc;
-    doc.Parse(message.c_str());
-    
-    if (doc.HasParseError()) {
-        return MessageType::ERROR;
-    }
+    try {
+        rapidjson::Document doc;
+        doc.Parse(message.c_str());
+        
+        if (doc.HasParseError()) {
+            spdlog::debug("[DydxExchange] JSON parse error at offset {}", doc.GetErrorOffset());
+            return MessageType::ERROR;
+        }
     
     // Check for subscription response
     if (doc.HasMember("type") && doc["type"].IsString()) {
@@ -473,11 +476,10 @@ ExchangeInterface::MessageType DydxExchange::parse_message(
     
     // Orderbook message (v4_orderbook)
     if (channel == "v4_orderbook") {
-        if (!doc.HasMember("contents") || !doc["contents"].IsObject()) {
+        if (!doc.HasMember("contents")) {
+            spdlog::debug("[DydxExchange] Orderbook message missing 'contents' field");
             return MessageType::ERROR;
         }
-        
-        const auto& contents = doc["contents"];
         
         snapshot.timestamp_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::system_clock::now().time_since_epoch()
@@ -485,44 +487,117 @@ ExchangeInterface::MessageType DydxExchange::parse_message(
         snapshot.exchange.assign("DYDX");
         snapshot.symbol.assign(symbol);
         
-        // Parse bids
-        if (contents.HasMember("bids") && contents["bids"].IsArray()) {
-            const auto& bids = contents["bids"].GetArray();
-            size_t count = std::min(static_cast<size_t>(bids.Size()), static_cast<size_t>(10));
-            for (size_t i = 0; i < count; ++i) {
-                if (bids[i].IsObject()) {
-                    const auto& level = bids[i].GetObject();
-                    if (level.HasMember("price") && level["price"].IsString()) {
-                        snapshot.bids[i].price = std::stod(level["price"].GetString());
+        // Handle batch format: contents is an array of updates
+        const auto& contents_value = doc["contents"];
+        
+        if (!contents_value.IsArray()) {
+            spdlog::debug("[DydxExchange] Contents is not an array for symbol {}", symbol);
+            return MessageType::ERROR;
+        }
+        
+        const auto& contents_array = contents_value.GetArray();
+        if (contents_array.Empty()) {
+            spdlog::debug("[DydxExchange] Empty contents array for {}", symbol);
+            return MessageType::UNKNOWN;
+        }
+        
+        // Merge all updates in the batch (dYdX sends incremental updates)
+        // We'll collect all bid/ask updates across all batch elements
+        std::map<double, double> merged_bids;  // price -> quantity
+        std::map<double, double> merged_asks;
+        
+        for (const auto& update : contents_array) {
+            if (!update.IsObject()) continue;
+            
+            // Parse bids from this update
+            if (update.HasMember("bids") && update["bids"].IsArray()) {
+                const auto& bids = update["bids"].GetArray();
+                for (const auto& level : bids) {
+                    if (level.IsArray() && level.GetArray().Size() >= 2) {
+                        try {
+                            double price = 0.0, quantity = 0.0;
+                            if (level[0].IsString()) {
+                                price = std::stod(level[0].GetString());
+                            }
+                            if (level[1].IsString()) {
+                                quantity = std::stod(level[1].GetString());
+                            }
+                            if (price > 0.0) {
+                                if (quantity == 0.0) {
+                                    // Remove level if quantity is 0
+                                    merged_bids.erase(price);
+                                } else {
+                                    merged_bids[price] = quantity;
+                                }
+                            }
+                        } catch (const std::exception& e) {
+                            spdlog::warn("[DydxExchange] Failed to parse bid level: {}", e.what());
+                            continue;
+                        }
                     }
-                    if (level.HasMember("size") && level["size"].IsString()) {
-                        snapshot.bids[i].quantity = std::stod(level["size"].GetString());
+                }
+            }
+            
+            // Parse asks from this update
+            if (update.HasMember("asks") && update["asks"].IsArray()) {
+                const auto& asks = update["asks"].GetArray();
+                for (const auto& level : asks) {
+                    if (level.IsArray() && level.GetArray().Size() >= 2) {
+                        try {
+                            double price = 0.0, quantity = 0.0;
+                            if (level[0].IsString()) {
+                                price = std::stod(level[0].GetString());
+                            }
+                            if (level[1].IsString()) {
+                                quantity = std::stod(level[1].GetString());
+                            }
+                            if (price > 0.0) {
+                                if (quantity == 0.0) {
+                                    // Remove level if quantity is 0
+                                    merged_asks.erase(price);
+                                } else {
+                                    merged_asks[price] = quantity;
+                                }
+                            }
+                        } catch (const std::exception& e) {
+                            spdlog::warn("[DydxExchange] Failed to parse ask level: {}", e.what());
+                            continue;
+                        }
                     }
                 }
             }
         }
         
-        // Parse asks
-        if (contents.HasMember("asks") && contents["asks"].IsArray()) {
-            const auto& asks = contents["asks"].GetArray();
-            size_t count = std::min(static_cast<size_t>(asks.Size()), static_cast<size_t>(10));
-            for (size_t i = 0; i < count; ++i) {
-                if (asks[i].IsObject()) {
-                    const auto& level = asks[i].GetObject();
-                    if (level.HasMember("price") && level["price"].IsString()) {
-                        snapshot.asks[i].price = std::stod(level["price"].GetString());
-                    }
-                    if (level.HasMember("size") && level["size"].IsString()) {
-                        snapshot.asks[i].quantity = std::stod(level["size"].GetString());
-                    }
-                }
-            }
+        // Convert merged bids to snapshot (top 10, highest to lowest)
+        size_t bid_idx = 0;
+        for (auto it = merged_bids.rbegin(); it != merged_bids.rend() && bid_idx < 10; ++it, ++bid_idx) {
+            snapshot.bids[bid_idx].price = it->first;
+            snapshot.bids[bid_idx].quantity = it->second;
+        }
+        
+        // Convert merged asks to snapshot (top 10, lowest to highest)
+        size_t ask_idx = 0;
+        for (auto it = merged_asks.begin(); it != merged_asks.end() && ask_idx < 10; ++it, ++ask_idx) {
+            snapshot.asks[ask_idx].price = it->first;
+            snapshot.asks[ask_idx].quantity = it->second;
+        }
+        
+ 
+        // Validate we have at least one bid and one ask
+        if (merged_bids.empty() && merged_asks.empty()) {
+            spdlog::debug("[DydxExchange] No valid bid/ask levels for {}", symbol);
+            return MessageType::UNKNOWN;
         }
         
         return MessageType::BOOK;
     }
     
     return MessageType::UNKNOWN;
+    
+    } catch (const std::exception& e) {
+        spdlog::error("[DydxExchange] Exception in parse_message: {}", e.what());
+        return MessageType::ERROR;
+    }
 }
 
 } // namespace latentspeed
