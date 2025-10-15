@@ -425,9 +425,10 @@ void MarketDataProvider::send_subscription() {
     spdlog::info("[MarketData] Subscription message: {}", sub_msg);
     
     try {
-        // For dYdX, the subscription message is a JSON array of individual subscriptions
+        // For dYdX and Hyperliquid, the subscription message is a JSON array of individual subscriptions
         // We need to send each one separately
-        if (exchange_interface_ && exchange_interface_->get_name() == "DYDX") {
+        if (exchange_interface_ && 
+            (exchange_interface_->get_name() == "DYDX" || exchange_interface_->get_name() == "HYPERLIQUID")) {
             rapidjson::Document doc;
             doc.Parse(sub_msg.c_str());
             
@@ -439,12 +440,13 @@ void MarketDataProvider::send_subscription() {
                     
                     std::string individual_sub = buffer.GetString();
                     size_t bytes = ws_stream_->write(boost::asio::buffer(individual_sub));
-                    spdlog::info("[MarketData] Sent dYdX subscription ({} bytes): {}", bytes, individual_sub);
+                    spdlog::info("[MarketData] Sent {} subscription ({} bytes): {}", 
+                                exchange_interface_->get_name(), bytes, individual_sub);
                     
                     // Small delay between subscriptions
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 }
-                spdlog::info("[MarketData] All dYdX subscriptions sent");
+                spdlog::info("[MarketData] All {} subscriptions sent", exchange_interface_->get_name());
                 return;
             }
         }

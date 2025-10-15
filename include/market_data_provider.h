@@ -322,8 +322,8 @@ private:
     
     // Raw message queue from WebSocket
     // Fixed-size message buffer for lock-free queue (std::string is not trivially copyable)
-    // Increased to 256KB to handle large dYdX orderbook snapshots (can be 150KB+)
-    using MessageBuffer = std::array<char, 262144>;
+    // Increased to 512KB to handle large orderbook snapshots from all exchanges
+    using MessageBuffer = std::array<char, 524288>;
     std::unique_ptr<hft::LockFreeSPSCQueue<MessageBuffer, 4096>> message_queue_;
     
     // Callback handler

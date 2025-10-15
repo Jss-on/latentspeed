@@ -20,7 +20,7 @@ zmq:
 # Logging configuration
 log:
   filename: marketstream.log
-  level: debug  # trace, debug, info, warn, error, critical
+  level: info  # trace, debug, info, warn, error, critical
 
 # Feed configurations
 feeds:
@@ -35,7 +35,7 @@ feeds:
     enable_trades: true
     enable_orderbook: true
     snapshots_only: true
-    snapshot_interval: 1
+    # snapshot_interval: 1
 
   # # dYdX V4 Feed
   # - exchange: dydx
@@ -48,6 +48,7 @@ feeds:
   #   enable_trades: true
   #   enable_orderbook: true
   #   snapshots_only: true
+  #   snapshot_interval: 1
 
   # Bybit Feed (commented out - enable as needed)
   # - exchange: bybit

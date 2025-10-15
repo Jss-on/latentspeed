@@ -793,7 +793,7 @@ ExchangeInterface::MessageType HyperliquidExchange::parse_message(
                 
                 // Parse trade ID (tid)
                 if (trade.HasMember("tid") && trade["tid"].IsNumber()) {
-                    tick.trade_id = std::to_string(trade["tid"].GetInt64());
+                    tick.trade_id.assign(std::to_string(trade["tid"].GetInt64()));
                 }
                 
                 // Parse timestamp if available
