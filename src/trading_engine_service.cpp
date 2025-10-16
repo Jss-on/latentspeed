@@ -17,6 +17,14 @@
 #include "action_dispatch.h"
 #include "reason_code_mapper.h"
 #include "exchange/binance_client.h"
+#include "adapters/bybit_adapter.h"
+#include "adapters/binance_adapter.h"
+#include "adapters/hyperliquid_adapter.h"
+#include "engine/venue_router.h"
+#include "core/auth/credentials_resolver.h"
+#include "core/symbol/symbol_mapper.h"
+#include "core/reasons/reason_mapper.h"
+#include "engine/exec_dto.h"
 #include <chrono>
 #include <iomanip>
 #include <sstream>
@@ -504,6 +512,10 @@ TradingEngineService::TradingEngineService(const TradingEngineConfig& config)
     }
 #endif
     
+    // Phase 2: initialize default mappers
+    symbol_mapper_ = std::make_unique<DefaultSymbolMapper>();
+    reason_mapper_ = std::make_unique<DefaultReasonMapper>();
+
     spdlog::info("[HFT-Engine] Ultra-low latency trading engine initialized");
     spdlog::info("[HFT-Engine] Memory pools pre-warmed with {} entries", WARMUP_COUNT);
     spdlog::info("[HFT-Engine] Lock-free queues ready");
@@ -546,92 +558,82 @@ bool TradingEngineService::initialize() {
         order_receiver_socket_->set(zmq::sockopt::linger, linger);
         report_publisher_socket_->set(zmq::sockopt::linger, linger);
         
-        // Initialize exchange clients
-        spdlog::info("[HFT-Engine] Initializing exchange clients...");
+        // Initialize exchange adapters (Phase 1 router)
+        spdlog::info("[HFT-Engine] Initializing exchange adapters...");
+        venue_router_ = std::make_unique<VenueRouter>();
 
-        // Prefer config, but allow env override if missing
-        auto getenv_bool = [](const char* key, bool def) -> bool {
-            const char* v = std::getenv(key);
-            if (!v) return def;
-            std::string s; s.reserve(8);
-            for (const char* p=v; *p; ++p) s.push_back(static_cast<char>(std::tolower(*p)));
-            if (s=="1"||s=="true"||s=="yes"||s=="on") return true;
-            if (s=="0"||s=="false"||s=="no"||s=="off") return false;
-            return def;
-        };
-
-        // Resolve credentials & testnet flag (exchange-agnostic env key names)
-        auto getenv_string_dyn = [&](const std::string& key) -> std::string {
-            if (const char* v = std::getenv(key.c_str())) return std::string(v);
-            return {};
-        };
-        const std::string exch_upper = to_upper_ascii(config_.exchange);
-        const std::string key_api     = std::string("LATENTSPEED_") + exch_upper + "_API_KEY";
-        const std::string key_secret  = std::string("LATENTSPEED_") + exch_upper + "_API_SECRET";
-        const std::string key_testnet = std::string("LATENTSPEED_") + exch_upper + "_USE_TESTNET";
-
-        std::string api_key    = !config_.api_key.empty()    ? config_.api_key    : getenv_string_dyn(key_api);
-        std::string api_secret = !config_.api_secret.empty() ? config_.api_secret : getenv_string_dyn(key_secret);
-
-        // If the app is configured with live_trade=false, default to testnet.
-        bool use_testnet_default = !config_.live_trade;
-        bool use_testnet = getenv_bool(key_testnet.c_str(), use_testnet_default);
+        // Resolve credentials & testnet flag via central resolver
+        auto creds = latentspeed::auth::resolve_credentials(
+            config_.exchange, config_.api_key, config_.api_secret, config_.live_trade);
+        std::string api_key = creds.api_key;
+        std::string api_secret = creds.api_secret;
+        bool use_testnet = creds.use_testnet;
 
         spdlog::info("[HFT-Engine] Exchange: {}, Live trading: {}, Testnet: {}",
                      config_.exchange, config_.live_trade, use_testnet);
 
-        // ---- Exchange client wiring -------------------------------------------------
+        // ---- Exchange adapter wiring -------------------------------------------------
         if (config_.exchange == "bybit") {
-            auto bybit_client = std::make_unique<BybitClient>();
-
             if (api_key.empty() || api_secret.empty()) {
                 spdlog::error("[HFT-Engine] Missing Bybit credentials. Provide via config or env: LATENTSPEED_BYBIT_API_KEY / LATENTSPEED_BYBIT_API_SECRET");
                 return false;
             }
-
-            if (!bybit_client->initialize(api_key, api_secret, use_testnet)) {
-                spdlog::error("[HFT-Engine] Failed to initialize Bybit client with provided credentials");
+            auto adapter = std::make_unique<BybitAdapter>();
+            if (!adapter->initialize(api_key, api_secret, use_testnet)) {
+                spdlog::error("[HFT-Engine] Failed to initialize Bybit adapter with provided credentials");
                 return false;
             }
-
-            bybit_client->set_order_update_callback([this](const OrderUpdate& u) { this->on_order_update_hft(u); });
-            bybit_client->set_fill_callback([this](const FillData& f) { this->on_fill_hft(f); });
-
-            if (!bybit_client->connect()) {
+            adapter->set_order_update_callback([this](const OrderUpdate& u) { this->on_order_update_hft(u); });
+            adapter->set_fill_callback([this](const FillData& f) { this->on_fill_hft(f); });
+            if (!adapter->connect()) {
                 spdlog::warn("[HFT-Engine] Bybit WebSocket not connected; fills/updates may be delayed");
             }
-
-            exchange_clients_["bybit"] = std::move(bybit_client);
-            spdlog::info("[HFT-Engine] Exchange client initialized: bybit");
+            venue_router_->register_adapter(std::move(adapter));
+            spdlog::info("[HFT-Engine] Exchange adapter initialized: bybit");
         } else if (config_.exchange == "binance") {
-            auto binance_client = std::make_unique<BinanceClient>();
-
             if (api_key.empty() || api_secret.empty()) {
                 spdlog::error("[HFT-Engine] Missing Binance credentials. Provide via config or env: LATENTSPEED_BINANCE_API_KEY / LATENTSPEED_BINANCE_API_SECRET");
                 return false;
             }
-
-            if (!binance_client->initialize(api_key, api_secret, use_testnet)) {
-                spdlog::error("[HFT-Engine] Failed to initialize Binance client with provided credentials");
+            auto adapter = std::make_unique<BinanceAdapter>();
+            if (!adapter->initialize(api_key, api_secret, use_testnet)) {
+                spdlog::error("[HFT-Engine] Failed to initialize Binance adapter with provided credentials");
                 return false;
             }
-
-            binance_client->set_order_update_callback([this](const OrderUpdate& u) { this->on_order_update_hft(u); });
-            binance_client->set_fill_callback([this](const FillData& f) { this->on_fill_hft(f); });
-
-            if (!binance_client->connect()) {
+            adapter->set_order_update_callback([this](const OrderUpdate& u) { this->on_order_update_hft(u); });
+            adapter->set_fill_callback([this](const FillData& f) { this->on_fill_hft(f); });
+            if (!adapter->connect()) {
                 spdlog::warn("[HFT-Engine] Binance WebSocket not connected; fills/updates may be delayed");
             }
-
-            exchange_clients_["binance"] = std::move(binance_client);
-            spdlog::info("[HFT-Engine] Exchange client initialized: binance");
+            venue_router_->register_adapter(std::move(adapter));
+            spdlog::info("[HFT-Engine] Exchange adapter initialized: binance");
+        } else if (config_.exchange == "hyperliquid") {
+            if (api_key.empty() || api_secret.empty()) {
+                spdlog::error("[HFT-Engine] Missing Hyperliquid credentials. Provide via config or env: LATENTSPEED_HYPERLIQUID_API_KEY / LATENTSPEED_HYPERLIQUID_API_SECRET");
+                return false;
+            }
+            auto adapter = std::make_unique<HyperliquidAdapter>();
+            if (!adapter->initialize(api_key, api_secret, use_testnet)) {
+                spdlog::error("[HFT-Engine] Failed to initialize Hyperliquid adapter with provided credentials");
+                return false;
+            }
+            adapter->set_order_update_callback([this](const OrderUpdate& u) { this->on_order_update_hft(u); });
+            adapter->set_fill_callback([this](const FillData& f) { this->on_fill_hft(f); });
+            if (!adapter->connect()) {
+                spdlog::warn("[HFT-Engine] Hyperliquid WebSocket not connected; will use HTTP fallback where applicable");
+            }
+            venue_router_->register_adapter(std::move(adapter));
+            spdlog::info("[HFT-Engine] Exchange adapter initialized: hyperliquid");
         } else {
-            throw std::runtime_error("Unsupported exchange: " + config_.exchange + ". Supported: bybit, binance");
+            throw std::runtime_error("Unsupported exchange: " + config_.exchange + ". Supported: bybit, binance, hyperliquid");
         }
 
         // ---- Post-connect open-order rehydration (seeds pending_orders_) ------------
         {
-            auto& client = *exchange_clients_.at(config_.exchange);
+            IExchangeAdapter* adapter = venue_router_ ? venue_router_->get(config_.exchange) : nullptr;
+            if (!adapter) {
+                throw std::runtime_error("No exchange adapter registered for: " + config_.exchange);
+            }
 
             struct Req { std::string category; std::optional<std::string> settle; };
             std::vector<Req> batches = {
@@ -647,7 +649,7 @@ bool TradingEngineService::initialize() {
                 std::optional<std::string> base_coin; // not used here
                 std::optional<std::string> symbol;    // not constrained
 
-                auto briefs = client.list_open_orders(b.category, symbol, b.settle, base_coin);
+                auto briefs = adapter->list_open_orders(b.category, symbol, b.settle, base_coin);
                 size_t inserted = 0;
 
                 for (const auto& x : briefs) {
@@ -965,101 +967,52 @@ HFTExecutionOrder* TradingEngineService::parse_execution_order_hft(std::string_v
     }
 
     try {
-        rapidjson::Document doc;
-        doc.Parse(json_message.data(), json_message.size());
-
-        if (doc.HasParseError()) {
+        ExecParsed parsed;
+        bool ok = parse_exec_order_json(json_message, parsed);
+        if (!ok) {
             order_pool_->deallocate(order);
             return nullptr;
         }
 
-        // Parse with minimal branches for better performance
-        if (doc.HasMember("version")) order->version = doc["version"].GetInt();
-        if (doc.HasMember("cl_id")) order->cl_id.assign(doc["cl_id"].GetString());
-        if (doc.HasMember("action")) order->action.assign(doc["action"].GetString());
-        if (doc.HasMember("venue_type")) order->venue_type.assign(doc["venue_type"].GetString());
-        if (doc.HasMember("venue")) order->venue.assign(doc["venue"].GetString());
-        if (doc.HasMember("product_type")) order->product_type.assign(doc["product_type"].GetString());
-        if (doc.HasMember("ts_ns")) order->ts_ns.store(doc["ts_ns"].GetUint64(), std::memory_order_relaxed);
+        // Fill HFTExecutionOrder from typed DTO
+        order->version = parsed.version;
+        order->cl_id.assign(parsed.cl_id.c_str());
+        order->action.assign(parsed.action.c_str());
+        order->venue_type.assign(parsed.venue_type.c_str());
+        order->venue.assign(parsed.venue.c_str());
+        order->product_type.assign(parsed.product_type.c_str());
+        if (parsed.ts_ns != 0) order->ts_ns.store(parsed.ts_ns, std::memory_order_relaxed);
 
-        // Parse details with cache-friendly access
-        if (doc.HasMember("details") && doc["details"].IsObject()) {
-            const auto& details = doc["details"];
-            
-            if (details.HasMember("symbol")) order->symbol.assign(details["symbol"].GetString());
-            if (details.HasMember("side")) order->side.assign(details["side"].GetString());
-            if (details.HasMember("order_type")) order->order_type.assign(details["order_type"].GetString());
-            if (details.HasMember("time_in_force")) order->time_in_force.assign(details["time_in_force"].GetString());
-            
-            // Direct numeric parsing (faster than string conversion)
-            if (details.HasMember("price")) {
-                if (details["price"].IsNumber()) {
-                    order->price = details["price"].GetDouble();
-                } else if (details["price"].IsString()) {
-                    order->price = std::stod(details["price"].GetString());
-                }
-            }
-            if (details.HasMember("size")) {
-                if (details["size"].IsNumber()) {
-                    order->size = details["size"].GetDouble();
-                } else if (details["size"].IsString()) {
-                    order->size = std::stod(details["size"].GetString());
-                }
-            }
-            if (details.HasMember("stop_price")) {
-                if (details["stop_price"].IsNumber()) {
-                    order->stop_price = details["stop_price"].GetDouble();
-                } else if (details["stop_price"].IsString()) {
-                    order->stop_price = std::stod(details["stop_price"].GetString());
-                }
-            }
-            if (details.HasMember("reduce_only")) {
-                if (details["reduce_only"].IsBool()) {
-                    order->reduce_only = details["reduce_only"].GetBool();
-                } else if (details["reduce_only"].IsString()) {
-                    std::string_view val(details["reduce_only"].GetString());
-                    order->reduce_only = (val == "true");
-                }
-            }
+        order->symbol.assign(parsed.details.symbol.c_str());
+        order->side.assign(parsed.details.side.c_str());
+        order->order_type.assign(parsed.details.order_type.c_str());
+        order->time_in_force.assign(parsed.details.time_in_force.c_str());
 
-            auto parse_object_to_params = [&](const rapidjson::Value& obj, const std::string& prefix = std::string()) {
-                for (auto it = obj.MemberBegin(); it != obj.MemberEnd(); ++it) {
-                    if (order->params.full()) break;
-                    std::string key = prefix.empty() ? it->name.GetString()
-                                                      : prefix + it->name.GetString();
-                    if (it->value.IsString()) {
-                        order->params.insert(FixedString<32>(key.c_str()), FixedString<64>(it->value.GetString()));
-                    } else if (it->value.IsNumber()) {
-                        std::string str_val = format_decimal(it->value.GetDouble());
-                        order->params.insert(FixedString<32>(key.c_str()), FixedString<64>(str_val.c_str()));
-                    } else if (it->value.IsBool()) {
-                        const char* bool_val = it->value.GetBool() ? "true" : "false";
-                        order->params.insert(FixedString<32>(key.c_str()), FixedString<64>(bool_val));
-                    }
-                }
-            };
+        if (parsed.details.price) order->price = *parsed.details.price;
+        if (parsed.details.size) order->size = *parsed.details.size;
+        if (parsed.details.stop_price) order->stop_price = *parsed.details.stop_price;
+        if (parsed.details.reduce_only) order->reduce_only = *parsed.details.reduce_only;
 
-            if (details.HasMember("params") && details["params"].IsObject()) {
-                parse_object_to_params(details["params"]);
-            }
-
-            if (details.HasMember("cancel") && details["cancel"].IsObject()) {
-                parse_object_to_params(details["cancel"], "cancel_");
-            }
-
-            if (details.HasMember("replace") && details["replace"].IsObject()) {
-                parse_object_to_params(details["replace"], "replace_");
-            }
+        // params
+        for (const auto& kv : parsed.details.params) {
+            if (order->params.full()) break;
+            order->params.insert(FixedString<32>(kv.first.c_str()), FixedString<64>(kv.second.c_str()));
+        }
+        for (const auto& kv : parsed.details.cancel) {
+            if (order->params.full()) break;
+            std::string key = std::string("cancel_") + kv.first;
+            order->params.insert(FixedString<32>(key.c_str()), FixedString<64>(kv.second.c_str()));
+        }
+        for (const auto& kv : parsed.details.replace) {
+            if (order->params.full()) break;
+            std::string key = std::string("replace_") + kv.first;
+            order->params.insert(FixedString<32>(key.c_str()), FixedString<64>(kv.second.c_str()));
         }
 
-        // Parse tags into flat map (limited to prevent DoS)
-        if (doc.HasMember("tags") && doc["tags"].IsObject()) {
-            for (auto it = doc["tags"].MemberBegin(); it != doc["tags"].MemberEnd(); ++it) {
-                if (order->tags.full()) break; // Prevent overflow
-                FixedString<32> key(it->name.GetString());
-                FixedString<64> value(it->value.GetString());
-                order->tags.insert(key, value);
-            }
+        // tags
+        for (const auto& kv : parsed.tags) {
+            if (order->tags.full()) break;
+            order->tags.insert(FixedString<32>(kv.first.c_str()), FixedString<64>(kv.second.c_str()));
         }
 
         return order;
@@ -1174,13 +1127,13 @@ HFTExecutionOrder* TradingEngineService::parse_execution_order_hft(std::string_v
  */
 void TradingEngineService::place_cex_order_hft(const HFTExecutionOrder& order) {
     try {
-        // Fast exchange client lookup
-        auto client_it = exchange_clients_.find(normalize_venue_key(order.venue.view()));
-        if (client_it == exchange_clients_.end()) {
+        // Fast adapter lookup via router
+        const std::string venue_key = normalize_venue_key(order.venue.view());
+        IExchangeAdapter* adapter = venue_router_ ? venue_router_->get(venue_key) : nullptr;
+        if (!adapter) {
             send_rejection_report_hft(order, "unknown_venue", "Exchange not supported");
             return;
         }
-        auto& client = client_it->second;
 
         // Validate required fields with early exit
         if (order.symbol.empty() || order.side.empty() || order.order_type.empty()) {
@@ -1209,7 +1162,8 @@ void TradingEngineService::place_cex_order_hft(const HFTExecutionOrder& order) {
             }
         }
         req.category = category;
-        req.symbol = normalize_symbol_compact(order.symbol.view(), order.product_type.view());
+        if (symbol_mapper_) req.symbol = symbol_mapper_->to_compact(order.symbol.view(), order.product_type.view());
+        else req.symbol = normalize_symbol_compact(order.symbol.view(), order.product_type.view());
         req.side = to_lower_ascii(order.side.view());
 
         auto order_type_lower = to_lower_ascii(order.order_type.view());
@@ -1242,6 +1196,8 @@ void TradingEngineService::place_cex_order_hft(const HFTExecutionOrder& order) {
             }
             req.price = format_decimal(order.price);
         }
+
+        // Tick/lot enforcement is handled by trading_core's OrderManager; engine does not re‑enforce here.
 
         auto tif_mapped = map_time_in_force(order.time_in_force.view());
         if (tif_mapped) {
@@ -1302,8 +1258,8 @@ void TradingEngineService::place_cex_order_hft(const HFTExecutionOrder& order) {
                          order.product_type.c_str(), req.category.value_or("NONE"));
         }
 
-        // Place order via exchange client
-        OrderResponse response = client->place_order(req);
+        // Place order via exchange adapter
+        OrderResponse response = adapter->place_order(req);
 
         if (response.success) {
             // Store pending order for tracking
@@ -1333,12 +1289,12 @@ void TradingEngineService::place_cex_order_hft(const HFTExecutionOrder& order) {
  */
 void TradingEngineService::cancel_cex_order_hft(const HFTExecutionOrder& order) {
     try {
-        auto client_it = exchange_clients_.find(normalize_venue_key(order.venue.view()));
-        if (client_it == exchange_clients_.end()) {
+        IExchangeAdapter* adapter = venue_router_ ? venue_router_->get(normalize_venue_key(order.venue.view())) : nullptr;
+        if (!adapter) {
             send_rejection_report_hft(order, "unknown_venue", "Exchange not supported");
             return;
         }
-        auto& client = client_it->second;
+        auto& client = *adapter; // alias for readability
 
         auto find_value = [&](const char* key) -> const FixedString<64>* {
             if (auto* param = order.params.find(FixedString<32>(key))) {
@@ -1362,14 +1318,19 @@ void TradingEngineService::cancel_cex_order_hft(const HFTExecutionOrder& order) 
 
         std::optional<std::string> symbol;
         if (!order.symbol.empty()) {
-            symbol = normalize_symbol_compact(order.symbol.view(), order.product_type.view());
+            if (symbol_mapper_) {
+                symbol = symbol_mapper_->to_compact(order.symbol.view(), order.product_type.view());
+            } else {
+                symbol = normalize_symbol_compact(order.symbol.view(), order.product_type.view());
+            }
         }
 
         // Fallback to cached pending order metadata when not supplied in request
         OrderId original_id_lookup(cl_to_cancel_str.c_str());
         if (!symbol.has_value()) {
             if (auto* pending_order = pending_orders_->find(original_id_lookup); pending_order && *pending_order) {
-                symbol = normalize_symbol_compact((*pending_order)->symbol.view(), (*pending_order)->product_type.view());
+                if (symbol_mapper_) symbol = symbol_mapper_->to_compact((*pending_order)->symbol.view(), (*pending_order)->product_type.view());
+                else symbol = normalize_symbol_compact((*pending_order)->symbol.view(), (*pending_order)->product_type.view());
             }
         }
         if (!exchange_order_id.has_value()) {
@@ -1380,7 +1341,7 @@ void TradingEngineService::cancel_cex_order_hft(const HFTExecutionOrder& order) 
             }
         }
 
-        OrderResponse response = client->cancel_order(cl_to_cancel_str, symbol, exchange_order_id);
+        OrderResponse response = client.cancel_order(cl_to_cancel_str, symbol, exchange_order_id);
 
         auto to_lower = [](std::string s) {
             std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c){return static_cast<char>(std::tolower(c));});
@@ -1438,12 +1399,12 @@ void TradingEngineService::cancel_cex_order_hft(const HFTExecutionOrder& order) 
  */
 void TradingEngineService::replace_cex_order_hft(const HFTExecutionOrder& order) {
     try {
-        auto client_it = exchange_clients_.find(normalize_venue_key(order.venue.view()));
-        if (client_it == exchange_clients_.end()) {
+        IExchangeAdapter* adapter = venue_router_ ? venue_router_->get(normalize_venue_key(order.venue.view())) : nullptr;
+        if (!adapter) {
             send_rejection_report_hft(order, "unknown_venue", "Exchange not supported");
             return;
         }
-        auto& client = client_it->second;
+        auto& client = *adapter;
 
         auto find_value = [&](const char* key) -> const FixedString<64>* {
             if (auto* param = order.params.find(FixedString<32>(key))) {
@@ -1477,7 +1438,7 @@ void TradingEngineService::replace_cex_order_hft(const HFTExecutionOrder& order)
             new_quantity = format_decimal(order.size);
         }
 
-        OrderResponse response = client->modify_order(
+        OrderResponse response = client.modify_order(
             std::string(cl_id_to_replace->view()), new_quantity, new_price);
 
         if (response.success) {
@@ -1515,16 +1476,13 @@ void TradingEngineService::on_order_update_hft(const OrderUpdate& update) {
             }
 
             // Non-terminal unknown update → try lazy rehydration from exchange
-            ExchangeClient* client_raw = nullptr;
-            if (exchange_clients_.size() == 1) {
-                // single venue configured
-                client_raw = exchange_clients_.begin()->second.get();
-            } else {
-                auto it = exchange_clients_.find(config_.exchange);
-                if (it != exchange_clients_.end()) {
-                    client_raw = it->second.get();
-                } else if (!exchange_clients_.empty()) {
-                    client_raw = exchange_clients_.begin()->second.get();
+            IExchangeAdapter* client_raw = nullptr;
+            if (venue_router_) {
+                // Prefer configured exchange key if present
+                client_raw = venue_router_->get(config_.exchange);
+                if (!client_raw) {
+                    // Fallback: if only one adapter was registered, take it
+                    // (We don't have an iterator API; this code path is best-effort.)
                 }
             }
 
@@ -1608,13 +1566,25 @@ void TradingEngineService::on_order_update_hft(const OrderUpdate& update) {
         report->exchange_order_id.assign(update.exchange_order_id.c_str());
         report->status.assign(normalized_status->c_str());
 
-        std::string reason_code = normalize_reason_code(*normalized_status, update.reason);
-        std::string reason_text = build_reason_text(*normalized_status, update.reason);
+        std::string reason_code;
+        std::string reason_text;
+        if (reason_mapper_) {
+            auto mapped = reason_mapper_->map(*normalized_status, update.reason);
+            reason_code = mapped.reason_code;
+            reason_text = mapped.reason_text;
+        } else {
+            reason_code = normalize_reason_code(*normalized_status, update.reason);
+            reason_text = build_reason_text(*normalized_status, update.reason);
+        }
         report->reason_code.assign(reason_code.c_str());
         report->reason_text.assign(reason_text.c_str());
         report->ts_ns.store(get_current_time_ns_hft(), std::memory_order_relaxed);
         report->tags = original_order.tags; // placeholder will have empty tags, which is fine
 
+        // Ensure core tags are present for downstream (trading_core) routing
+        if (report->tags.find(FixedString<32>("venue")) == nullptr && !original_order.venue.empty()) {
+            report->tags.insert(FixedString<32>("venue"), FixedString<64>(original_order.venue.c_str()));
+        }
         // Publish via lock-free queue
         publish_execution_report_hft(*report);
         report_pool_->deallocate(report);
@@ -1670,6 +1640,10 @@ void TradingEngineService::on_fill_hft(const FillData& fill_data) {
                 fill->symbol_or_pair.assign((*order_ptr)->symbol.c_str());
             }
             fill->tags.insert(FixedString<32>("execution_type"), FixedString<64>("live"));
+            // Ensure venue tag is present for downstream analytics
+            if (fill->tags.find(FixedString<32>("venue")) == nullptr && !(*order_ptr)->venue.empty()) {
+                fill->tags.insert(FixedString<32>("venue"), FixedString<64>((*order_ptr)->venue.c_str()));
+            }
             // Determine perp from original order's product_type
             std::string pt = to_lower_ascii((*order_ptr)->product_type.view());
             is_perp = (pt == "perpetual");
@@ -1681,8 +1655,9 @@ void TradingEngineService::on_fill_hft(const FillData& fill_data) {
             is_perp = (cur.find(':') != std::string::npos);
         }
 
-        // Normalize to hyphen symbol regardless of source form
-        std::string hyphen = to_hyphen_symbol(fill->symbol_or_pair.c_str(), is_perp);
+        // Normalize to hyphen symbol regardless of source form (Phase 2: via mapper)
+        std::string hyphen = symbol_mapper_ ? symbol_mapper_->to_hyphen(fill->symbol_or_pair.c_str(), is_perp)
+                                            : to_hyphen_symbol(fill->symbol_or_pair.c_str(), is_perp);
         fill->symbol_or_pair.assign(hyphen.c_str());
 
         publish_fill_hft(*fill);
@@ -1773,6 +1748,10 @@ void TradingEngineService::send_acceptance_report_hft(const HFTExecutionOrder& o
     report->reason_text.assign(message);
     report->ts_ns.store(get_current_time_ns_hft(), std::memory_order_relaxed);
     report->tags = order.tags;
+    // Ensure venue tag present for downstream consumers
+    if (report->tags.find(FixedString<32>("venue")) == nullptr && !order.venue.empty()) {
+        report->tags.insert(FixedString<32>("venue"), FixedString<64>(order.venue.c_str()));
+    }
     
     publish_execution_report_hft(*report);
     report_pool_->deallocate(report);
@@ -1795,6 +1774,9 @@ void TradingEngineService::send_rejection_report_hft(const HFTExecutionOrder& or
     report->reason_text.assign(reason_text);
     report->ts_ns.store(get_current_time_ns_hft(), std::memory_order_relaxed);
     report->tags = order.tags;
+    if (report->tags.find(FixedString<32>("venue")) == nullptr && !order.venue.empty()) {
+        report->tags.insert(FixedString<32>("venue"), FixedString<64>(order.venue.c_str()));
+    }
     
     publish_execution_report_hft(*report);
     report_pool_->deallocate(report);

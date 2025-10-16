@@ -229,6 +229,7 @@ fi
 echo "To run the trading engine service:"
 echo "  cd $SCRIPT_DIR/build/$PRESET_NAME"
 echo "  ./trading_engine_service --exchange bybit --api-key YOUR_KEY --api-secret YOUR_SECRET"
+echo "  ./trading_engine_service --exchange hyperliquid  # address/private key via env; see docs/HYPERLIQUID_ADAPTER_USAGE.md"
 echo
 echo "To enable market data in trading engine, add: --enable-market-data"
 echo

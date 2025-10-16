@@ -23,6 +23,7 @@
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <args.hxx>
+#include "core/auth/credentials_resolver.h"
 
 /**
  * @brief Global pointer to trading engine instance for signal handling
@@ -45,9 +46,9 @@ latentspeed::TradingEngineConfig parse_command_line_args(int argc, char* argv[])
     args::HelpFlag help(parser, "help", "Display this help menu", {'h', "help"});
     args::ValueFlag<std::string> exchange(parser, "name", "Exchange name (e.g., bybit) [REQUIRED]", 
                                          {"exchange"});
-    args::ValueFlag<std::string> api_key(parser, "key", "Exchange API key [REQUIRED]", 
+    args::ValueFlag<std::string> api_key(parser, "key", "Exchange API key (DEX: wallet address)", 
                                         {"api-key"});
-    args::ValueFlag<std::string> api_secret(parser, "secret", "Exchange API secret [REQUIRED]", 
+    args::ValueFlag<std::string> api_secret(parser, "secret", "Exchange API secret (DEX: private key)", 
                                            {"api-secret"});
     args::Flag live_trade(parser, "live-trade", "Enable live trading (default: demo/testnet)", 
                          {"live-trade"});
@@ -80,20 +81,7 @@ latentspeed::TradingEngineConfig parse_command_line_args(int argc, char* argv[])
     if (api_key) config.api_key = args::get(api_key);
     if (api_secret) config.api_secret = args::get(api_secret);
 
-    // Fallback: populate missing API credentials from environment
-    // LATENTSPEED_<EXCHANGE>_API_KEY / LATENTSPEED_<EXCHANGE>_API_SECRET
-    if (!config.exchange.empty()) {
-        auto to_upper = [](std::string s){ for (auto& c : s) c = static_cast<char>(::toupper(c)); return s; };
-        const std::string upper = to_upper(config.exchange);
-        const std::string key_env    = std::string("LATENTSPEED_") + upper + "_API_KEY";
-        const std::string secret_env = std::string("LATENTSPEED_") + upper + "_API_SECRET";
-        if (config.api_key.empty()) {
-            if (const char* v = std::getenv(key_env.c_str())) config.api_key = v;
-        }
-        if (config.api_secret.empty()) {
-            if (const char* v = std::getenv(secret_env.c_str())) config.api_secret = v;
-        }
-    }
+    // Note: env-based resolution is performed later during validation using the centralized resolver.
     
     // Handle trading mode flags
     if (live_trade && demo_mode) {
@@ -118,19 +106,24 @@ bool validate_config(const latentspeed::TradingEngineConfig& config) {
         errors.push_back("--exchange is required");
     }
     
-    if (config.api_key.empty()) {
-        errors.push_back("--api-key is required");
-    }
-    
-    if (config.api_secret.empty()) {
-        errors.push_back("--api-secret is required");
-    }
-    
     // Check for supported exchanges
-    std::vector<std::string> supported_exchanges = {"bybit", "binance"};
+    std::vector<std::string> supported_exchanges = {"bybit", "binance", "hyperliquid"};
     if (!config.exchange.empty() && 
         std::find(supported_exchanges.begin(), supported_exchanges.end(), config.exchange) == supported_exchanges.end()) {
-        errors.push_back("Unsupported exchange '" + config.exchange + "'. Supported: bybit, binance");
+        errors.push_back("Unsupported exchange '" + config.exchange + "'. Supported: bybit, binance, hyperliquid");
+    }
+
+    // Credential resolution (env allowed) using centralized resolver
+    if (errors.empty()) {
+        auto creds = latentspeed::auth::resolve_credentials(config.exchange, config.api_key, config.api_secret, config.live_trade);
+        if (creds.api_key.empty() || creds.api_secret.empty()) {
+            if (config.exchange == "hyperliquid") {
+                errors.push_back("Missing credentials: set --api-key/--api-secret (address/private key) or env LATENTSPEED_HYPERLIQUID_USER_ADDRESS / LATENTSPEED_HYPERLIQUID_PRIVATE_KEY");
+            } else {
+                const std::string upper = [] (std::string s){ for (auto& c : s) c = static_cast<char>(::toupper(c)); return s; }(config.exchange);
+                errors.push_back("Missing credentials: set --api-key/--api-secret or env LATENTSPEED_" + upper + "_API_KEY / LATENTSPEED_" + upper + "_API_SECRET");
+            }
+        }
     }
     
     if (!errors.empty()) {

@@ -77,93 +77,37 @@ bool BinanceClient::is_connected() const {
 OrderResponse BinanceClient::place_order(const OrderRequest& request) {
     // Build query params for POST /fapi/v1/order
     std::ostringstream q;
-    // Apply filters and rounding
+    // Apply filters and rounding when available
     std::string symbol = request.symbol;
     SymbolFilters f{};
-    if (get_symbol_filters(symbol, f)) {
-        // Round quantity and price
-        std::string q_str = request.quantity;
-        std::string p_str = request.price.has_value() ? *request.price : std::string();
+    bool have_filters = get_symbol_filters(symbol, f);
+
+    std::string q_str = request.quantity;
+    std::string p_str = request.price.has_value() ? *request.price : std::string();
+    if (have_filters) {
         try {
             if (!q_str.empty() && f.step_size > 0) {
-                double qv = std::stod(q_str); double step = f.step_size;
+                double qv = std::stod(q_str);
+                double step = f.step_size;
                 double adj = std::floor(qv / step) * step;
                 q_str = format_decimal(adj, f.qty_decimals);
             }
             if (!p_str.empty() && f.tick_size > 0) {
-                double pv = std::stod(p_str); double tick = f.tick_size;
+                double pv = std::stod(p_str);
+                double tick = f.tick_size;
                 double adj = std::floor(pv / tick) * tick;
                 p_str = format_decimal(adj, f.price_decimals);
             }
         } catch (...) {
             // Leave as-is if parse fails
         }
-        q << "symbol=" << symbol;
-        q << "&side=" << map_side(request.side);
-        bool post_only = false;
-        if (request.time_in_force.has_value()) {
-            auto tif = *request.time_in_force;
-            std::string tif_lower = tif; for (auto& c : tif_lower) c = static_cast<char>(::tolower(c));
-            post_only = (tif_lower == "postonly" || tif_lower == "po" || tif_lower == "gtx");
-        }
-        q << "&type=" << map_type(request.order_type, post_only);
-        if (request.reduce_only) q << "&reduceOnly=true";
-        if (!q_str.empty()) q << "&quantity=" << q_str;
-        if (!p_str.empty() && request.order_type == "limit") q << "&price=" << p_str;
-        if (request.order_type != std::string("market")) {
-            const auto tif_str = map_time_in_force(request.time_in_force, post_only);
-            if (!tif_str.empty()) q << "&timeInForce=" << tif_str;
-        }
-        if (!request.client_order_id.empty()) q << "&newClientOrderId=" << request.client_order_id;
-        if (auto it = request.extra_params.find("triggerPrice"); it != request.extra_params.end()) {
-            q << "&stopPrice=" << it->second;
-            // Determine STOP vs TAKE_PROFIT based on triggerDirection and side
-            std::string dir;
-            if (auto itd = request.extra_params.find("triggerDirection"); itd != request.extra_params.end()) dir = itd->second;
-            const bool is_buy = (map_side(request.side) == "BUY");
-            bool is_stop = false;
-            // Binance semantics: triggerDirection "1" (rising) = STOP, "2" (falling) = TAKE_PROFIT
-            if (dir == "1") is_stop = true; 
-            else if (dir == "2") is_stop = false; 
-            else {
-                // Fallback heuristic: if we don't know, use side-based default to keep previous behavior
-                is_stop = !is_buy; 
-            }
-            if (request.order_type == "market") {
-                q << (is_stop ? "&type=STOP_MARKET" : "&type=TAKE_PROFIT_MARKET");
-            } else {
-                q << (is_stop ? "&type=STOP" : "&type=TAKE_PROFIT");
-            }
-            // Default workingType if not provided
-            if (request.extra_params.find("workingType") == request.extra_params.end()) {
-                q << "&workingType=MARK_PRICE";
-            }
-        }
-    } else {
-        // Fallback: no filters
-        q << "symbol=" << symbol;
-        q << "&side=" << map_side(request.side);
-        bool post_only = false;
-        if (request.time_in_force.has_value()) {
-            auto tif = *request.time_in_force;
-            std::string tif_lower = tif; for (auto& c : tif_lower) c = static_cast<char>(::tolower(c));
-            post_only = (tif_lower == "postonly" || tif_lower == "po" || tif_lower == "gtx");
-        }
-        q << "&type=" << map_type(request.order_type, post_only);
-        if (request.reduce_only) q << "&reduceOnly=true";
-        if (!request.quantity.empty()) q << "&quantity=" << request.quantity;
-        if (request.price.has_value() && request.order_type == "limit") q << "&price=" << *request.price;
-        if (request.order_type != std::string("market")) {
-            const auto tif_str = map_time_in_force(request.time_in_force, post_only);
-            if (!tif_str.empty()) q << "&timeInForce=" << tif_str;
-        }
-        if (!request.client_order_id.empty()) q << "&newClientOrderId=" << request.client_order_id;
-        if (auto it = request.extra_params.find("triggerPrice"); it != request.extra_params.end()) {
-            q << "&stopPrice=" << it->second;
-            if (request.order_type == "market") q << "&type=STOP_MARKET";
-        }
     }
-    q << "&side=" << map_side(request.side);
+
+    // Core fields
+    q << "symbol=" << symbol;
+    const std::string side = map_side(request.side);
+    q << "&side=" << side;
+
     bool post_only = false;
     if (request.time_in_force.has_value()) {
         auto tif = *request.time_in_force;
@@ -173,17 +117,11 @@ OrderResponse BinanceClient::place_order(const OrderRequest& request) {
     q << "&type=" << map_type(request.order_type, post_only);
 
     // Reduce-only for futures
-    if (request.reduce_only) {
-        q << "&reduceOnly=true";
-    }
+    if (request.reduce_only) q << "&reduceOnly=true";
 
     // Quantity and price
-    if (!request.quantity.empty()) {
-        q << "&quantity=" << request.quantity;
-    }
-    if (request.price.has_value() && request.order_type == "limit") {
-        q << "&price=" << *request.price;
-    }
+    if (!q_str.empty()) q << "&quantity=" << q_str;
+    if (!p_str.empty() && request.order_type == "limit") q << "&price=" << p_str;
 
     // Time in force (skip for MARKET/STOP_MARKET/TP_MARKET base)
     if (request.order_type != std::string("market")) {
@@ -192,29 +130,33 @@ OrderResponse BinanceClient::place_order(const OrderRequest& request) {
     }
 
     // Client order id
-    if (!request.client_order_id.empty()) {
-        q << "&newClientOrderId=" << request.client_order_id;
-    }
+    if (!request.client_order_id.empty()) q << "&newClientOrderId=" << request.client_order_id;
 
-    // Stop/TP mapping (basic): triggerPrice -> stopPrice if present
-        if (auto it = request.extra_params.find("triggerPrice"); it != request.extra_params.end()) {
-            q << "&stopPrice=" << it->second;
-            std::string dir;
-            if (auto itd = request.extra_params.find("triggerDirection"); itd != request.extra_params.end()) dir = itd->second;
-            const bool is_buy = (map_side(request.side) == "BUY");
-            bool is_stop = false;
-            if (dir == "1") is_stop = true; 
-            else if (dir == "2") is_stop = false; 
-            else { is_stop = !is_buy; }
-            if (request.order_type == "market") {
-                q << (is_stop ? "&type=STOP_MARKET" : "&type=TAKE_PROFIT_MARKET");
-            } else {
-                q << (is_stop ? "&type=STOP" : "&type=TAKE_PROFIT");
-            }
-            if (request.extra_params.find("workingType") == request.extra_params.end()) {
-                q << "&workingType=MARK_PRICE";
-            }
+    // Stop/TP mapping (if trigger present)
+    if (auto it = request.extra_params.find("triggerPrice"); it != request.extra_params.end()) {
+        q << "&stopPrice=" << it->second;
+        // Determine STOP vs TAKE_PROFIT based on triggerDirection and side
+        std::string dir;
+        if (auto itd = request.extra_params.find("triggerDirection"); itd != request.extra_params.end()) dir = itd->second;
+        const bool is_buy = (side == "BUY");
+        bool is_stop = false;
+        // Binance semantics: triggerDirection "1" (rising) = STOP, "2" (falling) = TAKE_PROFIT
+        if (dir == "1") is_stop = true;
+        else if (dir == "2") is_stop = false;
+        else {
+            // Fallback heuristic: if we don't know, use side-based default to keep previous behavior
+            is_stop = !is_buy;
         }
+        if (request.order_type == "market") {
+            q << (is_stop ? "&type=STOP_MARKET" : "&type=TAKE_PROFIT_MARKET");
+        } else {
+            q << (is_stop ? "&type=STOP" : "&type=TAKE_PROFIT");
+        }
+        // Default workingType if not provided
+        if (request.extra_params.find("workingType") == request.extra_params.end()) {
+            q << "&workingType=MARK_PRICE";
+        }
+    }
 
     long status = 0; std::string body;
     if (!rest_request("POST", "/fapi/v1/order", q.str(), true, status, body)) {
@@ -489,7 +431,35 @@ bool BinanceClient::rest_request(const std::string& method,
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_body);
+    // Harden TLS defaults: verify peer & host, avoid signals in multithreaded use
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+
+    // Optional environment-driven overrides for tricky networks / testnet
+    if (const char* v = std::getenv("LATENTSPEED_CURL_FORCE_IPV4")) {
+        std::string s(v); for (auto& c : s) c = static_cast<char>(::tolower(c));
+        if (s == "1" || s == "true" || s == "yes" || s == "on") {
+            curl_easy_setopt(curl, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
+        }
+    }
+    if (const char* v = std::getenv("LATENTSPEED_CURL_TLS12")) {
+        std::string s(v); for (auto& c : s) c = static_cast<char>(::tolower(c));
+        if (s == "1" || s == "true" || s == "yes" || s == "on") {
+            curl_easy_setopt(curl, CURLOPT_SSLVERSION, CURL_SSLVERSION_TLSv1_2);
+        }
+    }
+    if (const char* cafile = std::getenv("LATENTSPEED_CURL_CAINFO")) {
+        if (*cafile) {
+            curl_easy_setopt(curl, CURLOPT_CAINFO, cafile);
+        }
+    }
+    if (const char* v = std::getenv("LATENTSPEED_CURL_VERBOSE")) {
+        std::string s(v); for (auto& c : s) c = static_cast<char>(::tolower(c));
+        if (s == "1" || s == "true" || s == "yes" || s == "on") {
+            curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
+        }
+    }
 
     if (method == "POST") {
         curl_easy_setopt(curl, CURLOPT_POST, 1L);
@@ -507,6 +477,47 @@ bool BinanceClient::rest_request(const std::string& method,
         // Surface the curl error text to caller for better diagnostics
         response_body.assign("CURL ");
         response_body.append(err ? err : "unknown");
+        // If TLS connect failed and IPv4/TLS1.2 not forced yet, try a one-shot fallback
+        bool retried = false;
+        if (res == CURLE_SSL_CONNECT_ERROR) {
+            retried = true;
+            curl_easy_cleanup(curl);
+            curl = curl_easy_init();
+            if (!curl) {
+                curl_slist_free_all(headers);
+                return false;
+            }
+            response_body.clear();
+            curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+            curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+            curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
+            curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_body);
+            curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+            curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+            curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+            curl_easy_setopt(curl, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
+            curl_easy_setopt(curl, CURLOPT_SSLVERSION, CURL_SSLVERSION_TLSv1_2);
+            if (method == "POST") {
+                curl_easy_setopt(curl, CURLOPT_POST, 1L);
+                curl_easy_setopt(curl, CURLOPT_POSTFIELDS, full_query.c_str());
+                curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, full_query.size());
+                curl_easy_setopt(curl, CURLOPT_HTTPHEADER, curl_slist_append(headers, "Content-Type: application/x-www-form-urlencoded"));
+            } else if (method == "DELETE") {
+                curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "DELETE");
+            }
+            res = curl_easy_perform(curl);
+            if (res == CURLE_OK) {
+                curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_status);
+                if (http_status < 200 || http_status >= 300) {
+                    std::string snippet = response_body.substr(0, 240);
+                    for (auto& ch : snippet) { if (ch == '\n' || ch == '\r') ch = ' '; }
+                    spdlog::warn("[BinanceClient] HTTP {} on {}{} body='{}'", http_status, rest_base_, path, snippet);
+                }
+                curl_slist_free_all(headers);
+                curl_easy_cleanup(curl);
+                return (http_status >= 200 && http_status < 300);
+            }
+        }
         curl_slist_free_all(headers);
         curl_easy_cleanup(curl);
         return false;

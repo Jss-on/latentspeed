@@ -42,6 +42,18 @@ add_executable(trading_engine_service
   src/exchange/exchange_client.cpp
   src/exchange/bybit_client.cpp
   src/exchange/binance_client.cpp
+  src/adapters/bybit_adapter.cpp
+  src/adapters/binance_adapter.cpp
+  src/adapters/hyperliquid_adapter.cpp
+  src/adapters/hyperliquid_asset_resolver.cpp
+  src/adapters/python_hl_signer.cpp
+  src/core/symbol/symbol_mapper.cpp
+  src/core/reasons/reason_mapper.cpp
+  src/engine/exec_dto.cpp
+  src/core/net/http_client.cpp
+  src/core/net/hl_ws_post_client.cpp
+  src/core/auth/bybit_auth_provider.cpp
+  src/core/auth/credentials_resolver.cpp
 )
 
 # Market Data Test executable
@@ -125,4 +137,18 @@ if(BUILD_TESTING)
     )
     target_include_directories(action_dispatch_tests PRIVATE include)
     add_test(NAME action_dispatch_tests COMMAND action_dispatch_tests)
+
+    add_executable(symbol_mapper_test
+        tests/symbol_mapper_test.cpp
+        src/core/symbol/symbol_mapper.cpp
+    )
+    target_include_directories(symbol_mapper_test PRIVATE include)
+    add_test(NAME symbol_mapper_test COMMAND symbol_mapper_test)
+
+    add_executable(reason_mapper_test
+        tests/reason_mapper_test.cpp
+        src/core/reasons/reason_mapper.cpp
+    )
+    target_include_directories(reason_mapper_test PRIVATE include)
+    add_test(NAME reason_mapper_test COMMAND reason_mapper_test)
 endif()

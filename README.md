@@ -288,9 +288,9 @@ while True:
 
 ### Live Trading Mode
 
-The engine now operates in live trading mode with direct exchange connectivity:
+The engine operates in live trading mode with direct exchange connectivity:
 
-- **Exchange Support**: Bybit (testnet and mainnet)
+- **Exchange Support**: Bybit, Binance Futures (UM), Hyperliquid (DEX)
 - **Order Types**: Market and limit orders with various time-in-force options
 - **Real-Time Updates**: WebSocket streaming for order status and fills
 - **Error Handling**: Comprehensive error reporting and recovery mechanisms
@@ -306,10 +306,10 @@ The trading engine can be configured via constructor parameters:
 order_endpoint_("tcp://127.0.0.1:5601")        // Order reception
 report_endpoint_("tcp://127.0.0.1:5602")       // Report publishing
 
-// Bybit configuration (in initialize())
-api_key = "your_api_key";                      // Bybit API key
-api_secret = "your_api_secret";                // Bybit API secret
-use_testnet = true;                            // Use testnet/mainnet
+// Credentials are resolved centrally from CLI and environment
+// CEX (Bybit/Binance): api_key = API key, api_secret = API secret
+// DEX (Hyperliquid):   api_key = wallet/user address (0x..), api_secret = private key (hex)
+use_testnet = true;                            // Also overridable via env LATENTSPEED_<EXCHANGE>_USE_TESTNET
 ```
 
 ### Exchange Configuration
@@ -324,30 +324,45 @@ use_testnet = true;                            // Use testnet/mainnet
   - User Data WS (updates/fills):
     - Testnet: `wss://stream.binancefuture.com/ws/<listenKey>`
     - Mainnet: `wss://fstream.binance.com/ws/<listenKey>`
+- **Hyperliquid (DEX)**: REST + WS post trading, private WS streams (orderUpdates/userEvents/userFills)
+  - Mainnet REST: `https://api.hyperliquid.xyz` / WS: `wss://api.hyperliquid.xyz/ws`
+  - Testnet REST: `https://api.hyperliquid-testnet.xyz` / WS: `wss://api.hyperliquid-testnet.xyz/ws`
 
 #### Adding New Exchanges:
 1. Implement the `ExchangeClient` interface
 2. Add REST API and WebSocket handlers
 3. Register in `TradingEngineService::initialize()` (now exchange-agnostic, add to `exchange_clients_` map)
 
-### API Authentication
+### Credentials & Authentication
 
-#### Bybit API Setup:
+Credentials are resolved by a central resolver that merges CLI and environment variables.
+
+#### Bybit API Setup (CEX):
 1. Create API key on Bybit (testnet or mainnet)
 2. Configure with appropriate permissions (spot/perpetual trading)
-3. Update credentials in `TradingEngineService::initialize()`
+3. Provide credentials via CLI `--api-key/--api-secret` or env:
+   - `LATENTSPEED_BYBIT_API_KEY`, `LATENTSPEED_BYBIT_API_SECRET`
+   - `LATENTSPEED_BYBIT_USE_TESTNET=1|0`
 
-#### Binance Futures API Setup:
+#### Binance Futures API Setup (CEX):
 1. Create UM Futures API key (testnet or mainnet) with TRADE and USER_DATA permissions
 2. Configure env vars:
    - `LATENTSPEED_BINANCE_API_KEY`, `LATENTSPEED_BINANCE_API_SECRET`
    - `LATENTSPEED_BINANCE_USE_TESTNET=1|0`
 3. Optional: `LATENTSPEED_BINANCE_USE_WS_TRADE=1` (WS-API trading stub; REST trading is default)
 
+#### Hyperliquid Credentials (DEX):
+Hyperliquid does not issue API keys. Use:
+- `LATENTSPEED_HYPERLIQUID_USER_ADDRESS` = 0x… lowercased user/subaccount address
+- `LATENTSPEED_HYPERLIQUID_PRIVATE_KEY` = 0x… agent wallet private key (hex)
+- `LATENTSPEED_HYPERLIQUID_USE_TESTNET=1|0`
+
+Alternatively pass via CLI as `--api-key` (address) and `--api-secret` (private key). See docs/HYPERLIQUID_ADAPTER_USAGE.md.
+
 #### Security Notes:
-- API credentials are currently hardcoded for demo
-- Production deployment should use secure credential storage
-- Consider environment variables or secure vaults for production
+- Never log secrets; the signer bridge keeps private keys in its own process memory.
+- Use environment variables or a secure vault for production deployments.
+- Prefer separate agent wallets per process/subaccount for Hyperliquid.
 
 ## 📦 Dependencies
 
@@ -369,13 +384,22 @@ latentspeed/
 │   ├── trading_engine_service.h    # Service interface
 │   └── exchange/
 │       ├── exchange_client.h       # Abstract exchange interface
-│       └── bybit_client.h          # Bybit implementation
+│       ├── bybit_client.h          # Bybit implementation
+│       └── binance_client.h        # Binance implementation
+│   ├── adapters/
+│   │   ├── bybit_adapter.h/.cpp
+│   │   ├── binance_adapter.h/.cpp
+│   │   └── hyperliquid_adapter.h/.cpp
+│   ├── core/auth/
+│   │   ├── auth_provider.h         # Bybit HMAC provider (pilot)
+│   │   └── credentials_resolver.h  # Central CEX/DEX credential resolver
 ├── src/
 │   ├── trading_engine_service.cpp  # Service implementation  
 │   ├── main.cpp                    # Entry point
 │   └── exchange/
 │       ├── exchange_client.cpp     # Base implementation
-│       └── bybit_client.cpp        # Bybit client
+│       ├── bybit_client.cpp        # Bybit client
+│       └── binance_client.cpp      # Binance client
 ├── external/vcpkg/                 # Package manager (submodule)
 ├── CMakeLists.txt                  # Build configuration
 ├── CMakePresets.json               # Build presets

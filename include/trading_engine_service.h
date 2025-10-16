@@ -60,9 +60,12 @@
 // HFT-optimized data structures
 #include "hft_data_structures.h"
 
-// Exchange client interface
+// Exchange client interface (legacy) and adapter router (Phase 1)
 #include "exchange/exchange_client.h"
-#include "exchange/bybit_client.h"
+#include "adapters/exchange_adapter.h"
+#include "engine/venue_router.h"
+#include "core/symbol/symbol_mapper.h"
+#include "core/reasons/reason_mapper.h"
 
 // Market data provider
 #include "market_data_provider.h"
@@ -160,7 +163,9 @@ struct TradingEngineConfig {
      * @return true if configuration is valid, false otherwise
      */
     bool is_valid() const {
-        return !exchange.empty() && !api_key.empty() && !api_secret.empty();
+        // Credentials may be provided via environment (especially for DEXes like Hyperliquid).
+        // Validate only that an exchange is selected; credential checks happen during initialize().
+        return !exchange.empty();
     }
 };
 
@@ -373,8 +378,14 @@ private:
     
     /// @name Exchange Client Components
     /// @{
-    std::map<std::string, std::unique_ptr<ExchangeClient>> exchange_clients_;            ///< Exchange clients by name
-    std::unique_ptr<BybitClient> bybit_client_;                                         ///< Bybit exchange client
+    // Legacy direct clients (kept for compatibility in Phase 1, unused after router wiring)
+    std::map<std::string, std::unique_ptr<ExchangeClient>> exchange_clients_;
+    // Adapter router (preferred path)
+    std::unique_ptr<VenueRouter> venue_router_;
+    // Phase 2: symbol mapper
+    std::unique_ptr<ISymbolMapper> symbol_mapper_;
+    // Phase 2: reason mapper
+    std::unique_ptr<IReasonMapper> reason_mapper_;
     /// @}
     
     /// @name Market Data Components
