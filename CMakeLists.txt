@@ -2,6 +2,10 @@ cmake_minimum_required(VERSION 3.20)
 
 project(latentspeed VERSION 0.1.0 LANGUAGES CXX)
 
+# Feature toggles for venue adapters (deprecated ones default OFF)
+option(LATENTSPEED_ENABLE_BYBIT "Build Bybit adapter/client" OFF)
+option(LATENTSPEED_ENABLE_BINANCE "Build Binance adapter/client" OFF)
+
 # Enable CTest even though we keep dependencies minimal
 include(CTest)
 
@@ -33,17 +37,13 @@ pkg_check_modules(ZMQ REQUIRED libzmq)
 add_subdirectory(benchmark)
 
 # Trading Engine Service executable
-add_executable(trading_engine_service
+set(LS_ENGINE_SOURCES
   src/main.cpp
   src/trading_engine_service.cpp
   src/market_data_provider.cpp
   src/exchange_interface.cpp
   src/feed_handler.cpp
   src/exchange/exchange_client.cpp
-  src/exchange/bybit_client.cpp
-  src/exchange/binance_client.cpp
-  src/adapters/bybit_adapter.cpp
-  src/adapters/binance_adapter.cpp
   src/adapters/hyperliquid_adapter.cpp
   src/adapters/hyperliquid_asset_resolver.cpp
   src/adapters/python_hl_signer.cpp
@@ -55,6 +55,22 @@ add_executable(trading_engine_service
   src/core/auth/bybit_auth_provider.cpp
   src/core/auth/credentials_resolver.cpp
 )
+
+if(LATENTSPEED_ENABLE_BYBIT)
+  list(APPEND LS_ENGINE_SOURCES
+    src/exchange/bybit_client.cpp
+    src/adapters/bybit_adapter.cpp
+  )
+endif()
+
+if(LATENTSPEED_ENABLE_BINANCE)
+  list(APPEND LS_ENGINE_SOURCES
+    src/exchange/binance_client.cpp
+    src/adapters/binance_adapter.cpp
+  )
+endif()
+
+add_executable(trading_engine_service ${LS_ENGINE_SOURCES})
 
 # MarketStream - Production Market Data Provider (YAML-based)
 add_executable(marketstream
@@ -154,4 +170,3 @@ if(BUILD_TESTING)
     target_include_directories(reason_mapper_test PRIVATE include)
     add_test(NAME reason_mapper_test COMMAND reason_mapper_test)
 endif()
-

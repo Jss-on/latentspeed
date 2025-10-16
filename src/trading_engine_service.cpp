@@ -16,9 +16,12 @@
 #include "hft_data_structures.h"
 #include "action_dispatch.h"
 #include "reason_code_mapper.h"
-#include "exchange/binance_client.h"
+#ifdef LATENTSPEED_ENABLE_BYBIT
 #include "adapters/bybit_adapter.h"
+#endif
+#ifdef LATENTSPEED_ENABLE_BINANCE
 #include "adapters/binance_adapter.h"
+#endif
 #include "adapters/hyperliquid_adapter.h"
 #include "engine/venue_router.h"
 #include "core/auth/credentials_resolver.h"
@@ -573,6 +576,8 @@ bool TradingEngineService::initialize() {
                      config_.exchange, config_.live_trade, use_testnet);
 
         // ---- Exchange adapter wiring -------------------------------------------------
+        bool wired = false;
+#ifdef LATENTSPEED_ENABLE_BYBIT
         if (config_.exchange == "bybit") {
             if (api_key.empty() || api_secret.empty()) {
                 spdlog::error("[HFT-Engine] Missing Bybit credentials. Provide via config or env: LATENTSPEED_BYBIT_API_KEY / LATENTSPEED_BYBIT_API_SECRET");
@@ -590,7 +595,11 @@ bool TradingEngineService::initialize() {
             }
             venue_router_->register_adapter(std::move(adapter));
             spdlog::info("[HFT-Engine] Exchange adapter initialized: bybit");
-        } else if (config_.exchange == "binance") {
+            wired = true;
+        } else
+#endif
+#ifdef LATENTSPEED_ENABLE_BINANCE
+        if (config_.exchange == "binance") {
             if (api_key.empty() || api_secret.empty()) {
                 spdlog::error("[HFT-Engine] Missing Binance credentials. Provide via config or env: LATENTSPEED_BINANCE_API_KEY / LATENTSPEED_BINANCE_API_SECRET");
                 return false;
@@ -607,7 +616,10 @@ bool TradingEngineService::initialize() {
             }
             venue_router_->register_adapter(std::move(adapter));
             spdlog::info("[HFT-Engine] Exchange adapter initialized: binance");
-        } else if (config_.exchange == "hyperliquid") {
+            wired = true;
+        } else
+#endif
+        if (config_.exchange == "hyperliquid") {
             if (api_key.empty() || api_secret.empty()) {
                 spdlog::error("[HFT-Engine] Missing Hyperliquid credentials. Provide via config or env: LATENTSPEED_HYPERLIQUID_API_KEY / LATENTSPEED_HYPERLIQUID_API_SECRET");
                 return false;
@@ -624,8 +636,18 @@ bool TradingEngineService::initialize() {
             }
             venue_router_->register_adapter(std::move(adapter));
             spdlog::info("[HFT-Engine] Exchange adapter initialized: hyperliquid");
-        } else {
-            throw std::runtime_error("Unsupported exchange: " + config_.exchange + ". Supported: bybit, binance, hyperliquid");
+            wired = true;
+        }
+
+        if (!wired) {
+            std::string supported = "hyperliquid";
+#ifdef LATENTSPEED_ENABLE_BYBIT
+            supported += ", bybit";
+#endif
+#ifdef LATENTSPEED_ENABLE_BINANCE
+            supported += ", binance";
+#endif
+            throw std::runtime_error("Unsupported exchange: " + config_.exchange + ". Supported: " + supported);
         }
 
         // ---- Post-connect open-order rehydration (seeds pending_orders_) ------------
