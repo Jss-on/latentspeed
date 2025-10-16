@@ -1,16 +1,17 @@
 #!/bin/bash
 # ==========================================================
-# Latentspeed Trading Engine build helper (Linux/WSL)
-#   run.sh [--debug|--release] [--clean] [--docs] [--market-data] [--test]
+# LatentSpeed Trading System build helper (Linux/WSL)
+#   run.sh [--debug|--release] [--clean]
+# 
+# Builds two production executables:
+#   - marketstream          (market data provider)
+#   - trading_engine_service (trading engine)
 # ==========================================================
 
 # ---- defaults ----
 BUILD_TYPE="Debug"
 PRESET_NAME="linux-debug"
 CLEAN=""
-BUILD_DOCS=""
-BUILD_MARKET_DATA=""
-RUN_TESTS=""
 
 # ---- parse CLI flags ----
 while [[ $# -gt 0 ]]; do
@@ -29,27 +30,12 @@ while [[ $# -gt 0 ]]; do
             CLEAN="1"
             shift
             ;;
-        --docs)
-            BUILD_DOCS="1"
-            shift
-            ;;
-        --market-data)
-            BUILD_MARKET_DATA="1"
-            shift
-            ;;
-        --test)
-            RUN_TESTS="1"
-            shift
-            ;;
         *)
             echo "Unknown option $1"
-            echo "Usage: $0 [--debug|--release] [--clean] [--docs] [--market-data] [--test]"
+            echo "Usage: $0 [--debug|--release] [--clean]"
             echo "  --debug       Build in Debug mode (default)"
-            echo "  --release     Build in Release mode"
+            echo "  --release     Build in Release mode (production)"
             echo "  --clean       Clean build directory first"
-            echo "  --docs        Build documentation"
-            echo "  --market-data Build and test market data provider"
-            echo "  --test        Run market data tests after build"
             exit 1
             ;;
     esac
@@ -61,7 +47,7 @@ BUILD_DIR="$SCRIPT_DIR/build"
 VCPKG_DIR="$SCRIPT_DIR/external/vcpkg"
 
 echo
-echo "****  Building Latentspeed Trading Engine ($BUILD_TYPE)  ****"
+echo "****  Building LatentSpeed Trading System ($BUILD_TYPE)  ****"
 echo
 
 # ---- Check if vcpkg exists ----
@@ -164,72 +150,55 @@ cmake --preset="$PRESET_NAME" || exit 1
 echo "Building with CMake preset: $PRESET_NAME..."
 cmake --build --preset="$PRESET_NAME" || exit 1
 
-# ---- build docs if requested ----
-if [ -n "$BUILD_DOCS" ]; then
-    echo "Building documentation..."
-    # Add documentation build command here if needed
-    echo "Documentation build not yet implemented"
-fi
-
 echo
-echo "Build completed successfully!"
-echo "Preset used: $PRESET_NAME"
-echo "Executables built:"
-echo "  Trading Engine: $SCRIPT_DIR/build/$PRESET_NAME/trading_engine_service"
-echo "  Market Data Test: $SCRIPT_DIR/build/$PRESET_NAME/test_market_data"
+echo "="
+echo "=== Build Completed Successfully! ==="
+echo "="
+echo "Preset: $PRESET_NAME"
+echo
+echo "Production Executables:"
+echo "  1. MarketStream (Market Data Provider):"
+echo "     $SCRIPT_DIR/build/$PRESET_NAME/marketstream"
+echo
+echo "  2. Trading Engine Service:"
+echo "     $SCRIPT_DIR/build/$PRESET_NAME/trading_engine_service"
 echo
 
-# ---- market data provider testing ----
-if [ -n "$BUILD_MARKET_DATA" ] || [ -n "$RUN_TESTS" ]; then
-    echo "=== Market Data Provider Setup ==="
-    
-    # Check if test executable exists
-    if [ -x "$SCRIPT_DIR/build/$PRESET_NAME/test_market_data" ]; then
-        echo "Market data test executable ready!"
-        echo
-        echo "ZMQ Ports:"
-        echo "  5556 - Trades stream"
-        echo "  5557 - OrderBook stream (10 levels)"
-        echo
-        echo "Usage examples:"
-        echo "  # Test with Bybit (default symbols BTCUSDT,ETHUSDT)"
-        echo "  cd $SCRIPT_DIR/build/$PRESET_NAME"
-        echo "  ./test_market_data bybit"
-        echo
-        echo "  # Test with custom symbols"
-        echo "  ./test_market_data bybit BTCUSDT,ETHUSDT,SOLUSDT"
-        echo
-        echo "  # Subscribe to ZMQ streams (requires Python pyzmq)"
-        echo "  python3 ../../test_zmq_subscriber.py --duration 30"
-        echo
-        
-        if [ -n "$RUN_TESTS" ]; then
-            echo "=== Running Market Data Tests ==="
-            
-            # Check if Python ZMQ is available
-            if python3 -c "import zmq" 2>/dev/null; then
-                echo "Running comprehensive market data test (30 seconds)..."
-                chmod +x "$SCRIPT_DIR/run_market_data_test.sh"
-                "$SCRIPT_DIR/run_market_data_test.sh" bybit BTCUSDT,ETHUSDT 30
-            else
-                echo "Python ZMQ not available. Running basic test..."
-                echo "Starting market data provider for 10 seconds..."
-                cd "$SCRIPT_DIR/build/$PRESET_NAME"
-                timeout 10s ./test_market_data bybit BTCUSDT,ETHUSDT || echo "Test completed"
-                cd "$SCRIPT_DIR"
-            fi
-        fi
-    else
-        echo "Market data test executable not found at $SCRIPT_DIR/build/$PRESET_NAME/test_market_data"
-        echo "Make sure the build completed successfully."
-    fi
-    echo
-fi
-
-echo "To run the trading engine service:"
-echo "  cd $SCRIPT_DIR/build/$PRESET_NAME"
-echo "  ./trading_engine_service --exchange bybit --api-key YOUR_KEY --api-secret YOUR_SECRET"
-echo "  ./trading_engine_service --exchange hyperliquid  # address/private key via env; see docs/HYPERLIQUID_ADAPTER_USAGE.md"
+echo "="
+echo "=== Quick Start Guide ==="
+echo "="
 echo
-echo "To enable market data in trading engine, add: --enable-market-data"
+echo "1. Configure MarketStream:"
+echo "   Edit config.yml to add exchanges and symbols"
+echo
+echo "2. Start MarketStream (Terminal 1):"
+echo "   cd $SCRIPT_DIR/build/$PRESET_NAME"
+echo "   ./marketstream ../../config.yml"
+echo
+echo "   Output: ZMQ streams on ports 5556 (trades) and 5557 (orderbooks)"
+echo
+echo "3. Start Trading Engine (Terminal 2):"
+echo "   cd $SCRIPT_DIR/build/$PRESET_NAME"
+echo "   ./trading_engine_service \\"
+echo "     --exchange bybit \\"
+echo "     --api-key YOUR_API_KEY \\"
+echo "     --api-secret YOUR_API_SECRET"
+echo
+echo "   Optional: Add --live-trade for mainnet (default is testnet)"
+echo
+echo "="
+echo "=== ZMQ Endpoints ==="
+echo "="
+echo
+echo "MarketStream Output (market data):"
+echo "  tcp://127.0.0.1:5556 - Preprocessed trades"
+echo "  tcp://127.0.0.1:5557 - Preprocessed orderbooks"
+echo
+echo "Trading Engine I/O (order execution):"
+echo "  tcp://127.0.0.1:5601 - PULL socket for ExecutionOrders"
+echo "  tcp://127.0.0.1:5602 - PUB socket for ExecutionReports/Fills"
+echo
+echo "="
+echo "For production deployment, see: PRODUCTION.md"
+echo "="
 echo

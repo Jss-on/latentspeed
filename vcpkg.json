@@ -11,6 +11,7 @@
     "zeromq",
     "cppzmq",
     "spdlog",
+    "yaml-cpp",
     "args",
     "curl"
   ]

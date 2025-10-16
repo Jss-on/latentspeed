@@ -24,12 +24,10 @@ find_package(CURL REQUIRED)
 find_package(spdlog REQUIRED)
 find_package(Boost REQUIRED COMPONENTS system)
 find_package(RapidJSON REQUIRED)
+find_package(yaml-cpp REQUIRED)
 find_package(args REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(ZMQ REQUIRED libzmq)
-
-# WebSocket++ is header-only, no find_package needed
-# It will be available through vcpkg include directories
 
 # Add subdirectories
 add_subdirectory(benchmark)
@@ -39,6 +37,8 @@ add_executable(trading_engine_service
   src/main.cpp
   src/trading_engine_service.cpp
   src/market_data_provider.cpp
+  src/exchange_interface.cpp
+  src/feed_handler.cpp
   src/exchange/exchange_client.cpp
   src/exchange/bybit_client.cpp
   src/exchange/binance_client.cpp
@@ -56,16 +56,17 @@ add_executable(trading_engine_service
   src/core/auth/credentials_resolver.cpp
 )
 
-# Market Data Test executable
-add_executable(test_market_data
-  src/test_market_data.cpp
+# MarketStream - Production Market Data Provider (YAML-based)
+add_executable(marketstream
+  src/marketstream.cpp
   src/market_data_provider.cpp
+  src/exchange_interface.cpp
+  src/feed_handler.cpp
 )
 
-target_include_directories(trading_engine_service PRIVATE include)
-target_include_directories(test_market_data PRIVATE include)
+target_include_directories(trading_engine_service PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_include_directories(marketstream PRIVATE ${CMAKE_SOURCE_DIR}/include)
 
-# Header-only libraries
 if(TARGET args)
     target_link_libraries(trading_engine_service PRIVATE args)
 endif()
@@ -73,23 +74,24 @@ endif()
 # HFT-optimized link libraries
 target_link_libraries(trading_engine_service PRIVATE 
   OpenSSL::SSL 
-  OpenSSL::Crypto 
   Threads::Threads 
   ${ZMQ_LIBRARIES} 
   CURL::libcurl
   Boost::system
   rapidjson
+  yaml-cpp
   spdlog::spdlog
 )
 
-# Test Market Data executable libraries
-target_link_libraries(test_market_data PRIVATE 
+# MarketStream executable libraries
+target_link_libraries(marketstream PRIVATE 
   OpenSSL::SSL 
   OpenSSL::Crypto 
   Threads::Threads 
   ${ZMQ_LIBRARIES} 
   Boost::system
   rapidjson
+  yaml-cpp
   spdlog::spdlog
 )
 
@@ -100,7 +102,7 @@ if(UNIX AND NOT APPLE)
         rt       # Real-time extensions for scheduling
     )
     
-    target_link_libraries(test_market_data PRIVATE 
+    target_link_libraries(marketstream PRIVATE 
         pthread  # POSIX threads for CPU affinity
         rt       # Real-time extensions for scheduling
     )
@@ -152,3 +154,4 @@ if(BUILD_TESTING)
     target_include_directories(reason_mapper_test PRIVATE include)
     add_test(NAME reason_mapper_test COMMAND reason_mapper_test)
 endif()
+

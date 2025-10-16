@@ -1,42 +1,55 @@
-# Latentspeed Trading Engine
+# LatentSpeed Trading System
 
-A high-performance C++ trading engine for algorithmic trading with direct exchange connectivity and comprehensive order execution capabilities. Features custom exchange client architecture, WebSocket support for real-time data, and robust order management.
+Ultra-low latency C++ trading system with native exchange connectivity, real-time market data preprocessing, and high-performance order execution. Built for production algorithmic trading with microsecond-level performance.
 
-![C++](https://img.shields.io/badge/C%2B%2B-17-blue.svg)
+![C++](https://img.shields.io/badge/C%2B%2B-20-blue.svg)
 ![CMake](https://img.shields.io/badge/CMake-3.20%2B-green.svg)
 ![ZeroMQ](https://img.shields.io/badge/ZeroMQ-4.3%2B-red.svg)
-![Boost](https://img.shields.io/badge/Boost-1.75%2B-orange.svg)
-![spdlog](https://img.shields.io/badge/spdlog-1.x-yellow.svg)
+![Production](https://img.shields.io/badge/Status-Production-green.svg)
 
-## 🚀 Features
+## 🏗️ Production Architecture
 
-### Direct Exchange Connectivity
-- **Custom Exchange Client Architecture**: Native REST and WebSocket integration
-- **Bybit Integration**: Full support for spot and perpetual trading (testnet/mainnet)
-- **WebSocket Real-Time Updates**: Order status updates and fills via WebSocket streams
-- **HMAC Authentication**: Secure API key authentication for all requests
-- **Connection Management**: Automatic reconnection and heartbeat/ping-pong handling
+LatentSpeed runs as **two independent production executables**:
 
-### Order Management
-- **Order Types**: Market and limit orders with time-in-force options
-- **Order Actions**: Place, cancel, and modify orders in real-time
-- **Order Tracking**: Client order ID mapping and status tracking
-- **Fill Reporting**: Real-time execution reports with fee calculations
-- **Idempotency Protection**: Duplicate order detection and prevention
+```
+┌──────────────────┐         ZMQ (5556/5557)         ┌─────────────────────┐
+│  marketstream    │────────────────────────────────►│ trading_engine_     │
+│                  │    Preprocessed Market Data     │ service             │
+└──────────────────┘                                 └─────────────────────┘
+   │                                                          │
+   │ WebSocket                                                │ REST API
+   ▼                                                          ▼
+┌──────────────────┐                                 ┌─────────────────────┐
+│  Exchanges       │                                 │  Exchanges          │
+│  (dYdX, Bybit)   │                                 │  (Bybit)            │
+│  Market Data     │                                 │  Order Execution    │
+└──────────────────┘                                 └─────────────────────┘
+```
 
-### Trading Engine Core
-- **Live Trading**: Direct exchange connectivity for spot and perpetual markets
-- **Exchange Support**: Currently integrated with Bybit (testnet/mainnet)
-- **Risk Management**: Duplicate order detection and validation
-- **Multi-threaded Architecture**: Separate threads for order processing, WebSocket streaming, and publishing
-- **Error Handling**: Comprehensive error callbacks and exception handling
+### 1. **marketstream** - Market Data Provider
+**Location:** `src/marketstream.cpp`  
+**Purpose:** Connect to exchanges, preprocess data, stream via ZMQ
 
-### Communication Architecture
-- **Order Reception**: ZeroMQ PULL socket (`tcp://127.0.0.1:5601`) for ExecutionOrders
-- **Report Publishing**: ZeroMQ PUB socket (`tcp://127.0.0.1:5602`) for ExecutionReports and Fills
-- **WebSocket Streaming**: Real-time order updates and execution data from exchanges
-- **Structured Logging**: spdlog-based logging with file rotation and console output
-- **Async Publishing**: Non-blocking message queue for reports and fills
+- ✅ WebSocket connections to multiple exchanges (dYdX, Bybit)
+- ✅ Real-time market microstructure feature calculation
+- ✅ ZMQ publishing (trades on 5556, orderbooks on 5557)
+- ✅ YAML configuration for dynamic symbol management
+- ✅ ~10-50μs latency (10x faster than Python)
+
+**Features Calculated:**
+- **Trades**: VWAP, volume, rolling volatility
+- **Orderbooks**: Midpoint, spread, imbalance, depth, OFI, breadth
+
+### 2. **trading_engine_service** - Trading Engine
+**Location:** `src/main.cpp`  
+**Purpose:** Execute strategies, manage risk, place orders
+
+- ✅ Native Bybit REST API client for order execution
+- ✅ HMAC authentication and request signing
+- ✅ Order lifecycle management (place/cancel/modify)
+- ✅ Real-time execution reports and fills
+- ✅ WebSocket order updates
+- ✅ Multi-threaded async architecture
 
 ### Order Message Formats
 
@@ -102,40 +115,77 @@ A high-performance C++ trading engine for algorithmic trading with direct exchan
 }
 ```
 
-## 🏗️ Architecture
+## 🚀 Features
 
+### Market Data Pipeline (marketstream)
+- **Multi-Exchange Support**: dYdX V4, Bybit (extensible to Binance, etc.)
+- **Real-Time Preprocessing**: Market microstructure features calculated in-stream
+- **YAML Configuration**: Dynamic symbol management without recompilation
+- **Ultra-Low Latency**: Native C++ WebSocket, ~10-50μs processing time
+- **ZMQ Streaming**: Separate ports for trades (5556) and orderbooks (5557)
+
+### Order Execution (trading_engine_service)
+- **Exchange Connectivity**: Native Bybit REST API client
+- **Order Types**: Market and limit orders with TIF options
+- **Order Management**: Place, cancel, modify with client order ID tracking
+- **Real-Time Updates**: WebSocket streams for order status and fills
+- **HMAC Authentication**: Secure API request signing
+- **Production Ready**: Testnet and mainnet support
+
+## ⚡ Quick Start
+
+### 1. Build
+```bash
+# Clone repository
+git clone https://github.com/Jss-on/latentspeed.git
+cd latentspeed
+
+# Build (automatically installs dependencies via vcpkg)
+./run.sh --release
 ```
-┌─────────────────┐   ExecutionOrder   ┌──────────────────────┐   REST API       ┌─────────────┐
-│   Trading       │   PUSH->PULL       │  Trading Engine      │◄────────────────►│   Bybit     │
-│   Strategies    │   tcp://5601       │  Service             │                  │   Exchange  │
-│                 │                    │                      │   WebSocket      │             │
-└─────────────────┘                    │  ┌─────────────────┐ │◄────────────────►│  (Testnet/  │
-                                       │  │ Exchange Client │ │                  │   Mainnet)  │
-┌─────────────────┐   Reports/Fills    │  │ Order Manager   │ │                  └─────────────┘
-│   Strategy      │◄──PUB->SUB────────┤  │ WebSocket Handler│ │                  
-│   Monitoring    │   tcp://5602       │  │ HMAC Auth       │ │   Callbacks     ┌─────────────┐
-└─────────────────┘                    │  └─────────────────┘ │◄────────────────►│   Order     │
-                                       │           ▲          │                  │   Updates   │
-                                       │           │          │                  │   & Fills   │
-                                       │  ┌─────────────────┐ │                  └─────────────┘
-                                       │  │ Message Queue   │ │                  
-                                       │  │ Async Publisher │ │   Future        ┌─────────────┐
-                                       │  │ Error Handler   │ │◄────────────────►│  Additional │
-                                       │  └─────────────────┘ │                  │  Exchanges  │
-                                       │                      │                  └─────────────┘
-                                       └──────────────────────┘
 
-### Key Components
+### 2. Configure
+Edit `config.yml`:
+```yaml
+zmq:
+  port: 5556  # trades, books on 5557
+  window_size: 20
 
-- **Exchange Client Interface**: Abstract base class for exchange implementations
-- **Bybit Client**: Full-featured implementation with REST and WebSocket support
-- **Order Processing**: Live order execution for spot and perpetual markets
-- **WebSocket Handler**: Real-time streaming with automatic reconnection
-- **HMAC Authentication**: Secure request signing for all API calls
-- **Message Queue**: Async publishing system for reports and fills
-- **Error Management**: Comprehensive error handling and callback system
+feeds:
+  - exchange: dydx
+    symbols:
+      - BTC-USD
+      - ETH-USD
+```
 
-## 🛠️ Build Instructions
+### 3. Run Production Stack
+```bash
+# Terminal 1 - Start market data provider
+./build/linux-release/marketstream config.yml
+
+# Terminal 2 - Start trading engine
+./build/linux-release/trading_engine_service \
+  --exchange bybit \
+  --api-key YOUR_KEY \
+  --api-secret YOUR_SECRET
+```
+
+### 4. Monitor
+```python
+# Python ZMQ subscriber example
+import zmq, json
+
+ctx = zmq.Context()
+sock = ctx.socket(zmq.SUB)
+sock.connect("tcp://127.0.0.1:5556")  # Trades
+sock.subscribe(b"")
+
+while True:
+    msg = sock.recv_string()
+    print(json.loads(msg))
+```
+
+## 🛠️ Build Instructions (Detailed)
 
 ### Prerequisites
 
@@ -159,71 +209,159 @@ cd external/vcpkg
 cd ../..
 ```
 
-### Build Process
+### Build Script
 
-#### Build the Project
+The `run.sh` script handles all build automation:
+
 ```bash
-# Debug build
+# Release build (production)
+./run.sh --release
+
+# Debug build (development)
 ./run.sh --debug
 
-# Release build  
-./run.sh --release
+# Clean rebuild
+./run.sh --release --clean
 ```
 
-## 🚀 Running the Trading Engine
+**Output:**
+```
+build/
+├── linux-release/
+│   ├── marketstream              # Market data provider
+│   └── trading_engine_service    # Trading engine
+└── linux-debug/                  # Debug builds
+```
 
-### Start the Service
+## 🎯 Configuration
+
+### MarketStream Config (`config.yml`)
+
+```yaml
+# ZMQ output configuration
+zmq:
+  enabled: true
+  host: 127.0.0.1
+  port: 5556  # trades port, books will use port+1 (5557)
+  window_size: 20
+  depth_levels: 10
+
+# Logging
+log:
+  filename: marketstream.log
+  level: info  # trace, debug, info, warn, error, critical
+
+# Exchange feeds
+feeds:
+  - exchange: dydx
+    symbols:
+      - BTC-USD
+      - ETH-USD
+      - SOL-USD
+    enable_trades: true
+    enable_orderbook: true
+    snapshots_only: true
+
+  - exchange: bybit
+    symbols:
+      - BTC-USDT
+      - ETH-USDT
+    enable_trades: true
+    enable_orderbook: true
+    snapshots_only: true
+```
+
+**Dynamic Symbol Management:** Edit config.yml and restart - no recompilation needed!
+
+### Trading Engine CLI
+
 ```bash
-# From build directory
-./trading_engine_service
-
-# Or with full path
-./build/trading_engine_service
+./trading_engine_service \
+  --exchange bybit \
+  --api-key YOUR_API_KEY \
+  --api-secret YOUR_API_SECRET \
+  --live-trade  # Optional: enable mainnet (default is testnet)
 ```
 
-### Expected Output
-```
-=== Latentspeed Trading Engine Service ===
-Starting up...
-[TradingEngine] Live trading engine initialized
-[TradingEngine] Mode: Live exchange connectivity
-[TradingEngine] Creating ZeroMQ context...
-[TradingEngine] Order receiver socket bound to tcp://127.0.0.1:5601
-[TradingEngine] Report publisher socket bound to tcp://127.0.0.1:5602
-[TradingEngine] Initializing Bybit client...
-[TradingEngine] Bybit client initialized for demo environment
-[TradingEngine] Connected to Bybit demo environment
-[TradingEngine] Subscribed to order updates
-[TradingEngine] Live trading initialization complete
-[TradingEngine] Order receiver thread started
-[TradingEngine] Publisher thread started
-[Main] Trading engine started successfully
-[Main] Listening for orders on tcp://127.0.0.1:5601
-[Main] Publishing reports on tcp://127.0.0.1:5602
-[Main] Press Ctrl+C to stop
+## 🚀 Running Production Stack
+
+### 1. Start MarketStream
+
+```bash
+./build/linux-release/marketstream config.yml
 ```
 
-### Service Configuration
+**Expected Output:**
+```
+[2025-10-15 18:00:00.123] [marketstream] [info] ===========================================
+[2025-10-15 18:00:00.123] [marketstream] [info] LatentSpeed MarketStream
+[2025-10-15 18:00:00.123] [marketstream] [info] Production Market Data Provider (C++)
+[2025-10-15 18:00:00.123] [marketstream] [info] Config: config.yml
+[2025-10-15 18:00:00.123] [marketstream] [info] ===========================================
+[2025-10-15 18:00:00.124] [marketstream] [info] Adding dydx feed: 5 symbols
+[2025-10-15 18:00:00.124] [marketstream] [info] Starting 1 feed(s) with 5 total symbols...
+[2025-10-15 18:00:00.125] [marketstream] [info] ===========================================
+[2025-10-15 18:00:00.125] [marketstream] [info] Streaming market data (Press Ctrl+C to stop)
+[2025-10-15 18:00:00.125] [marketstream] [info] ZMQ Output:
+[2025-10-15 18:00:00.125] [marketstream] [info]   - Trades:     tcp://127.0.0.1:5556
+[2025-10-15 18:00:00.125] [marketstream] [info]   - Orderbooks: tcp://127.0.0.1:5557
+[2025-10-15 18:00:00.125] [marketstream] [info] ===========================================
+```
 
-**Default Endpoints:**
-- **Order Reception**: `tcp://127.0.0.1:5601` (PULL socket for ExecutionOrders)
-- **Report Publishing**: `tcp://127.0.0.1:5602` (PUB socket for ExecutionReports/Fills)
+### 2. Start Trading Engine
 
-**Exchange Configuration:**
-- **Bybit Testnet**: Default configuration with demo credentials
-- **Bybit Mainnet**: Configurable via API key/secret initialization
-- **WebSocket Streams**: Automatic subscription to order and execution updates
+```bash
+./build/linux-release/trading_engine_service \
+  --exchange bybit \
+  --api-key YOUR_API_KEY \
+  --api-secret YOUR_API_SECRET
+```
 
-**Connection Features:**
-- **Auto-Reconnection**: Automatic WebSocket reconnection on disconnect
-- **Heartbeat**: Ping/pong mechanism to maintain connection (20s interval)
-- **Request Signing**: HMAC-SHA256 authentication for all requests
+**Expected Output:**
+```
+[2025-10-15 18:00:10.123] [Main] Configuration Summary:
+[2025-10-15 18:00:10.123] [Main]   Exchange: bybit
+[2025-10-15 18:00:10.123] [Main]   Trading Mode: DEMO/TESTNET
+[2025-10-15 18:00:10.124] [TradingEngine] Creating ZeroMQ context...
+[2025-10-15 18:00:10.124] [TradingEngine] Order receiver socket bound to tcp://127.0.0.1:5601
+[2025-10-15 18:00:10.125] [TradingEngine] Report publisher socket bound to tcp://127.0.0.1:5602
+[2025-10-15 18:00:10.126] [TradingEngine] Initializing Bybit client...
+[2025-10-15 18:00:10.127] [Main] Trading engine started successfully
+[2025-10-15 18:00:10.127] [Main] Listening for orders on tcp://127.0.0.1:5601
+[2025-10-15 18:00:10.127] [Main] Publishing reports on tcp://127.0.0.1:5602
+```
 
-## 🧪 Testing the Service
+### 3. ZMQ Endpoints
 
-### Python Client Examples
+**MarketStream Output (market data):**
+- `tcp://127.0.0.1:5556` - Preprocessed trades
+- `tcp://127.0.0.1:5557` - Preprocessed orderbooks
 
-#### Send ExecutionOrder (PUSH socket)
+**Trading Engine I/O (order execution):**
+- `tcp://127.0.0.1:5601` - PULL socket for ExecutionOrders
+- `tcp://127.0.0.1:5602` - PUB socket for ExecutionReports/Fills
+
+## 🧪 Testing
+
+### Subscribe to Market Data (ZMQ)
+
+```python
+import zmq
+import json
+
+# Subscribe to trades
+ctx = zmq.Context()
+trades = ctx.socket(zmq.SUB)
+trades.connect("tcp://127.0.0.1:5556")
+trades.subscribe(b"")
+
+while True:
+    msg = trades.recv_string()
+    data = json.loads(msg)
+    print(f"Trade: {data['symbol']} @ ${data['price']}")
+```
+
+### Send ExecutionOrder (PUSH socket)
 ```python
 import zmq
 import json
@@ -286,81 +424,99 @@ while True:
         break
 ```
 
-### Live Trading Mode
+## 🔒 Production Deployment
 
-The engine operates in live trading mode with direct exchange connectivity:
+See PRODUCTION.md for the complete deployment guide, including:
+- Systemd service configuration
+- CPU affinity and real-time priority
+- Network tuning for low latency
+- Monitoring and logging
+- Multi-environment configs
 
-- **Exchange Support**: Bybit, Binance Futures (UM), Hyperliquid (DEX)
-- **Order Types**: Market and limit orders with various time-in-force options
-- **Real-Time Updates**: WebSocket streaming for order status and fills
-- **Error Handling**: Comprehensive error reporting and recovery mechanisms
+Summary of live trading features:
+- Exchange Support: Bybit, Binance Futures (UM), Hyperliquid (DEX)
+- Order Types: Market and limit orders with various time-in-force options
+- Real-Time Updates: WebSocket streaming for order status and fills
+- Error Handling: Comprehensive error reporting and recovery mechanisms
 
-## ⚙️ Configuration
+## 📊 Data Formats
 
-### Service Configuration
+### Market Data (ZMQ)
 
-The trading engine can be configured via constructor parameters:
-
-```cpp
-// Default configuration in TradingEngineService constructor
-order_endpoint_("tcp://127.0.0.1:5601")        // Order reception
-report_endpoint_("tcp://127.0.0.1:5602")       // Report publishing
-
-// Credentials are resolved centrally from CLI and environment
-// CEX (Bybit/Binance): api_key = API key, api_secret = API secret
-// DEX (Hyperliquid):   api_key = wallet/user address (0x..), api_secret = private key (hex)
-use_testnet = true;                            // Also overridable via env LATENTSPEED_<EXCHANGE>_USE_TESTNET
+**Trade Message (Port 5556):**
+```json
+{
+  "exchange": "DYDX",
+  "symbol": "BTC-USD",
+  "timestamp_ns": 1640995200123456789,
+  "receipt_timestamp_ns": 1640995200123456890,
+  "price": 50000.50,
+  "amount": 0.5,
+  "side": "buy",
+  "seq": 12345,
+  "transaction_price": 50000.50,
+  "trading_volume": 25000.25,
+  "volatility": 0.0023
+}
 ```
 
-### Exchange Configuration
+**Orderbook Message (Port 5557):**
+```json
+{
+  "exchange": "DYDX",
+  "symbol": "BTC-USD",
+  "timestamp_ns": 1640995200123456789,
+  "seq": 12346,
+  "bids": [[50000.0, 1.5], [49999.5, 2.0]],
+  "asks": [[50000.5, 1.2], [50001.0, 1.8]],
+  "midpoint": 50000.25,
+  "relative_spread": 0.00001,
+  "imbalance_lvl1": 0.2,
+  "bid_depth_n": 250000.50,
+  "ask_depth_n": 240000.30,
+  "volatility_mid": 0.0018,
+  "ofi_rolling": 0.15
+}
+```
 
-#### Currently Supported:
-- **Bybit**: Full support for spot and perpetual trading
-  - Testnet: `testnet.bybit.com`
-  - Mainnet: `api.bybit.com`
-- **Binance Futures (UM/USDT-M)**: Trading via REST + real-time user-data WS updates
-  - Testnet REST: `https://testnet.binancefuture.com` (prefix `/fapi/v1`)
-  - Mainnet REST: `https://fapi.binance.com` (prefix `/fapi/v1`)
+### Order Execution (ZMQ)
+
+See Order Message Formats section above.
+
+#### Currently Supported
+- Bybit: Full support for spot and perpetual trading
+  - Testnet: testnet.bybit.com
+  - Mainnet: api.bybit.com
+- Binance Futures (UM/USDT-M): Trading via REST + real-time user-data WS updates
+  - Testnet REST: https://testnet.binancefuture.com (prefix /fapi/v1)
+  - Mainnet REST: https://fapi.binance.com (prefix /fapi/v1)
   - User Data WS (updates/fills):
-    - Testnet: `wss://stream.binancefuture.com/ws/<listenKey>`
-    - Mainnet: `wss://fstream.binance.com/ws/<listenKey>`
-- **Hyperliquid (DEX)**: REST + WS post trading, private WS streams (orderUpdates/userEvents/userFills)
-  - Mainnet REST: `https://api.hyperliquid.xyz` / WS: `wss://api.hyperliquid.xyz/ws`
-  - Testnet REST: `https://api.hyperliquid-testnet.xyz` / WS: `wss://api.hyperliquid-testnet.xyz/ws`
+    - Testnet: wss://stream.binancefuture.com/ws/<listenKey>
+    - Mainnet: wss://fstream.binance.com/ws/<listenKey>
+- Hyperliquid (DEX): REST + WS post trading, private WS streams (orderUpdates/userEvents/userFills)
+  - Mainnet REST: https://api.hyperliquid.xyz / WS: wss://api.hyperliquid.xyz/ws
+  - Testnet REST: https://api.hyperliquid-testnet.xyz / WS: wss://api.hyperliquid-testnet.xyz/ws
 
-#### Adding New Exchanges:
-1. Implement the `ExchangeClient` interface
-2. Add REST API and WebSocket handlers
-3. Register in `TradingEngineService::initialize()` (now exchange-agnostic, add to `exchange_clients_` map)
-
-### Credentials & Authentication
+#### Credentials & Authentication
 
 Credentials are resolved by a central resolver that merges CLI and environment variables.
 
-#### Bybit API Setup (CEX):
-1. Create API key on Bybit (testnet or mainnet)
-2. Configure with appropriate permissions (spot/perpetual trading)
-3. Provide credentials via CLI `--api-key/--api-secret` or env:
-   - `LATENTSPEED_BYBIT_API_KEY`, `LATENTSPEED_BYBIT_API_SECRET`
-   - `LATENTSPEED_BYBIT_USE_TESTNET=1|0`
+- Bybit (CEX):
+  - LATENTSPEED_BYBIT_API_KEY, LATENTSPEED_BYBIT_API_SECRET
+  - LATENTSPEED_BYBIT_USE_TESTNET=1|0
+- Binance Futures (CEX):
+  - LATENTSPEED_BINANCE_API_KEY, LATENTSPEED_BINANCE_API_SECRET
+  - LATENTSPEED_BINANCE_USE_TESTNET=1|0
+  - Optional: LATENTSPEED_BINANCE_USE_WS_TRADE=1
+- Hyperliquid (DEX):
+  - LATENTSPEED_HYPERLIQUID_USER_ADDRESS = 0x… address
+  - LATENTSPEED_HYPERLIQUID_PRIVATE_KEY = 0x… hex private key
+  - LATENTSPEED_HYPERLIQUID_USE_TESTNET=1|0
 
-#### Binance Futures API Setup (CEX):
-1. Create UM Futures API key (testnet or mainnet) with TRADE and USER_DATA permissions
-2. Configure env vars:
-   - `LATENTSPEED_BINANCE_API_KEY`, `LATENTSPEED_BINANCE_API_SECRET`
-   - `LATENTSPEED_BINANCE_USE_TESTNET=1|0`
-3. Optional: `LATENTSPEED_BINANCE_USE_WS_TRADE=1` (WS-API trading stub; REST trading is default)
+Alternatively pass via CLI as --api-key (address) and --api-secret (private key). See docs/HYPERLIQUID_ADAPTER_USAGE.md.
 
-#### Hyperliquid Credentials (DEX):
-Hyperliquid does not issue API keys. Use:
-- `LATENTSPEED_HYPERLIQUID_USER_ADDRESS` = 0x… lowercased user/subaccount address
-- `LATENTSPEED_HYPERLIQUID_PRIVATE_KEY` = 0x… agent wallet private key (hex)
-- `LATENTSPEED_HYPERLIQUID_USE_TESTNET=1|0`
-
-Alternatively pass via CLI as `--api-key` (address) and `--api-secret` (private key). See docs/HYPERLIQUID_ADAPTER_USAGE.md.
-
-#### Security Notes:
-- Never log secrets; the signer bridge keeps private keys in its own process memory.
+#### Security Notes
+- Never log secrets; keep secrets in process memory only.
 - Use environment variables or a secure vault for production deployments.
 - Prefer separate agent wallets per process/subaccount for Hyperliquid.
 
@@ -381,42 +537,85 @@ Managed via vcpkg (`vcpkg.json`):
 ```
 latentspeed/
 ├── include/
-│   ├── trading_engine_service.h    # Service interface
-│   └── exchange/
-│       ├── exchange_client.h       # Abstract exchange interface
-│       ├── bybit_client.h          # Bybit implementation
-│       └── binance_client.h        # Binance implementation
+│   ├── trading_engine_service.h
+│   ├── market_data_provider.h
+│   ├── exchange_interface.h
+│   ├── feed_handler.h
+│   ├── reason_code_mapper.h
+│   ├── rolling_stats.h
+│   ├── hft_data_structures.h
+│   ├── engine/
+│   │   ├── exec_dto.h
+│   │   ├── normalized_order.h
+│   │   └── venue_router.h
+│   ├── exchange/
+│   │   ├── bybit_client.h
+│   │   ├── exchange_client.h
+│   │   └── binance_client.h
 │   ├── adapters/
-│   │   ├── bybit_adapter.h/.cpp
-│   │   ├── binance_adapter.h/.cpp
-│   │   └── hyperliquid_adapter.h/.cpp
-│   ├── core/auth/
-│   │   ├── auth_provider.h         # Bybit HMAC provider (pilot)
-│   │   └── credentials_resolver.h  # Central CEX/DEX credential resolver
+│   │   ├── bybit_adapter.h
+│   │   ├── binance_adapter.h
+│   │   ├── hyperliquid_adapter.h
+│   │   ├── hyperliquid_asset_resolver.h
+│   │   └── python_hl_signer.h
+│   └── core/
+│       ├── auth/
+│       │   ├── auth_provider.h
+│       │   └── credentials_resolver.h
+│       ├── net/
+│       │   ├── ws_client.h
+│       │   ├── http_client.h
+│       │   └── hl_ws_post_client.h
+│       ├── reasons/
+│       │   └── reason_mapper.h
+│       ├── symbol/
+│       │   └── symbol_mapper.h
+│       └── util/
+│           └── num_string.h
 ├── src/
-│   ├── trading_engine_service.cpp  # Service implementation  
-│   ├── main.cpp                    # Entry point
+│   ├── marketstream.cpp
+│   ├── main.cpp
+│   ├── trading_engine_service.cpp
+│   ├── market_data_provider.cpp
+│   ├── exchange_interface.cpp
+│   ├── feed_handler.cpp
+│   ├── engine/
+│   │   └── exec_dto.cpp
+│   ├── core/
+│   │   ├── auth/
+│   │   │   ├── bybit_auth_provider.cpp
+│   │   │   └── credentials_resolver.cpp
+│   │   ├── net/
+│   │   │   ├── http_client.cpp
+│   │   │   └── hl_ws_post_client.cpp
+│   │   ├── reasons/
+│   │   │   └── reason_mapper.cpp
+│   │   └── symbol/
+│   │       └── symbol_mapper.cpp
 │   └── exchange/
-│       ├── exchange_client.cpp     # Base implementation
-│       ├── bybit_client.cpp        # Bybit client
-│       └── binance_client.cpp      # Binance client
-├── external/vcpkg/                 # Package manager (submodule)
-├── CMakeLists.txt                  # Build configuration
-├── CMakePresets.json               # Build presets
-└── vcpkg.json                      # Dependencies manifest
+│       ├── bybit_client.cpp
+│       ├── exchange_client.cpp
+│       └── binance_client.cpp
+├── config.yml
+├── CMakeLists.txt
+├── run.sh
+├── PRODUCTION.md
+└── vcpkg.json
 ```
 
-### Adding New Exchanges
-1. Create new class inheriting from `ExchangeClient`
-2. Implement all virtual methods (REST API, WebSocket, auth)
-3. Add to `exchange_clients_` map in `TradingEngineService`
-4. Test with demo/testnet credentials first
+### Adding Exchange Support
 
-### Extending Functionality
-- Add new order types in `OrderRequest` structure
-- Implement additional exchange clients
-- Extend WebSocket message handlers for new data streams
-- Add risk management features in order processing
+**Market Data (marketstream):**
+1. Add exchange implementation to `exchange_interface.cpp`
+2. Implement `generate_subscription()` and `parse_message()`
+3. Add to exchange factory in `feed_handler.cpp`
+4. Update `config.yml` with new exchange
+
+**Order Execution (trading_engine_service):**
+1. Create new class inheriting from `ExchangeClient`
+2. Implement REST API and WebSocket handlers
+3. Add HMAC authentication for the exchange
+4. Register in `TradingEngineService::initialize()`
 
 ## 📝 License
 

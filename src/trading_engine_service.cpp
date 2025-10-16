@@ -677,9 +677,9 @@ bool TradingEngineService::initialize() {
                     o->reduce_only = x.reduce_only;
 
                     // Keep exchange order id if present for future cancels/modifies
-                    if (!x.exchange_order_id.empty()) {
+                    if (auto it = x.extra.find("orderId"); it != x.extra.end() && !it->second.empty()) {
                         o->params.insert(FixedString<32>("exchange_order_id"),
-                                         FixedString<64>(x.exchange_order_id.c_str()));
+                                         FixedString<64>(it->second.c_str()));
                     }
 
                     pending_orders_->insert(o->cl_id, o);

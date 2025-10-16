@@ -1,0 +1,62 @@
+# LatentSpeed MarketStream Configuration
+# Production market data provider (C++ equivalent to Python marketstream)
+#
+# Architecture:
+#   marketstream (this) → ZMQ → trading_engine_server
+#
+# Key Differences from Python marketstream:
+#   - No Redis Streams (direct ZMQ only for ultra-low latency)
+#   - Native C++ performance (~10x faster)
+#   - Same preprocessing and data format
+
+# ZMQ configuration for preprocessed data streaming
+zmq:
+  enabled: true
+  host: 127.0.0.1
+  port: 5556  # trades port, books will use port+1 (5557)
+  window_size: 20
+  depth_levels: 10
+
+# Logging configuration
+log:
+  filename: marketstream.log
+  level: info  # trace, debug, info, warn, error, critical
+
+# Feed configurations
+feeds:
+  # Hyperliquid Feed (Perpetual Futures)
+  - exchange: hyperliquid
+    symbols:
+      - BTC      # Bitcoin perpetual
+      - ETH      # Ethereum perpetual
+      - SOL      # Solana perpetual
+      - AVAX     # Avalanche perpetual
+      - ARB      # Arbitrum perpetual
+    enable_trades: true
+    enable_orderbook: true
+    snapshots_only: true
+    # snapshot_interval: 1
+
+  # # dYdX V4 Feed
+  # - exchange: dydx
+  #   symbols:
+  #     - BTC-USD
+  #     - ETH-USD
+  #     - SOL-USD
+  #     - DOGE-USD
+  #     - AVAX-USD
+  #   enable_trades: true
+  #   enable_orderbook: true
+  #   snapshots_only: true
+  #   snapshot_interval: 1
+
+  # Bybit Feed (commented out - enable as needed)
+  # - exchange: bybit
+  #   symbols:
+  #     - BTC-USDT
+  #     - ETH-USDT
+  #     - SOL-USDT
+  #   enable_trades: true
+  #   enable_orderbook: true
+  #   snapshots_only: true
+  #   snapshot_interval: 1

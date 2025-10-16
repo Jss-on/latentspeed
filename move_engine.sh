@@ -1,1 +1,0 @@
-scp -i ssh_key/id_ed25519 build/release/trading_engine_service examples/send_order.py root@152.42.255.169:/root/test/
