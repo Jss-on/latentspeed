@@ -95,7 +95,7 @@ target_link_libraries(trading_engine_service PRIVATE
   CURL::libcurl
   Boost::system
   rapidjson
-  yaml-cpp
+  yaml-cpp::yaml-cpp
   spdlog::spdlog
 )
 
@@ -107,7 +107,7 @@ target_link_libraries(marketstream PRIVATE
   ${ZMQ_LIBRARIES} 
   Boost::system
   rapidjson
-  yaml-cpp
+  yaml-cpp::yaml-cpp
   spdlog::spdlog
 )
 
