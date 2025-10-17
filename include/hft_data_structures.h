@@ -167,6 +167,17 @@ private:
     
     CACHE_ALIGNED std::array<std::aligned_storage_t<sizeof(T), alignof(T)>, PoolSize> pool_;
     CACHE_ALIGNED std::atomic<FreeNode*> free_head_;
+    // Track available count to avoid racing traversal in available()
+    CACHE_ALIGNED std::atomic<size_t> free_count_;
+    // Lightweight allocation state to guard against double-free (0 = allocated, 1 = free)
+    std::array<std::atomic<uint8_t>, PoolSize> state_;
+
+    inline size_t index_of_(void* p) const noexcept {
+        auto base = reinterpret_cast<const unsigned char*>(&pool_[0]);
+        auto cur = reinterpret_cast<const unsigned char*>(p);
+        size_t off = static_cast<size_t>(cur - base);
+        return off / sizeof(pool_[0]);
+    }
     
 public:
     MemoryPool() noexcept {
@@ -179,6 +190,10 @@ public:
         last_node->next = nullptr;
         
         free_head_.store(reinterpret_cast<FreeNode*>(&pool_[0]), std::memory_order_relaxed);
+        free_count_.store(PoolSize, std::memory_order_relaxed);
+        for (size_t i = 0; i < PoolSize; ++i) {
+            state_[i].store(1, std::memory_order_relaxed); // 1 = free
+        }
     }
     
     template<typename... Args>
@@ -189,6 +204,10 @@ public:
             if (free_head_.compare_exchange_weak(node, node->next, 
                                                std::memory_order_release, 
                                                std::memory_order_acquire)) {
+                // Mark allocated and adjust count
+                size_t idx = index_of_(node);
+                state_[idx].store(0, std::memory_order_release);
+                free_count_.fetch_sub(1, std::memory_order_acq_rel);
                 return new(node) T(std::forward<Args>(args)...);
             }
         }
@@ -199,26 +218,28 @@ public:
     void deallocate(T* ptr) noexcept {
         if (ptr == nullptr) return;
         
+        // Guard against double-free: only free if we transition from allocated(0) -> free(1)
+        size_t idx = index_of_(ptr);
+        uint8_t expected = 0;
+        if (!state_[idx].compare_exchange_strong(expected, 1, std::memory_order_acq_rel)) {
+            // Already free; ignore
+            return;
+        }
+
         ptr->~T();
-        
+
         auto* node = reinterpret_cast<FreeNode*>(ptr);
         node->next = free_head_.load(std::memory_order_acquire);
-        
-        while (!free_head_.compare_exchange_weak(node->next, node, 
-                                               std::memory_order_release, 
+        while (!free_head_.compare_exchange_weak(node->next, node,
+                                               std::memory_order_release,
                                                std::memory_order_acquire)) {
             // Retry
         }
+        free_count_.fetch_add(1, std::memory_order_acq_rel);
     }
     
     [[nodiscard]] size_t available() const noexcept {
-        size_t count = 0;
-        FreeNode* current = free_head_.load(std::memory_order_acquire);
-        while (current != nullptr) {
-            ++count;
-            current = current->next;
-        }
-        return count;
+        return free_count_.load(std::memory_order_acquire);
     }
 };
 

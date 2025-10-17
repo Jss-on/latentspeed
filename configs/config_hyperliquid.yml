@@ -1,46 +1,36 @@
-# Example configuration for Hyperliquid exchange market data streaming
-# Copy this to configs/config.yml or use with --config flag
+# Hyperliquid MarketStream config (perpetuals)
+# Compatible with latentspeed/src/marketstream.cpp (feeds/zmq/log schema)
 
-exchanges:
-  - name: hyperliquid
+zmq:
+  enabled: true
+  host: 127.0.0.1
+  port: 5556        # trades on 5556, books on 5557
+  window_size: 20
+  depth_levels: 10
+
+log:
+  level: info       # trace|debug|info|warn|error|critical
+  # filename: logs/hyperliquid_marketstream.log
+
+feeds:
+  - exchange: hyperliquid
     symbols:
-      - BTC      # Bitcoin perpetual
-      - ETH      # Ethereum perpetual
-      - SOL      # Solana perpetual
-      - AVAX     # Avalanche perpetual
-      - ARB      # Arbitrum perpetual
+      # - ETH-USDT-PERP
+      - BTC-USDT-PERP
+      - ASTER-USDT-PERP
+      # - SOL-USDT-PERP
+      - AVNT-USDT-PERP
+      # - STBL-USDT-PERP
+      # - DOGE-USDT-PERP
+      - BNB-USDT-PERP
+      # - XRP-USDT-PERP
+      # - HYPE-USDT-PERP
+      # - TWT-USDT-PERP
+      - WLFI-USDT-PERP
+      # - FARTCOIN-USDT-PERP
     enable_trades: true
     enable_orderbook: true
     snapshots_only: true
-    snapshot_interval: 1  # seconds
+    snapshot_interval: 1   # seconds
     reconnect_attempts: 10
     reconnect_delay_ms: 5000
-
-# Multi-exchange configuration example
-# exchanges:
-#   - name: hyperliquid
-#     symbols: [BTC, ETH, SOL]
-#     enable_trades: true
-#     enable_orderbook: true
-#   
-#   - name: bybit
-#     symbols: [BTCUSDT, ETHUSDT, SOLUSDT]
-#     enable_trades: true
-#     enable_orderbook: true
-#   
-#   - name: dydx
-#     symbols: [BTC-USD, ETH-USD, SOL-USD]
-#     enable_trades: true
-#     enable_orderbook: true
-
-# Logging configuration
-logging:
-  level: info  # debug, info, warn, error
-  file: logs/hyperliquid.log
-  console: true
-
-# Performance settings
-performance:
-  buffer_size: 65536
-  max_message_size: 1048576
-  thread_pool_size: 4

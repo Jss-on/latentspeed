@@ -3,3 +3,4 @@ vcpkg_installed
 sub
 ssh_key
 .vscode
+.venv-hl-signer
