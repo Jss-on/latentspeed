@@ -67,7 +67,7 @@ public:
         
         auto it = tracked_orders_.find(client_order_id);
         if (it != tracked_orders_.end()) {
-            return it->second;
+            return std::make_optional(it->second);
         }
         return std::nullopt;
     }
@@ -82,7 +82,7 @@ public:
         
         for (const auto& [_, order] : tracked_orders_) {
             if (order.exchange_order_id == exchange_order_id) {
-                return order;
+                return std::make_optional(order);
             }
         }
         return std::nullopt;
@@ -237,9 +237,11 @@ public:
             OrderUpdate update{
                 .client_order_id = client_order_id,
                 .new_state = OrderState::CANCELLED,
-                .update_timestamp = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    std::chrono::system_clock::now().time_since_epoch()
-                ).count()
+                .update_timestamp = static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::system_clock::now().time_since_epoch()
+                    ).count()
+                )
             };
             process_order_update(update);
             not_found_count_.erase(client_order_id);
