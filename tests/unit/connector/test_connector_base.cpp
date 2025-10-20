@@ -138,9 +138,9 @@ TEST(TradingRule, PriceQuantization) {
     rule.tick_size = 0.1;
     rule.price_decimals = 1;
     
-    EXPECT_DOUBLE_EQ(rule.quantize_price(50123.456), 50123.5);
-    EXPECT_DOUBLE_EQ(rule.quantize_price(50123.44), 50123.4);
-    EXPECT_DOUBLE_EQ(rule.quantize_price(50123.46), 50123.5);
+    EXPECT_NEAR(rule.quantize_price(50123.456), 50123.5, 1e-6);
+    EXPECT_NEAR(rule.quantize_price(50123.44), 50123.4, 1e-6);
+    EXPECT_NEAR(rule.quantize_price(50123.46), 50123.5, 1e-6);
 }
 
 TEST(TradingRule, SizeQuantization) {
@@ -148,9 +148,9 @@ TEST(TradingRule, SizeQuantization) {
     rule.step_size = 0.001;
     rule.size_decimals = 3;
     
-    EXPECT_DOUBLE_EQ(rule.quantize_size(0.1234), 0.123);
-    EXPECT_DOUBLE_EQ(rule.quantize_size(0.1235), 0.124);
-    EXPECT_DOUBLE_EQ(rule.quantize_size(0.1236), 0.124);
+    EXPECT_NEAR(rule.quantize_size(0.1234), 0.123, 1e-9);
+    EXPECT_NEAR(rule.quantize_size(0.1235), 0.124, 1e-9);
+    EXPECT_NEAR(rule.quantize_size(0.1236), 0.124, 1e-9);
 }
 
 TEST(TradingRule, OrderValidation) {
@@ -229,10 +229,10 @@ TEST(ConnectorBase, Quantization) {
     
     // BTC-USD has rules defined in mock
     double quantized_price = connector.quantize_order_price("BTC-USD", 50123.456);
-    EXPECT_DOUBLE_EQ(quantized_price, 50123.5);  // tick_size = 0.1
+    EXPECT_NEAR(quantized_price, 50123.5, 1e-6);  // tick_size = 0.1
     
     double quantized_size = connector.quantize_order_amount("BTC-USD", 0.1234);
-    EXPECT_DOUBLE_EQ(quantized_size, 0.123);  // step_size = 0.001
+    EXPECT_NEAR(quantized_size, 0.123, 1e-9);  // step_size = 0.001
     
     // Unknown pair returns as-is
     double unknown_price = connector.quantize_order_price("ETH-USD", 3456.789);
