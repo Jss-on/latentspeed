@@ -250,11 +250,11 @@ TEST(HyperliquidAuth, SignCancelActionStructure) {
         })}
     };
     
-    auto signed = auth.sign_cancel_action(cancel_action, 12346, true);
+    auto signed_cancel = auth.sign_cancel_action(cancel_action, 12346, true);
     
-    EXPECT_TRUE(signed.contains("action"));
-    EXPECT_TRUE(signed.contains("nonce"));
-    EXPECT_TRUE(signed.contains("signature"));
+    EXPECT_TRUE(signed_cancel.contains("action"));
+    EXPECT_TRUE(signed_cancel.contains("nonce"));
+    EXPECT_TRUE(signed_cancel.contains("signature"));
 }
 
 // ============================================================================
