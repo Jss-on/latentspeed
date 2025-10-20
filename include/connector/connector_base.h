@@ -14,6 +14,7 @@
 #include <vector>
 #include <atomic>
 #include <map>
+#include <chrono>
 
 #include "connector/types.h"
 #include "connector/events.h"

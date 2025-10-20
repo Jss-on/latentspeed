@@ -11,7 +11,8 @@
         "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/external/vcpkg/scripts/buildsystems/vcpkg.cmake",
         "VCPKG_TARGET_TRIPLET": "x64-linux",
         "VCPKG_INSTALLED_DIR": "${sourceDir}/build/debug/vcpkg_installed",
-        "CMAKE_CXX_FLAGS": "-Wno-deprecated-declarations -Wno-unused-parameter -Wno-sign-compare"
+        "CMAKE_CXX_FLAGS": "-Wno-deprecated-declarations -Wno-unused-parameter -Wno-sign-compare",
+        "BUILD_TESTING": "ON"
       }
     },
     {
@@ -24,7 +25,8 @@
         "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/external/vcpkg/scripts/buildsystems/vcpkg.cmake",
         "VCPKG_TARGET_TRIPLET": "x64-linux",
         "VCPKG_INSTALLED_DIR": "${sourceDir}/build/release/vcpkg_installed",
-        "CMAKE_CXX_FLAGS": "-Wno-deprecated-declarations -Wno-unused-parameter -Wno-sign-compare"
+        "CMAKE_CXX_FLAGS": "-Wno-deprecated-declarations -Wno-unused-parameter -Wno-sign-compare",
+        "BUILD_TESTING": "ON"
       }
     }
   ],

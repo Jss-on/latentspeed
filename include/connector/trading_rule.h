@@ -9,6 +9,7 @@
 
 #include <string>
 #include <optional>
+#include <cmath>
 
 namespace latentspeed::connector {
 
