@@ -180,41 +180,9 @@ public:
     // ASYNC EXCHANGE ORDER ID RETRIEVAL
     // ========================================================================
     
-    /**
-     * @brief Async wait for exchange order ID
-     * @param timeout Maximum time to wait
-     * @return Exchange order ID or empty if timeout
-     * 
-     * This is useful when you need the exchange order ID but it might
-     * not be available immediately (e.g., for cancellation).
-     */
-    std::optional<std::string> get_exchange_order_id_async(
-        std::chrono::milliseconds timeout = std::chrono::seconds(5)
-    ) {
-        std::unique_lock<std::mutex> lock(mutex_);
-        
-        if (exchange_order_id.has_value()) {
-            return exchange_order_id;
-        }
-        
-        // Wait for exchange_order_id to be set or timeout
-        bool success = cv_.wait_for(lock, timeout, [this] {
-            return exchange_order_id.has_value() || is_done();
-        });
-        
-        return exchange_order_id;
-    }
-    
-    /**
-     * @brief Notify waiters that exchange_order_id is set
-     */
-    void notify_exchange_order_id_ready() {
-        cv_.notify_all();
-    }
-
-private:
-    mutable std::mutex mutex_;
-    std::condition_variable cv_;
+    // Note: Async wait for exchange_order_id should be handled at the
+    // ClientOrderTracker level, not within the order itself, to maintain
+    // copyability of InFlightOrder objects
 };
 
 } // namespace latentspeed::connector

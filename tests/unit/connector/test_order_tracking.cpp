@@ -102,33 +102,9 @@ TEST(InFlightOrder, RemainingAmount) {
     EXPECT_DOUBLE_EQ(order.remaining_amount(), 0.0);
 }
 
-TEST(InFlightOrder, AsyncExchangeOrderId) {
-    InFlightOrder order;
-    order.client_order_id = "test_order_1";
-    
-    // Start async wait in separate thread
-    std::thread waiter([&order]() {
-        auto result = order.get_exchange_order_id_async(2s);
-        EXPECT_TRUE(result.has_value());
-        EXPECT_EQ(*result, "exchange_123");
-    });
-    
-    // Simulate delay before setting exchange order ID
-    std::this_thread::sleep_for(100ms);
-    order.exchange_order_id = "exchange_123";
-    order.notify_exchange_order_id_ready();
-    
-    waiter.join();
-}
-
-TEST(InFlightOrder, AsyncExchangeOrderIdTimeout) {
-    InFlightOrder order;
-    order.client_order_id = "test_order_1";
-    
-    // This should timeout
-    auto result = order.get_exchange_order_id_async(100ms);
-    EXPECT_FALSE(result.has_value());
-}
+// Async exchange order ID tests removed - this functionality
+// should be handled at the ClientOrderTracker level to maintain
+// InFlightOrder copyability
 
 // ============================================================================
 // TESTS: CLIENT ORDER TRACKER
@@ -145,7 +121,7 @@ TEST(ClientOrderTracker, StartStopTracking) {
     
     EXPECT_EQ(tracker.active_order_count(), 0);
     
-    tracker.start_tracking(order);
+    tracker.start_tracking(std::move(order));
     EXPECT_EQ(tracker.active_order_count(), 1);
     
     tracker.stop_tracking("test_order_1");
@@ -160,7 +136,7 @@ TEST(ClientOrderTracker, GetOrder) {
     order.trading_pair = "BTC-USD";
     order.amount = 0.1;
     
-    tracker.start_tracking(order);
+    tracker.start_tracking(std::move(order));
     
     // Get by client order ID
     auto result = tracker.get_order("test_order_1");
@@ -181,7 +157,7 @@ TEST(ClientOrderTracker, GetOrderByExchangeId) {
     order.exchange_order_id = "exchange_123";
     order.trading_pair = "BTC-USD";
     
-    tracker.start_tracking(order);
+    tracker.start_tracking(std::move(order));
     
     // Get by exchange order ID
     auto result = tracker.get_order_by_exchange_id("exchange_123");
@@ -208,7 +184,7 @@ TEST(ClientOrderTracker, OrderLifecycle) {
     order.creation_timestamp = 1234567890;
     
     // Start tracking
-    tracker.start_tracking(order);
+    tracker.start_tracking(std::move(order));
     EXPECT_EQ(tracker.active_order_count(), 1);
     
     // Process order created update
@@ -280,22 +256,22 @@ TEST(ClientOrderTracker, FillableOrders) {
     InFlightOrder order1;
     order1.client_order_id = "order_1";
     order1.current_state = OrderState::OPEN;
-    tracker.start_tracking(order1);
+    tracker.start_tracking(std::move(order1));
     
     InFlightOrder order2;
     order2.client_order_id = "order_2";
     order2.current_state = OrderState::PARTIALLY_FILLED;
-    tracker.start_tracking(order2);
+    tracker.start_tracking(std::move(order2));
     
     InFlightOrder order3;
     order3.client_order_id = "order_3";
     order3.current_state = OrderState::FILLED;
-    tracker.start_tracking(order3);
+    tracker.start_tracking(std::move(order3));
     
     InFlightOrder order4;
     order4.client_order_id = "order_4";
     order4.current_state = OrderState::PENDING_SUBMIT;
-    tracker.start_tracking(order4);
+    tracker.start_tracking(std::move(order4));
     
     // Get fillable orders
     auto fillable = tracker.all_fillable_orders();
@@ -315,7 +291,7 @@ TEST(ClientOrderTracker, AutoCleanup) {
     order.trading_pair = "BTC-USD";
     order.amount = 0.1;
     
-    tracker.start_tracking(order);
+    tracker.start_tracking(std::move(order));
     EXPECT_EQ(tracker.active_order_count(), 1);
     
     // Mark as filled (terminal state)
@@ -343,7 +319,7 @@ TEST(ClientOrderTracker, ConcurrentAccess) {
                 order.client_order_id = "order_" + std::to_string(i * 100 + j);
                 order.trading_pair = "BTC-USD";
                 order.amount = 0.1;
-                tracker.start_tracking(order);
+                tracker.start_tracking(std::move(order));
             }
         });
     }
@@ -381,7 +357,7 @@ TEST(ClientOrderTracker, EventCallback) {
     
     InFlightOrder order;
     order.client_order_id = "test_order_1";
-    tracker.start_tracking(order);
+    tracker.start_tracking(std::move(order));
     
     // Trigger update event
     OrderUpdate update{

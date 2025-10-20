@@ -33,10 +33,10 @@ public:
     /**
      * @brief Start tracking an order (MUST be called BEFORE submission)
      */
-    void start_tracking(InFlightOrder order) {
+    void start_tracking(InFlightOrder&& order) {
         std::unique_lock lock(mutex_);
         
-        const std::string& order_id = order.client_order_id;
+        const std::string order_id = order.client_order_id;  // Copy ID before move
         tracked_orders_.emplace(order_id, std::move(order));
         
         spdlog::debug("[OrderTracker] Started tracking order: {}", order_id);
@@ -67,7 +67,7 @@ public:
         
         auto it = tracked_orders_.find(client_order_id);
         if (it != tracked_orders_.end()) {
-            return std::make_optional(it->second);
+            return std::optional<InFlightOrder>(it->second);
         }
         return std::nullopt;
     }
@@ -82,7 +82,7 @@ public:
         
         for (const auto& [_, order] : tracked_orders_) {
             if (order.exchange_order_id == exchange_order_id) {
-                return std::make_optional(order);
+                return std::optional<InFlightOrder>(order);
             }
         }
         return std::nullopt;
