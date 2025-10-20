@@ -154,7 +154,6 @@ public:
         // Update exchange order ID if provided
         if (update.exchange_order_id.has_value()) {
             order.exchange_order_id = update.exchange_order_id;
-            order.notify_exchange_order_id_ready();
         }
         
         spdlog::info("[OrderTracker] Order {} state: {} -> {}", 
