@@ -2,6 +2,10 @@ cmake_minimum_required(VERSION 3.20)
 
 project(latentspeed VERSION 0.1.0 LANGUAGES CXX)
 
+# Feature toggles for venue adapters (deprecated ones default OFF)
+option(LATENTSPEED_ENABLE_BYBIT "Build Bybit adapter/client" OFF)
+option(LATENTSPEED_ENABLE_BINANCE "Build Binance adapter/client" OFF)
+
 # Enable CTest even though we keep dependencies minimal
 include(CTest)
 
@@ -29,29 +33,44 @@ find_package(args REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(ZMQ REQUIRED libzmq)
 
-# It will be available through vcpkg include directories
-
 # Add subdirectories
 add_subdirectory(benchmark)
 
 # Trading Engine Service executable
-add_executable(trading_engine_service
+set(LS_ENGINE_SOURCES
   src/main.cpp
   src/trading_engine_service.cpp
   src/market_data_provider.cpp
   src/exchange_interface.cpp
   src/feed_handler.cpp
   src/exchange/exchange_client.cpp
-  src/exchange/bybit_client.cpp
+  src/adapters/hyperliquid_adapter.cpp
+  src/adapters/hyperliquid_asset_resolver.cpp
+  src/adapters/python_hl_signer.cpp
+  src/core/symbol/symbol_mapper.cpp
+  src/core/reasons/reason_mapper.cpp
+  src/engine/exec_dto.cpp
+  src/core/net/http_client.cpp
+  src/core/net/hl_ws_post_client.cpp
+  src/core/auth/bybit_auth_provider.cpp
+  src/core/auth/credentials_resolver.cpp
 )
 
-# # dYdX Provider example
-# add_executable(dydx_provider
-#   examples/dydx_provider.cpp
-#   src/market_data_provider.cpp
-#   src/exchange_interface.cpp
-#   src/feed_handler.cpp
-# )
+if(LATENTSPEED_ENABLE_BYBIT)
+  list(APPEND LS_ENGINE_SOURCES
+    src/exchange/bybit_client.cpp
+    src/adapters/bybit_adapter.cpp
+  )
+endif()
+
+if(LATENTSPEED_ENABLE_BINANCE)
+  list(APPEND LS_ENGINE_SOURCES
+    src/exchange/binance_client.cpp
+    src/adapters/binance_adapter.cpp
+  )
+endif()
+
+add_executable(trading_engine_service ${LS_ENGINE_SOURCES})
 
 # MarketStream - Production Market Data Provider (YAML-based)
 add_executable(marketstream
@@ -76,7 +95,7 @@ target_link_libraries(trading_engine_service PRIVATE
   CURL::libcurl
   Boost::system
   rapidjson
-  yaml-cpp
+  yaml-cpp::yaml-cpp
   spdlog::spdlog
 )
 
@@ -88,7 +107,7 @@ target_link_libraries(marketstream PRIVATE
   ${ZMQ_LIBRARIES} 
   Boost::system
   rapidjson
-  yaml-cpp
+  yaml-cpp::yaml-cpp
   spdlog::spdlog
 )
 
@@ -136,4 +155,18 @@ if(BUILD_TESTING)
     )
     target_include_directories(action_dispatch_tests PRIVATE include)
     add_test(NAME action_dispatch_tests COMMAND action_dispatch_tests)
+
+    add_executable(symbol_mapper_test
+        tests/symbol_mapper_test.cpp
+        src/core/symbol/symbol_mapper.cpp
+    )
+    target_include_directories(symbol_mapper_test PRIVATE include)
+    add_test(NAME symbol_mapper_test COMMAND symbol_mapper_test)
+
+    add_executable(reason_mapper_test
+        tests/reason_mapper_test.cpp
+        src/core/reasons/reason_mapper.cpp
+    )
+    target_include_directories(reason_mapper_test PRIVATE include)
+    add_test(NAME reason_mapper_test COMMAND reason_mapper_test)
 endif()

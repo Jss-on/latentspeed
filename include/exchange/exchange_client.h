@@ -87,6 +87,7 @@ struct OrderUpdate {
  */
 struct OpenOrderBrief {
     std::string client_order_id;
+    std::string exchange_order_id; // exchange-assigned order id if available
     std::string symbol;
     std::string side;
     std::string order_type;
@@ -115,8 +116,8 @@ public:
     
     /**
      * @brief Initialize the exchange client
-     * @param api_key API key for authentication
-     * @param api_secret API secret for authentication
+     * @param api_key Credential 1 (CEX: API key; DEX like Hyperliquid: user/subaccount wallet address 0x...)
+     * @param api_secret Credential 2 (CEX: API secret; DEX like Hyperliquid: agent wallet private key hex)
      * @param testnet Whether to use testnet/demo endpoints
      * @return true if initialization successful
      */
@@ -235,4 +236,3 @@ protected:
 };
 
 } // namespace latentspeed
-

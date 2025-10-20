@@ -17,6 +17,9 @@
 #include <sstream>
 #include <stdexcept>
 #include <algorithm>  // added for std::max
+#include <cstdlib>
+#include "core/net/http_client.h"
+#include "core/auth/auth_provider.h"
 
 // Put near the top of bybit_client.cpp
 namespace {
@@ -1009,6 +1012,30 @@ BybitClient::build_signed_request(const std::string& method,
 std::string BybitClient::perform_rest_request_locked(const std::string& method,
                                                      const std::string& endpoint,
                                                      const std::string& params_json) {
+    // Phase 2 pilot: optionally use shared HttpClient + AuthProvider for REST
+    static const bool kUseHttp = [](){ const char* v = std::getenv("LATENTSPEED_USE_HTTP_CLIENT"); return v && (std::string(v)=="1"||std::string(v)=="true"); }();
+    if (kUseHttp) {
+        try {
+            // Build Bybit v5 headers via auth provider
+            latentspeed::auth::BybitAuthProvider authp;
+            std::string ts;
+            auto hdrs = authp.build_headers(method, endpoint, params_json, api_key_, api_secret_, ts);
+            std::vector<latentspeed::nethttp::Header> req_hdrs;
+            req_hdrs.reserve(hdrs.size()+2);
+            for (auto& kv : hdrs) req_hdrs.push_back({kv.name, kv.value});
+            req_hdrs.push_back({"User-Agent", "LatentSpeed/1.0"});
+            req_hdrs.push_back({"Connection", "keep-alive"});
+
+            latentspeed::nethttp::HttpClient http;
+            const std::string scheme = "https";
+            const std::string body = (method == "POST") ? params_json : std::string();
+            auto res = http.request(method, scheme, rest_host_, rest_port_, endpoint, req_hdrs, body);
+            return res;
+        } catch (const std::exception& e) {
+            spdlog::warn("[BybitClient] HttpClient path failed (fallback to Beast): {}", e.what());
+            // fall through to Beast path below
+        }
+    }
     for (int attempt = 0; attempt < 2; ++attempt) {
         if (!ensure_rest_connection_locked()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -1832,6 +1859,8 @@ std::vector<OpenOrderBrief> BybitClient::list_open_orders(
             if (!it->IsObject()) continue;
 
             OpenOrderBrief b;
+            if (it->HasMember("orderId") && (*it)["orderId"].IsString())
+                b.exchange_order_id = (*it)["orderId"].GetString();
             if (it->HasMember("orderLinkId") && (*it)["orderLinkId"].IsString())
                 b.client_order_id = (*it)["orderLinkId"].GetString();
             if (b.client_order_id.empty()) continue; // we rehydrate by cl_id

@@ -426,12 +426,18 @@ while True:
 
 ## 🔒 Production Deployment
 
-See [PRODUCTION.md](PRODUCTION.md) for complete deployment guide including:
+See PRODUCTION.md for the complete deployment guide, including:
 - Systemd service configuration
 - CPU affinity and real-time priority
 - Network tuning for low latency
 - Monitoring and logging
 - Multi-environment configs
+
+Summary of live trading features:
+- Exchange Support: Bybit, Binance Futures (UM), Hyperliquid (DEX)
+- Order Types: Market and limit orders with various time-in-force options
+- Real-Time Updates: WebSocket streaming for order status and fills
+- Error Handling: Comprehensive error reporting and recovery mechanisms
 
 ## 📊 Data Formats
 
@@ -475,7 +481,44 @@ See [PRODUCTION.md](PRODUCTION.md) for complete deployment guide including:
 
 ### Order Execution (ZMQ)
 
-See [Order Message Formats](#order-message-formats) section above.
+See Order Message Formats section above.
+
+#### Currently Supported
+- Bybit: Full support for spot and perpetual trading
+  - Testnet: testnet.bybit.com
+  - Mainnet: api.bybit.com
+- Binance Futures (UM/USDT-M): Trading via REST + real-time user-data WS updates
+  - Testnet REST: https://testnet.binancefuture.com (prefix /fapi/v1)
+  - Mainnet REST: https://fapi.binance.com (prefix /fapi/v1)
+  - User Data WS (updates/fills):
+    - Testnet: wss://stream.binancefuture.com/ws/<listenKey>
+    - Mainnet: wss://fstream.binance.com/ws/<listenKey>
+- Hyperliquid (DEX): REST + WS post trading, private WS streams (orderUpdates/userEvents/userFills)
+  - Mainnet REST: https://api.hyperliquid.xyz / WS: wss://api.hyperliquid.xyz/ws
+  - Testnet REST: https://api.hyperliquid-testnet.xyz / WS: wss://api.hyperliquid-testnet.xyz/ws
+
+#### Credentials & Authentication
+
+Credentials are resolved by a central resolver that merges CLI and environment variables.
+
+- Bybit (CEX):
+  - LATENTSPEED_BYBIT_API_KEY, LATENTSPEED_BYBIT_API_SECRET
+  - LATENTSPEED_BYBIT_USE_TESTNET=1|0
+- Binance Futures (CEX):
+  - LATENTSPEED_BINANCE_API_KEY, LATENTSPEED_BINANCE_API_SECRET
+  - LATENTSPEED_BINANCE_USE_TESTNET=1|0
+  - Optional: LATENTSPEED_BINANCE_USE_WS_TRADE=1
+- Hyperliquid (DEX):
+  - LATENTSPEED_HYPERLIQUID_USER_ADDRESS = 0x… address
+  - LATENTSPEED_HYPERLIQUID_PRIVATE_KEY = 0x… hex private key
+  - LATENTSPEED_HYPERLIQUID_USE_TESTNET=1|0
+
+Alternatively pass via CLI as --api-key (address) and --api-secret (private key). See docs/HYPERLIQUID_ADAPTER_USAGE.md.
+
+#### Security Notes
+- Never log secrets; keep secrets in process memory only.
+- Use environment variables or a secure vault for production deployments.
+- Prefer separate agent wallets per process/subaccount for Hyperliquid.
 
 ## 📦 Dependencies
 
@@ -493,29 +536,71 @@ Managed via vcpkg (`vcpkg.json`):
 ### Project Structure
 ```
 latentspeed/
-├── src/
-│   ├── marketstream.cpp            # Production: Market data provider
-│   ├── main.cpp                    # Production: Trading engine entry
-│   ├── trading_engine_service.cpp  # Trading engine implementation
-│   ├── market_data_provider.cpp    # Market data pipeline
-│   ├── exchange_interface.cpp      # Exchange parsers (dYdX, Bybit)
-│   ├── feed_handler.cpp            # Multi-feed coordinator
-│   └── exchange/
-│       ├── bybit_client.cpp        # Bybit REST API client
-│       └── exchange_client.cpp     # Base exchange client
 ├── include/
 │   ├── trading_engine_service.h
 │   ├── market_data_provider.h
 │   ├── exchange_interface.h
 │   ├── feed_handler.h
+│   ├── reason_code_mapper.h
+│   ├── rolling_stats.h
+│   ├── hft_data_structures.h
+│   ├── engine/
+│   │   ├── exec_dto.h
+│   │   ├── normalized_order.h
+│   │   └── venue_router.h
+│   ├── exchange/
+│   │   ├── bybit_client.h
+│   │   ├── exchange_client.h
+│   │   └── binance_client.h
+│   ├── adapters/
+│   │   ├── bybit_adapter.h
+│   │   ├── binance_adapter.h
+│   │   ├── hyperliquid_adapter.h
+│   │   ├── hyperliquid_asset_resolver.h
+│   │   └── python_hl_signer.h
+│   └── core/
+│       ├── auth/
+│       │   ├── auth_provider.h
+│       │   └── credentials_resolver.h
+│       ├── net/
+│       │   ├── ws_client.h
+│       │   ├── http_client.h
+│       │   └── hl_ws_post_client.h
+│       ├── reasons/
+│       │   └── reason_mapper.h
+│       ├── symbol/
+│       │   └── symbol_mapper.h
+│       └── util/
+│           └── num_string.h
+├── src/
+│   ├── marketstream.cpp
+│   ├── main.cpp
+│   ├── trading_engine_service.cpp
+│   ├── market_data_provider.cpp
+│   ├── exchange_interface.cpp
+│   ├── feed_handler.cpp
+│   ├── engine/
+│   │   └── exec_dto.cpp
+│   ├── core/
+│   │   ├── auth/
+│   │   │   ├── bybit_auth_provider.cpp
+│   │   │   └── credentials_resolver.cpp
+│   │   ├── net/
+│   │   │   ├── http_client.cpp
+│   │   │   └── hl_ws_post_client.cpp
+│   │   ├── reasons/
+│   │   │   └── reason_mapper.cpp
+│   │   └── symbol/
+│   │       └── symbol_mapper.cpp
 │   └── exchange/
-│       ├── bybit_client.h
-│       └── exchange_client.h
-├── config.yml                      # MarketStream configuration
-├── CMakeLists.txt                  # Build configuration
-├── run.sh                          # Build automation script
-├── PRODUCTION.md                   # Production deployment guide
-└── vcpkg.json                      # Dependencies
+│       ├── bybit_client.cpp
+│       ├── exchange_client.cpp
+│       └── binance_client.cpp
+├── config.yml
+├── CMakeLists.txt
+├── run.sh
+├── PRODUCTION.md
+└── vcpkg.json
 ```
 
 ### Adding Exchange Support
