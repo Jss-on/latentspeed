@@ -36,6 +36,15 @@ pkg_check_modules(ZMQ REQUIRED libzmq)
 # Add subdirectories
 add_subdirectory(benchmark)
 
+# Phase 1: Connector Framework (Hummingbot Architecture)
+add_subdirectory(src/connector)
+
+# Tests (if enabled)
+if(BUILD_TESTING)
+    enable_testing()
+    add_subdirectory(tests/unit/connector)
+endif()
+
 # Trading Engine Service executable
 set(LS_ENGINE_SOURCES
   src/main.cpp
