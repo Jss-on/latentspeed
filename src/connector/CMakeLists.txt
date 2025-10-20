@@ -1,11 +1,12 @@
 # Connector Framework Library
-# Phase 1: Core Architecture
+# Phases 1-4: Core Architecture + Auth
 
 cmake_minimum_required(VERSION 3.20)
 
 # Create connector framework library
 add_library(connector_framework
     connector_base.cpp
+    hyperliquid_auth.cpp
 )
 
 target_include_directories(connector_framework
@@ -13,9 +14,12 @@ target_include_directories(connector_framework
         ${CMAKE_SOURCE_DIR}/include
 )
 
+find_package(nlohmann_json CONFIG REQUIRED)
+
 target_link_libraries(connector_framework
     PUBLIC
         spdlog::spdlog
+        nlohmann_json::nlohmann_json
 )
 
 # Require C++20
