@@ -321,8 +321,8 @@ void MarketDataProvider::processing_thread() {
                                  static_cast<int>(msg_type), message_str.substr(0, 100));
                     
                     if (msg_type == ExchangeInterface::MessageType::TRADE) {
-                        // Compute derived features
-                        compute_trade_features(tick);
+                        // Compute derived features - DISABLED for performance
+                        // compute_trade_features(tick);
                         
                         // Get sequence number
                         std::string stream_key = std::string(tick.exchange.c_str()) + ":trade:" + 
@@ -336,8 +336,8 @@ void MarketDataProvider::processing_thread() {
                         stats_.trades_processed.fetch_add(1);
                     } 
                     else if (msg_type == ExchangeInterface::MessageType::BOOK) {
-                        // Compute derived features
-                        compute_book_features(snapshot);
+                        // Compute derived features - DISABLED for performance
+                        // compute_book_features(snapshot);
                         
                         // Get sequence number
                         std::string stream_key = std::string(snapshot.exchange.c_str()) + ":book:" + 
@@ -600,8 +600,8 @@ bool MarketDataProvider::parse_trade_data(const rapidjson::Value& doc, MarketTic
         }
         
         if (!tick.symbol.empty() && tick.price > 0 && tick.amount > 0) {
-            // Compute derived features
-            compute_trade_features(tick);
+            // Compute derived features - DISABLED for performance
+            // compute_trade_features(tick);
             
             // Assign sequence number
             std::string seq_key = std::string(tick.exchange.c_str()) + ":preprocessed_trades:" + std::string(tick.symbol.c_str());
@@ -657,8 +657,8 @@ bool MarketDataProvider::parse_orderbook_data(const rapidjson::Value& doc, Order
         }
         
         if (!snapshot.symbol.empty() && snapshot.bids[0].price > 0 && snapshot.asks[0].price > 0) {
-            // Compute derived features
-            compute_book_features(snapshot);
+            // Compute derived features - DISABLED for performance
+            // compute_book_features(snapshot);
             
             // Assign sequence number
             std::string seq_key = std::string(snapshot.exchange.c_str()) + ":preprocessed_book:" + std::string(snapshot.symbol.c_str());
