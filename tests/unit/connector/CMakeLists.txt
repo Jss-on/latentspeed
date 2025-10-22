@@ -53,9 +53,29 @@ target_link_libraries(test_hyperliquid_utils
         nlohmann_json::nlohmann_json
 )
 
+# Phase 5 tests
+find_package(Boost REQUIRED COMPONENTS system)
+find_package(OpenSSL REQUIRED)
+
+add_executable(test_hyperliquid_connector
+    test_hyperliquid_connector.cpp
+)
+
+target_link_libraries(test_hyperliquid_connector
+    PRIVATE
+        connector_framework
+        GTest::gtest
+        GTest::gtest_main
+        nlohmann_json::nlohmann_json
+        Boost::system
+        OpenSSL::SSL
+        OpenSSL::Crypto
+)
+
 # Add to CTest
 include(GoogleTest)
 gtest_discover_tests(test_connector_base)
 gtest_discover_tests(test_order_tracking)
 gtest_discover_tests(test_order_book)
 gtest_discover_tests(test_hyperliquid_utils)
+gtest_discover_tests(test_hyperliquid_connector)
