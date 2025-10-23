@@ -773,7 +773,12 @@ ExchangeInterface::MessageType HyperliquidExchange::parse_message(
                     std::chrono::system_clock::now().time_since_epoch()
                 ).count();
                 tick.exchange.assign("HYPERLIQUID");
-                tick.symbol.assign(trade["coin"].GetString());
+                {
+                    std::string coin = trade["coin"].GetString();
+                    // Normalize outbound symbol to BASE-USDC-PERP for cross-venue parity
+                    std::transform(coin.begin(), coin.end(), coin.begin(), ::toupper);
+                    tick.symbol.assign(coin + "-USDC-PERP");
+                }
                 
                 // Parse price (px)
                 if (trade.HasMember("px") && trade["px"].IsString()) {
@@ -796,10 +801,10 @@ ExchangeInterface::MessageType HyperliquidExchange::parse_message(
                     tick.trade_id.assign(std::to_string(trade["tid"].GetInt64()));
                 }
                 
-                // Parse timestamp if available
-                if (trade.HasMember("time") && trade["time"].IsNumber()) {
-                    tick.timestamp_ns = trade["time"].GetInt64() * 1000000; // Convert ms to ns
-                }
+                // Keep local receipt timestamp for staleness gating.
+                // Hyperliquid 'time' reflects server time and may skew vs local clock,
+                // causing false stale triggers downstream. We intentionally do not
+                // override tick.timestamp_ns here.
                 
                 return MessageType::TRADE;
             }
@@ -818,12 +823,14 @@ ExchangeInterface::MessageType HyperliquidExchange::parse_message(
                     std::chrono::system_clock::now().time_since_epoch()
                 ).count();
                 snapshot.exchange.assign("HYPERLIQUID");
-                snapshot.symbol.assign(data["coin"].GetString());
-                
-                // Parse timestamp if available
-                if (data.HasMember("time") && data["time"].IsNumber()) {
-                    snapshot.timestamp_ns = data["time"].GetInt64() * 1000000; // Convert ms to ns
+                {
+                    std::string coin = data["coin"].GetString();
+                    std::transform(coin.begin(), coin.end(), coin.begin(), ::toupper);
+                    snapshot.symbol.assign(coin + "-USDC-PERP");
                 }
+                
+                // Keep local receipt timestamp for staleness gating.
+                // Hyperliquid 'time' may be skewed; do not override snapshot.timestamp_ns.
                 
                 // Parse levels: [Array<WsLevel>, Array<WsLevel>]
                 // WsLevel format: { px: string, sz: string, n: number }

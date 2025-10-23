@@ -139,6 +139,16 @@ int main(int argc, char** argv) {
             feed_config.zmq_trades_port = config["zmq"]["port"].as<int>(5556);
             feed_config.zmq_books_port = feed_config.zmq_trades_port + 1;
             feed_config.window_size = config["zmq"]["window_size"].as<int>(20);
+            feed_config.depth_levels = config["zmq"]["depth_levels"].as<int>(10);
+            // Deltas/ckpts toggle: emit deltas and checkpoints (suppress snapshots) when enabled
+            if (config["zmq"]["deltas"]) {
+                auto dlt = config["zmq"]["deltas"];
+                bool enabled = dlt["enabled"].as<bool>(false);
+                feed_config.emit_delta = enabled;
+                feed_config.emit_ckpt = enabled;
+                feed_config.emit_snapshot = !enabled;
+                feed_config.ckpt_every_ms = dlt["checkpoint_every_ms"].as<int>(1000);
+            }
         }
         
         g_feed_handler = std::make_unique<FeedHandler>(feed_config);
@@ -193,9 +203,17 @@ int main(int argc, char** argv) {
             spdlog::info("  - Trades:     tcp://{}:{}", 
                         config["zmq"]["host"].as<std::string>("127.0.0.1"),
                         feed_config.zmq_trades_port);
-            spdlog::info("  - Orderbooks: tcp://{}:{}", 
-                        config["zmq"]["host"].as<std::string>("127.0.0.1"),
-                        feed_config.zmq_books_port);
+            if (feed_config.emit_delta || feed_config.emit_ckpt) {
+                spdlog::info("  - Orderbooks (delta/ckpt): tcp://{}:{}", 
+                            config["zmq"]["host"].as<std::string>("127.0.0.1"),
+                            feed_config.zmq_books_port);
+            } else if (feed_config.emit_snapshot) {
+                spdlog::info("  - Orderbooks (snapshots):  tcp://{}:{}", 
+                            config["zmq"]["host"].as<std::string>("127.0.0.1"),
+                            feed_config.zmq_books_port);
+            } else {
+                spdlog::info("  - Orderbooks: disabled");
+            }
         }
         spdlog::info("===========================================\n");
         

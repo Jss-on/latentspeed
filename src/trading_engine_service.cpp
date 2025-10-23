@@ -1217,6 +1217,11 @@ void TradingEngineService::place_cex_order_hft(const HFTExecutionOrder& order) {
                 return;
             }
             req.price = format_decimal(order.price);
+        } else if (req.order_type == "market") {
+            // Provide price hint for venues that emulate market via limit-IOC (e.g., Hyperliquid compatibility)
+            if (order.price > 0.0) {
+                req.price = format_decimal(order.price);
+            }
         }
 
         // Tick/lot enforcement is handled by trading_core's OrderManager; engine does not re‑enforce here.
@@ -1256,7 +1261,15 @@ void TradingEngineService::place_cex_order_hft(const HFTExecutionOrder& order) {
                 trigger_direction = (req.side == "buy") ? "1" : "2";
             }
             req.extra_params["triggerDirection"] = trigger_direction;
-            req.extra_params["orderFilter"] = "StopOrder";
+            // Map role tag to HL filter for classification: TakeProfit vs StopOrder
+            std::string order_filter = "StopOrder";
+            if (auto* role = order.tags.find(FixedString<32>("role")); role != nullptr) {
+                auto r = to_lower_ascii(role->view());
+                if (r == "tp" || r == "takeprofit") {
+                    order_filter = "TakeProfit";
+                }
+            }
+            req.extra_params["orderFilter"] = order_filter;
 
             // Stop-limit retains explicit limit price if provided
             if (is_stop_limit && order.price > 0.0) {

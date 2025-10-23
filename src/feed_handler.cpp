@@ -32,6 +32,16 @@ void FeedHandler::add_feed(
         exchange_config.symbols,
         entry.exchange.get()  // Pass exchange interface
     );
+    // Configure provider outputs from handler config (snapshot vs delta/ckpt)
+    try {
+        entry.provider->configure_outputs(
+            config_.emit_snapshot,
+            config_.emit_delta,
+            config_.emit_ckpt,
+            config_.ckpt_every_ms,
+            config_.depth_levels
+        );
+    } catch (const std::exception&){ /* best-effort */ }
     
     // Set callbacks if provided
     if (callbacks) {
@@ -126,6 +136,17 @@ ConfigLoader::LoadedConfig ConfigLoader::load_from_yaml(const std::string& path)
             }
             if (zmq["depth_levels"]) {
                 result.handler_config.depth_levels = zmq["depth_levels"].as<int>();
+            }
+            // Delta/ckpt sub-config
+            if (zmq["deltas"]) {
+                auto dlt = zmq["deltas"];
+                bool enabled = dlt["enabled"].as<bool>(false);
+                result.handler_config.emit_delta = enabled;
+                result.handler_config.emit_ckpt = enabled;
+                result.handler_config.emit_snapshot = !enabled;
+                if (dlt["checkpoint_every_ms"]) {
+                    result.handler_config.ckpt_every_ms = dlt["checkpoint_every_ms"].as<int>(1000);
+                }
             }
         }
         

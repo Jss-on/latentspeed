@@ -215,6 +215,9 @@ public:
     
     const Stats& get_stats() const { return stats_; }
 
+    // Configure outputs (snapshot vs delta/ckpt) and related knobs
+    void configure_outputs(bool emit_snapshot, bool emit_delta, bool emit_ckpt, int ckpt_every_ms, int depth_levels);
+
 private:
     // Boost.Beast WebSocket type aliases
     using tcp = boost::asio::ip::tcp;
@@ -343,6 +346,21 @@ private:
     std::unordered_map<std::string, RollingStats> mid_stats_;      // For book midpoint volatility
     std::unordered_map<std::string, RollingStats> trade_stats_;    // For trade price volatility
     std::mutex stats_mutex_;
+
+    // Output selection and state (delta/ckpt synthesis)
+    bool emit_snapshot_ = true;
+    bool emit_delta_ = false;
+    bool emit_ckpt_ = false;
+    int ckpt_every_ms_ = 1000;
+    int depth_levels_cfg_ = 10;
+    std::unordered_map<std::string, std::unordered_map<double,double>> last_bids_;
+    std::unordered_map<std::string, std::unordered_map<double,double>> last_asks_;
+    std::unordered_map<std::string, uint64_t> last_ckpt_ns_;
+
+    // Symbol canonicalization: coin (e.g., BTC) -> configured canonical symbol (e.g., BTC-USDT-PERP)
+    std::unordered_map<std::string, std::string> coin_to_canonical_;
+    std::string canonicalize_symbol(const std::string& sym) const;
+    static std::string _coin_from_canonical(const std::string& configured_symbol);
     
     /**
      * @brief Get next sequence number for a stream
@@ -368,6 +386,28 @@ private:
      * @brief Check if topic is a heartbeat message
      */
     bool is_heartbeat(const std::string& topic);
+
+    // New: emit deltas/checkpoints and (optionally) snapshots
+    void emit_book_outputs(const OrderBookSnapshot& snapshot);
+    std::string serialize_book_delta(
+        const std::string& symbol,
+        const std::string& exchange,
+        const std::vector<int>& side,
+        const std::vector<double>& px,
+        const std::vector<double>& sz,
+        uint64_t ts_ns,
+        uint64_t seq
+    );
+    std::string serialize_book_ckpt(
+        const std::string& symbol,
+        const std::string& exchange,
+        const std::vector<double>& bid_px,
+        const std::vector<double>& bid_sz,
+        const std::vector<double>& ask_px,
+        const std::vector<double>& ask_sz,
+        uint64_t ts_ns,
+        uint64_t seq
+    );
 };
 
 /**

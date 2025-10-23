@@ -8,6 +8,7 @@
 #include <rapidjson/error/en.h>
 #include <cctype>
 #include <sstream>
+#include <thread>
 
 namespace latentspeed {
 
@@ -58,25 +59,60 @@ bool HyperliquidAssetResolver::refresh_all() {
 bool HyperliquidAssetResolver::ensure_meta() {
     const auto now = std::chrono::steady_clock::now();
     if (!perp_coin_to_res_.empty() && (now - meta_time_) < ttl_) return true;
-    auto json = post_info("meta");
-    if (!json) return false;
-    perp_coin_to_res_.clear();
-    bool ok = parse_perp_meta_json(*json);
-    if (ok) meta_time_ = now;
-    return ok;
+    // Retry a few times if cache is empty; otherwise keep stale cache
+    const bool had_cache = !perp_coin_to_res_.empty();
+    int attempts = had_cache ? 1 : 5;
+    for (int i = 0; i < attempts; ++i) {
+        auto json = post_info("meta");
+        if (json) {
+            // Backup existing cache so we can restore on parse failure
+            std::unordered_map<std::string, HlResolution> backup = perp_coin_to_res_;
+            perp_coin_to_res_.clear();
+            bool ok = parse_perp_meta_json(*json);
+            if (ok) { meta_time_ = now; return true; }
+            // Restore previous cache
+            perp_coin_to_res_ = std::move(backup);
+        }
+        if (i + 1 < attempts) {
+            auto delay = std::chrono::milliseconds(200u << i); // 200ms, 400ms, 800ms, ...
+            std::this_thread::sleep_for(delay);
+        }
+    }
+    // On failure, keep using stale cache if present
+    if (had_cache) return true;
+    return false;
 }
 
 bool HyperliquidAssetResolver::ensure_spot_meta() {
     const auto now = std::chrono::steady_clock::now();
     if (!spot_index_to_tokens_.empty() && !token_name_to_id_.empty() && (now - spot_meta_time_) < ttl_) return true;
-    auto json = post_info("spotMeta");
-    if (!json) return false;
-    spot_index_to_tokens_.clear();
-    token_name_to_id_.clear();
-    token_id_to_name_.clear();
-    bool ok = parse_spot_meta_json(*json);
-    if (ok) spot_meta_time_ = now;
-    return ok;
+    // Retry a few times if cache is empty; otherwise keep stale cache
+    const bool had_cache = !spot_index_to_tokens_.empty() && !token_name_to_id_.empty();
+    int attempts = had_cache ? 1 : 5;
+    for (int i = 0; i < attempts; ++i) {
+        auto json = post_info("spotMeta");
+        if (json) {
+            // Backup existing cache so we can restore on parse failure
+            auto backup_pairs = spot_index_to_tokens_;
+            auto backup_name2id = token_name_to_id_;
+            auto backup_id2name = token_id_to_name_;
+            spot_index_to_tokens_.clear();
+            token_name_to_id_.clear();
+            token_id_to_name_.clear();
+            bool ok = parse_spot_meta_json(*json);
+            if (ok) { spot_meta_time_ = now; return true; }
+            // Restore previous cache
+            spot_index_to_tokens_ = std::move(backup_pairs);
+            token_name_to_id_ = std::move(backup_name2id);
+            token_id_to_name_ = std::move(backup_id2name);
+        }
+        if (i + 1 < attempts) {
+            auto delay = std::chrono::milliseconds(200u << i);
+            std::this_thread::sleep_for(delay);
+        }
+    }
+    if (had_cache) return true;
+    return false;
 }
 
 std::optional<HlResolution> HyperliquidAssetResolver::resolve_perp(std::string_view coin) {
@@ -209,6 +245,19 @@ bool HyperliquidAssetResolver::parse_spot_meta_json(const std::string& json) {
         }
     }
     return !spot_index_to_tokens_.empty() && !token_name_to_id_.empty();
+}
+
+std::optional<std::string> HyperliquidAssetResolver::resolve_perp_coin_by_index(int index) {
+    if (!ensure_meta()) return std::nullopt;
+    // In the current cache, we only keep coin -> {asset, sz_decimals}.
+    // Perform a small linear scan to find the matching coin by asset id.
+    // Universe length is modest; this runs rarely (rehydration/listing), so OK.
+    for (const auto& kv : perp_coin_to_res_) {
+        if (kv.second.asset == index) {
+            return kv.first; // coin name as stored (uppercased by parser)
+        }
+    }
+    return std::nullopt;
 }
 
 } // namespace latentspeed

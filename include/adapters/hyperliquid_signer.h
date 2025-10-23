@@ -29,6 +29,14 @@ public:
                                                       std::uint64_t nonce,
                                                       const std::optional<std::uint64_t>& expires_after,
                                                       bool is_mainnet) = 0;
+
+    // Build a ready-to-post payload (JSON string) including action, nonce, vaultAddress,
+    // isMainnet, and signature. Returns nullopt on failure.
+    virtual std::optional<std::string> build_action_payload(const std::string& private_key_hex_lower,
+                                                            const std::string& action_json,
+                                                            const std::optional<std::string>& vault_address_lower,
+                                                            std::uint64_t nonce,
+                                                            bool is_mainnet) { (void)private_key_hex_lower; (void)action_json; (void)vault_address_lower; (void)nonce; (void)is_mainnet; return std::nullopt; }
 };
 
 // Stub signer to allow compilation until Python/C++ signer is integrated.
@@ -41,6 +49,11 @@ public:
                                               bool) override {
         return std::nullopt;
     }
+
+    std::optional<std::string> build_action_payload(const std::string&, const std::string&,
+                                                    const std::optional<std::string>&,
+                                                    std::uint64_t,
+                                                    bool) override { return std::nullopt; }
 };
 
 } // namespace latentspeed
