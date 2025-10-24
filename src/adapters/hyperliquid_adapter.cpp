@@ -242,7 +242,8 @@ bool HyperliquidAdapter::initialize(const std::string& api_key,
     cfg_ = HyperliquidConfig::for_network(testnet_);
     resolver_ = std::make_unique<HyperliquidAssetResolver>(cfg_);
     nonce_mgr_ = std::make_unique<HyperliquidNonceManager>();
-    // Optional vault/subaccount address via env
+    // Vault/subaccount address: include ONLY if explicitly provided.
+    // Strict per-doc: omit when not trading on behalf of a vault/subaccount.
     if (const char* v = std::getenv("LATENTSPEED_HYPERLIQUID_VAULT_ADDRESS"); v && *v) {
         vault_address_ = util::to_lower_hex_address(std::string(v));
     } else {
@@ -300,7 +301,10 @@ bool HyperliquidAdapter::initialize(const std::string& api_key,
     std::string py = env_py && *env_py ? std::string(env_py) : std::string("python3");
     std::string script = env_script && *env_script ? std::string(env_script) : std::string("latentspeed/tools/hl_signer_bridge.py");
     signer_ = std::make_unique<PythonHyperliquidSigner>(py, script);
-    spdlog::info("[HL] init: network={}, user={}", (testnet_ ? "testnet" : "mainnet"), util::to_lower_hex_address(api_key_));
+    spdlog::info("[HL] init: network={}, user={}, vault={}",
+                 (testnet_ ? "testnet" : "mainnet"),
+                 util::to_lower_hex_address(api_key_),
+                 (vault_address_.has_value() ? *vault_address_ : std::string("<none>")));
     // M1 scaffold: do not attempt network/auth yet. Consider keys present as initialized.
     return true;
 }
@@ -334,6 +338,19 @@ bool HyperliquidAdapter::connect() {
                                 if (o.HasMember("cloid") && o["cloid"].IsString()) {
                                     std::string hlc = o["cloid"].GetString();
                                     upd.client_order_id = map_back_client_id(hlc);
+                                    // remember role if we generated this cloid
+                                    {
+                                        std::lock_guard<std::mutex> lk(cloid_map_mutex_);
+                                        auto it_r = cloid_to_role_.find(to_lower_ascii(hlc));
+                                        if (it_r != cloid_to_role_.end()) {
+                                            std::string role = it_r->second;
+                                            if (!upd.exchange_order_id.empty()) remember_oid_role(upd.exchange_order_id, role);
+                                        }
+                                    }
+                                }
+                                // also remember oid->client id mapping
+                                if (!upd.exchange_order_id.empty() && !upd.client_order_id.empty()) {
+                                    remember_oid_clientid(upd.exchange_order_id, upd.client_order_id);
                                 }
                             }
                             if (item.HasMember("status") && item["status"].IsString()) {
@@ -392,9 +409,23 @@ bool HyperliquidAdapter::connect() {
                                 if (private_ws_connected_ms_ && fill.timestamp_ms && (fill.timestamp_ms + 1000 < private_ws_connected_ms_)) {
                                     continue;
                                 }
+                                // Map oid -> client id and role for intent attribution
+                                try {
+                                    if (!fill.exchange_order_id.empty()) {
+                                        std::lock_guard<std::mutex> lk(cloid_map_mutex_);
+                                        auto itc = oid_to_clientid_.find(fill.exchange_order_id);
+                                        if (itc != oid_to_clientid_.end()) {
+                                            fill.client_order_id = itc->second;
+                                            fill.extra_data["intent"] = fill.client_order_id;
+                                        }
+                                        auto itr = oid_to_role_.find(fill.exchange_order_id);
+                                        if (itr != oid_to_role_.end()) {
+                                            fill.extra_data["role"] = itr->second;
+                                        }
+                                    }
+                                } catch (...) {}
                                 // Provide extra context
                                 if (!fill.side.empty()) fill.extra_data["side"] = fill.side;
-                                if (!fill.client_order_id.empty()) fill.extra_data["intent"] = fill.client_order_id;
                                 if (fill_cb_) fill_cb_(fill);
                             }
                         } else if (data.HasMember("nonUserCancel") && data["nonUserCancel"].IsArray()) {
@@ -459,6 +490,26 @@ bool HyperliquidAdapter::connect() {
         return connected_;
     }
     connected_ = (ws_post_ && ws_post_->is_connected());
+
+    // Optional preflight: verify user/API wallet recognition via a lightweight /info request
+    // Enable by setting LATENTSPEED_HL_PREFLIGHT=1
+    try {
+        if (const char* pf = std::getenv("LATENTSPEED_HL_PREFLIGHT"); pf && (*pf=='1' || *pf=='t' || *pf=='T')) {
+            const std::string user = util::to_lower_hex_address(api_key_);
+            auto parts = parse_base_url(cfg_.rest_base);
+            latentspeed::nethttp::HttpClient httpc;
+            std::vector<latentspeed::nethttp::Header> hdrs = {{"Content-Type","application/json"}};
+            rapidjson::Document req(rapidjson::kObjectType);
+            auto& alloc = req.GetAllocator();
+            req.AddMember("type", rapidjson::Value("openOrders", alloc), alloc);
+            req.AddMember("user", rapidjson::Value(user.c_str(), alloc), alloc);
+            rapidjson::StringBuffer sb; { rapidjson::Writer<rapidjson::StringBuffer> wr(sb); req.Accept(wr); }
+            auto resp = httpc.request("POST", parts.scheme, parts.host, parts.port, "/info", hdrs, sb.GetString());
+            spdlog::info("[HL] preflight openOrders ok for user {} ({} bytes)", user, resp.size());
+        }
+    } catch (const std::exception& e) {
+        spdlog::warn("[HL] preflight check failed: {}", e.what());
+    } catch (...) {}
     return connected_;
 }
 
@@ -753,9 +804,95 @@ OrderResponse HyperliquidAdapter::place_order(const OrderRequest& request) {
         ord.AddMember("c", rapidjson::Value(hlc.c_str(), alloc), alloc);
     }
     orders.PushBack(ord, alloc);
+
+    // If bracket bundling was requested (venue-agnostic params), append TP/SL as trigger orders.
+    std::string grouping_val = "na";
+    try {
+        auto itMode = request.extra_params.find("bracket.mode");
+        if (itMode != request.extra_params.end() && to_lower_ascii(itMode->second) == std::string{"bundle"}) {
+            // Side for exits is opposite of entry
+            bool exit_is_buy = !is_buy;
+            std::string exit_sz = request.extra_params.count("bracket.size") ? util::trim_trailing_zeros(request.extra_params.at("bracket.size")) : sz;
+            bool exit_ro = true;
+            auto itRO = request.extra_params.find("bracket.reduce_only");
+            if (itRO != request.extra_params.end()) {
+                std::string v = to_lower_ascii(itRO->second);
+                exit_ro = (v == "1" || v == "true" || v == "yes");
+            }
+            auto add_trigger = [&](const char* which){
+                std::string key_prefix = std::string("bracket.") + which + std::string(".");
+                auto itType = request.extra_params.find(key_prefix + "type");
+                auto itPx   = request.extra_params.find(key_prefix + "px");
+                if (itPx == request.extra_params.end()) return; // require px
+                std::string typ = (itType != request.extra_params.end()) ? to_lower_ascii(itType->second) : std::string("stop");
+                std::string px_str = util::trim_trailing_zeros(itPx->second);
+                rapidjson::Value child(rapidjson::kObjectType);
+                child.AddMember("a", res->asset, alloc);
+                child.AddMember("b", exit_is_buy, alloc);
+                // default p = px_str, adapter will snap for perps
+                std::string p_eff = px_str;
+                if (!is_spot && res->sz_decimals >= 0) p_eff = snap_and_format_perp_px(px_str, exit_is_buy, res->sz_decimals);
+                // Required pieces
+                // Prepare order type container outside branch to keep it in scope for canonical ordering below
+                rapidjson::Value tchild(rapidjson::kObjectType);
+                if (typ == std::string("limit")) {
+                    child.AddMember("p", rapidjson::Value(p_eff.c_str(), alloc), alloc);
+                    rapidjson::Value lim(rapidjson::kObjectType);
+                    lim.AddMember("tif", rapidjson::Value("Gtc", alloc), alloc);
+                    tchild.AddMember("limit", lim, alloc);
+                } else {
+                    // stop or stop_limit
+                    bool is_stop_limit = (typ == std::string("stop_limit"));
+                    // Limit price for stop_limit: use limit_px if provided, else px
+                    std::string limit_px = px_str;
+                    auto itL = request.extra_params.find(key_prefix + "limit_px");
+                    if (itL != request.extra_params.end() && !itL->second.empty()) {
+                        limit_px = util::trim_trailing_zeros(itL->second);
+                    }
+                    std::string limit_eff = (!is_spot && res->sz_decimals >= 0) ? snap_and_format_perp_px(limit_px, exit_is_buy, res->sz_decimals) : limit_px;
+                    // Include "p" for both stop and stop_limit. HL typed order expects a price string even when isMarket=true.
+                    child.AddMember("p", rapidjson::Value(limit_eff.c_str(), alloc), alloc);
+                    // Build trigger object
+                    rapidjson::Value trig(rapidjson::kObjectType);
+                    trig.AddMember("isMarket", !is_stop_limit, alloc);
+                    // Enforce HL perp precision on triggerPx as well.
+                    std::string trig_px_eff = px_str;
+                    if (!is_spot && res->sz_decimals >= 0) trig_px_eff = snap_and_format_perp_px(px_str, exit_is_buy, res->sz_decimals);
+                    trig.AddMember("triggerPx", rapidjson::Value(trig_px_eff.c_str(), alloc), alloc);
+                    // Indicate role for venue classification
+                    std::string tpsl = (std::string(which) == std::string("tp")) ? std::string("tp") : std::string("sl");
+                    trig.AddMember("tpsl", rapidjson::Value(tpsl.c_str(), alloc), alloc);
+                    tchild.AddMember("trigger", trig, alloc);
+                }
+                // Maintain canonical key order: a,b,p,s,r,t,c
+                child.AddMember("s", rapidjson::Value(exit_sz.c_str(), alloc), alloc);
+                child.AddMember("r", exit_ro, alloc);
+                child.AddMember("t", tchild, alloc);
+                // Generate a child cloid and map back to original id for intent routing
+                if (!request.client_order_id.empty()) {
+                    std::string cl_child = ensure_hl_cloid(std::string(request.client_order_id) + std::string(which));
+                    remember_cloid_mapping(cl_child, request.client_order_id);
+                    remember_cloid_role(cl_child, which);
+                    child.AddMember("c", rapidjson::Value(cl_child.c_str(), alloc), alloc);
+                }
+                orders.PushBack(child, alloc);
+            };
+            // Append TP then SL if present
+            add_trigger("tp");
+            add_trigger("sl");
+            // Grouping hint (OCO-like) when requested
+            auto itOco = request.extra_params.find("bracket.oco");
+            if (itOco != request.extra_params.end()) {
+                std::string v = to_lower_ascii(itOco->second);
+                if (v == "1" || v == "true" || v == "yes") grouping_val = "normalTpsl";
+            }
+        }
+    } catch (...) {
+        // best-effort; fall back to single order
+    }
+
     action.AddMember("orders", orders, alloc);
-    // Per SDK, grouping is "na" for standard order/trigger actions.
-    action.AddMember("grouping", rapidjson::Value("na", alloc), alloc);
+    action.AddMember("grouping", rapidjson::Value(grouping_val.c_str(), alloc), alloc);
 
     const uint64_t nonce = nonce_mgr_ ? nonce_mgr_->next() : 0;
     spdlog::info("[HL] place: asset={} side={} sz={} type={} tif={} px={} user={} nonce={}",
@@ -781,7 +918,7 @@ OrderResponse HyperliquidAdapter::place_order(const OrderRequest& request) {
                      (sig->s.size()>=8? sig->s.substr(0,8): sig->s));
     } catch (...) {}
 
-    // Prefer signer-built payload; do not fallback to avoid signature mismatches
+    // Prefer signer-built payload to avoid any divergence between signing and posting
     std::string payload_json;
     if (auto packed = signer_->build_action_payload(to_lower_ascii(api_secret_), sb_act.GetString(),
                                                     vault_address_,
@@ -798,6 +935,21 @@ OrderResponse HyperliquidAdapter::place_order(const OrderRequest& request) {
     } catch (...) {}
     // Log safe summary of payload
     log_hl_payload_summary(payload_json);
+    // Sanity check: r/s lengths should be 66 (0x + 64 hex). Warn if not; this commonly indicates malformed signature payload.
+    try {
+        rapidjson::Document chk; chk.Parse(payload_json.c_str());
+        if (!chk.HasParseError() && chk.IsObject() && chk.HasMember("signature") && chk["signature"].IsObject()) {
+            const auto& sig = chk["signature"];
+            if (sig.HasMember("r") && sig["r"].IsString()) {
+                size_t rl = std::strlen(sig["r"].GetString());
+                if (rl != 66) spdlog::warn("[HL] signature r length unusual: {} (expected 66)", rl);
+            }
+            if (sig.HasMember("s") && sig["s"].IsString()) {
+                size_t sl = std::strlen(sig["s"].GetString());
+                if (sl != 66) spdlog::warn("[HL] signature s length unusual: {} (expected 66)", sl);
+            }
+        }
+    } catch (...) {}
 
     // Prefer WS post
     std::string resp_json;
@@ -876,12 +1028,15 @@ OrderResponse HyperliquidAdapter::place_order(const OrderRequest& request) {
                                 std::string cl = request.client_order_id;
                                 confirm_resting_async(request.symbol, cl, oid_s, cl);
                             } catch (...) {}
+                            // Best-effort: remember mapping (no role here; orderUpdates will fill it in)
+                            remember_oid_clientid(oid_s, request.client_order_id);
                             return {true, "ok", std::optional<std::string>(oid_s), request.client_order_id, std::optional<std::string>("accepted"), {}};
                         }
                     } else if (st.IsObject() && st.HasMember("filled") && st["filled"].IsObject()) {
                         auto& fil = st["filled"];
                         std::string oid_str;
                         if (fil.HasMember("oid") && fil["oid"].IsUint64()) oid_str = std::to_string(fil["oid"].GetUint64());
+                        if (!oid_str.empty()) remember_oid_clientid(oid_str, request.client_order_id);
                         // Emit fill callback opportunistically
                         if (fill_cb_) {
                             FillData f{};
@@ -1745,6 +1900,24 @@ std::string HyperliquidAdapter::map_back_client_id(const std::string& hl_cloid) 
     auto it = cloid_to_clientid_.find(to_lower_ascii(hl_cloid));
     if (it != cloid_to_clientid_.end()) return it->second;
     return hl_cloid;
+}
+
+void HyperliquidAdapter::remember_cloid_role(const std::string& hl_cloid, const std::string& role) {
+    if (hl_cloid.empty() || role.empty()) return;
+    std::lock_guard<std::mutex> lk(cloid_map_mutex_);
+    cloid_to_role_[to_lower_ascii(hl_cloid)] = to_lower_ascii(role);
+}
+
+void HyperliquidAdapter::remember_oid_clientid(const std::string& oid, const std::string& client_id) {
+    if (oid.empty() || client_id.empty()) return;
+    std::lock_guard<std::mutex> lk(cloid_map_mutex_);
+    oid_to_clientid_[oid] = client_id;
+}
+
+void HyperliquidAdapter::remember_oid_role(const std::string& oid, const std::string& role) {
+    if (oid.empty() || role.empty()) return;
+    std::lock_guard<std::mutex> lk(cloid_map_mutex_);
+    oid_to_role_[oid] = to_lower_ascii(role);
 }
 
 } // namespace latentspeed

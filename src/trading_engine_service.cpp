@@ -1666,6 +1666,18 @@ void TradingEngineService::on_fill_hft(const FillData& fill_data) {
         fill->liquidity.assign(fill_data.liquidity.c_str());
         fill->ts_ns.store(get_current_time_ns_hft(), std::memory_order_relaxed);
 
+        // Lift adapter-provided extra_data intent/role into tags for strategy routing
+        try {
+            auto itIntent = fill_data.extra_data.find("intent");
+            if (itIntent != fill_data.extra_data.end() && !itIntent->second.empty()) {
+                fill->tags.insert(FixedString<32>("intent_id"), FixedString<64>(itIntent->second.c_str()));
+            }
+            auto itRole = fill_data.extra_data.find("role");
+            if (itRole != fill_data.extra_data.end() && !itRole->second.empty()) {
+                fill->tags.insert(FixedString<32>("role"), FixedString<64>(itRole->second.c_str()));
+            }
+        } catch (...) {}
+
         // Copy tags from original order if available
         OrderId lookup_id(fill->cl_id.c_str());
         bool is_perp = false;
@@ -1679,6 +1691,21 @@ void TradingEngineService::on_fill_hft(const FillData& fill_data) {
             if (fill->tags.find(FixedString<32>("venue")) == nullptr && !(*order_ptr)->venue.empty()) {
                 fill->tags.insert(FixedString<32>("venue"), FixedString<64>((*order_ptr)->venue.c_str()));
             }
+            // Preserve lifted intent/role if not already present
+            try {
+                if (fill->tags.find(FixedString<32>("intent_id")) == nullptr) {
+                    auto it = fill_data.extra_data.find("intent");
+                    if (it != fill_data.extra_data.end() && !it->second.empty()) {
+                        fill->tags.insert(FixedString<32>("intent_id"), FixedString<64>(it->second.c_str()));
+                    }
+                }
+                if (fill->tags.find(FixedString<32>("role")) == nullptr) {
+                    auto it = fill_data.extra_data.find("role");
+                    if (it != fill_data.extra_data.end() && !it->second.empty()) {
+                        fill->tags.insert(FixedString<32>("role"), FixedString<64>(it->second.c_str()));
+                    }
+                }
+            } catch (...) {}
             // Determine perp from original order's product_type
             std::string pt = to_lower_ascii((*order_ptr)->product_type.view());
             is_perp = (pt == "perpetual");

@@ -122,6 +122,11 @@ private:
     std::unordered_map<std::string, std::string> cloid_to_clientid_;
     // Map original client_order_id -> HL cloid, so we can cancel by client id later
     std::unordered_map<std::string, std::string> clientid_to_cloid_;
+    // Map HL cloid -> role ("tp"|"sl") for bundled brackets
+    std::unordered_map<std::string, std::string> cloid_to_role_;
+    // Map exchange oid -> client id and -> role for fill attribution
+    std::unordered_map<std::string, std::string> oid_to_clientid_;
+    std::unordered_map<std::string, std::string> oid_to_role_;
 
     // Minimal symbol -> last known fill price cache to support market fallback when BBO fetch fails
     std::mutex px_cache_mutex_;
@@ -130,6 +135,9 @@ private:
     static std::string ensure_hl_cloid(const std::string& maybe_id);
     void remember_cloid_mapping(const std::string& hl_cloid, const std::string& original_id);
     std::string map_back_client_id(const std::string& hl_cloid);
+    void remember_cloid_role(const std::string& hl_cloid, const std::string& role);
+    void remember_oid_clientid(const std::string& oid, const std::string& client_id);
+    void remember_oid_role(const std::string& oid, const std::string& role);
 
     void batcher_loop();
     void flush_queue(std::deque<std::shared_ptr<PendingOrderItem>>& q);
