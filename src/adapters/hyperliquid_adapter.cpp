@@ -426,7 +426,41 @@ bool HyperliquidAdapter::connect() {
                                 } catch (...) {}
                                 // Provide extra context
                                 if (!fill.side.empty()) fill.extra_data["side"] = fill.side;
-                                if (fill_cb_) fill_cb_(fill);
+                                // Debug log for mapped intent/role on fills
+                                try {
+                                    auto itRole = fill.extra_data.find("role");
+                                    const char* role_c = (itRole != fill.extra_data.end()) ? itRole->second.c_str() : "";
+                                    spdlog::info(
+                                        "[HL-WS] fill: oid={} cloid={} role={} symbol={} side={} px={} sz={}",
+                                        fill.exchange_order_id, fill.client_order_id, role_c,
+                                        fill.symbol, fill.side, fill.price, fill.quantity
+                                    );
+                                } catch (...) {}
+                                // De-duplicate across streams using exec_id (tid); fallback to oid+px+sz+side
+                                try {
+                                    std::string dedup_key = fill.exec_id;
+                                    if (dedup_key.empty()) dedup_key = fill.exchange_order_id + "|" + fill.price + "|" + fill.quantity + "|" + fill.side;
+                                    bool seen = false;
+                                    {
+                                        std::lock_guard<std::mutex> lk(fill_dedupe_mutex_);
+                                        if (fill_dedupe_set_.find(dedup_key) != fill_dedupe_set_.end()) {
+                                            seen = true;
+                                        } else {
+                                            fill_dedupe_q_.push_back(dedup_key);
+                                            fill_dedupe_set_.insert(dedup_key);
+                                            if (fill_dedupe_q_.size() > kFillDedupMax_) {
+                                                auto& old = fill_dedupe_q_.front();
+                                                fill_dedupe_set_.erase(old);
+                                                fill_dedupe_q_.pop_front();
+                                            }
+                                        }
+                                    }
+                                    if (!seen) {
+                                        if (fill_cb_) fill_cb_(fill);
+                                    } else {
+                                        spdlog::debug("[HL-WS] duplicate fill(userFills) ignored: exec_id={} oid={}", fill.exec_id, fill.exchange_order_id);
+                                    }
+                                } catch (...) { if (fill_cb_) fill_cb_(fill); }
                             }
                         } else if (data.HasMember("nonUserCancel") && data["nonUserCancel"].IsArray()) {
                             for (auto& c : data["nonUserCancel"].GetArray()) {
@@ -440,7 +474,7 @@ bool HyperliquidAdapter::connect() {
                             }
                         }
                     } else if (channel == "userFills" && data.IsObject()) {
-                        // Snapshot + stream, same WsFill shape
+                        // Snapshot + stream; emits fills same as userEvents
                         if (data.HasMember("fills") && data["fills"].IsArray()) {
                             for (auto& f : data["fills"].GetArray()) {
                                 if (!f.IsObject()) continue;
@@ -468,9 +502,47 @@ bool HyperliquidAdapter::connect() {
                                 if (private_ws_connected_ms_ && fill.timestamp_ms && (fill.timestamp_ms + 1000 < private_ws_connected_ms_)) {
                                     continue;
                                 }
+                                // Map oid to client id and role for intent attribution
+                                try {
+                                    if (!fill.exchange_order_id.empty()) {
+                                        std::lock_guard<std::mutex> lk(cloid_map_mutex_);
+                                        auto itc = oid_to_clientid_.find(fill.exchange_order_id);
+                                        if (itc != oid_to_clientid_.end()) {
+                                            fill.client_order_id = itc->second;
+                                            fill.extra_data["intent"] = fill.client_order_id;
+                                        }
+                                        auto itr = oid_to_role_.find(fill.exchange_order_id);
+                                        if (itr != oid_to_role_.end()) {
+                                            fill.extra_data["role"] = itr->second;
+                                        }
+                                    }
+                                } catch (...) {}
                                 if (!fill.side.empty()) fill.extra_data["side"] = fill.side;
-                                if (!fill.client_order_id.empty()) fill.extra_data["intent"] = fill.client_order_id;
-                                if (fill_cb_) fill_cb_(fill);
+                                // De-duplicate across streams using exec_id when available (tid), else oid+px+sz
+                                try {
+                                    std::string dedup_key = fill.exec_id;
+                                    if (dedup_key.empty()) dedup_key = fill.exchange_order_id + "|" + fill.price + "|" + fill.quantity + "|" + fill.side;
+                                    bool seen = false;
+                                    {
+                                        std::lock_guard<std::mutex> lk(fill_dedupe_mutex_);
+                                        if (fill_dedupe_set_.find(dedup_key) != fill_dedupe_set_.end()) {
+                                            seen = true;
+                                        } else {
+                                            fill_dedupe_q_.push_back(dedup_key);
+                                            fill_dedupe_set_.insert(dedup_key);
+                                            if (fill_dedupe_q_.size() > kFillDedupMax_) {
+                                                auto& old = fill_dedupe_q_.front();
+                                                fill_dedupe_set_.erase(old);
+                                                fill_dedupe_q_.pop_front();
+                                            }
+                                        }
+                                    }
+                                    if (!seen) {
+                                        if (fill_cb_) fill_cb_(fill);
+                                    } else {
+                                        spdlog::debug("[HL-WS] duplicate fill(userEvents) ignored: exec_id={} oid={}", fill.exec_id, fill.exchange_order_id);
+                                    }
+                                } catch (...) { if (fill_cb_) fill_cb_(fill); }
                             }
                         }
                     }
@@ -486,6 +558,28 @@ bool HyperliquidAdapter::connect() {
             ws_post_->subscribe("orderUpdates", {{"user", user}});
             ws_post_->subscribe("userEvents", {{"user", user}});
             ws_post_->subscribe_with_bool("userFills", {{"user", user}}, {{"aggregateByTime", false}});
+            // Start WS monitor thread to auto-reconnect and resubscribe on drops
+            stop_ws_monitor_.store(false, std::memory_order_release);
+            ws_monitor_thread_ = std::make_unique<std::thread>([this]() {
+                while (!stop_ws_monitor_.load(std::memory_order_acquire)) {
+                    try {
+                        std::this_thread::sleep_for(std::chrono::seconds(2));
+                        if (!ws_post_) continue;
+                        if (!ws_post_->is_connected()) {
+                            spdlog::warn("[HL-WS] detected disconnect; attempting reconnect");
+                            if (ws_post_->connect(cfg_.ws_url)) {
+                                const std::string user = util::to_lower_hex_address(api_key_);
+                                ws_post_->subscribe("orderUpdates", {{"user", user}});
+                                ws_post_->subscribe("userEvents", {{"user", user}});
+                                ws_post_->subscribe_with_bool("userFills", {{"user", user}}, {{"aggregateByTime", false}});
+                                private_ws_connected_ms_ = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::system_clock::now().time_since_epoch()).count());
+                                spdlog::info("[HL-WS] reconnected and resubscribed for user {}", user);
+                            }
+                        }
+                    } catch (...) {}
+                }
+            });
         }
         return connected_;
     }
@@ -515,6 +609,9 @@ bool HyperliquidAdapter::connect() {
 
 void HyperliquidAdapter::disconnect() {
     connected_ = false;
+    // Stop WS monitor
+    stop_ws_monitor_.store(true, std::memory_order_release);
+    if (ws_monitor_thread_ && ws_monitor_thread_->joinable()) ws_monitor_thread_->join();
     // Stop batcher
     stop_batcher_.store(true, std::memory_order_release);
     q_cv_.notify_all();
@@ -951,30 +1048,29 @@ OrderResponse HyperliquidAdapter::place_order(const OrderRequest& request) {
         }
     } catch (...) {}
 
-    // Prefer WS post
+    // Default to HTTP post; fallback to WS if enabled
     std::string resp_json;
     bool ok_send = false;
-    bool tried_ws = false;
-    if (ws_post_ && ws_post_->is_connected()) {
-        spdlog::info("[HL] post via WS");
-        tried_ws = true;
+    bool tried_http = false;
+    try {
+        spdlog::info("[HL] post via HTTP");
+        auto parts = parse_base_url(cfg_.rest_base);
+        latentspeed::nethttp::HttpClient httpc;
+        std::vector<latentspeed::nethttp::Header> hdrs = {{"Content-Type","application/json"}};
+        resp_json = httpc.request("POST", parts.scheme, parts.host, parts.port, "/exchange", hdrs, payload_json);
+        ok_send = true;
+        tried_http = true;
+    } catch (const std::exception& e) {
+        tried_http = true;
+        spdlog::warn("[HL] action HTTP send failed: {}", e.what());
+    } catch (...) {
+        tried_http = true;
+        spdlog::warn("[HL] action HTTP send failed: unknown");
+    }
+    if (!ok_send && ws_post_ && ws_post_->is_connected()) {
+        spdlog::info("[HL] post via WS (fallback)");
         auto resp = ws_post_->post("action", payload_json, std::chrono::milliseconds(ws_post_timeout_ms_));
         if (resp) { resp_json = *resp; ok_send = true; }
-    }
-    if (!ok_send) {
-        // HTTP fallback (also used if WS timed out)
-        try {
-            spdlog::info("[HL] post via HTTP");
-            auto parts = parse_base_url(cfg_.rest_base);
-            latentspeed::nethttp::HttpClient httpc;
-            std::vector<latentspeed::nethttp::Header> hdrs = {{"Content-Type","application/json"}};
-            resp_json = httpc.request("POST", parts.scheme, parts.host, parts.port, "/exchange", hdrs, payload_json);
-            ok_send = true;
-        } catch (const std::exception& e) {
-            spdlog::warn("[HL] action HTTP send failed: {} (ws_tried={})", e.what(), tried_ws);
-        } catch (...) {
-            spdlog::warn("[HL] action HTTP send failed: unknown (ws_tried={})", tried_ws);
-        }
     }
     if (!ok_send) return {false, "hyperliquid: action send failed", std::nullopt, request.client_order_id, std::nullopt, {}};
 
@@ -1037,8 +1133,8 @@ OrderResponse HyperliquidAdapter::place_order(const OrderRequest& request) {
                         std::string oid_str;
                         if (fil.HasMember("oid") && fil["oid"].IsUint64()) oid_str = std::to_string(fil["oid"].GetUint64());
                         if (!oid_str.empty()) remember_oid_clientid(oid_str, request.client_order_id);
-                        // Emit fill callback opportunistically
-                        if (fill_cb_) {
+                        // Emit fill callback opportunistically ONLY when private WS streaming is disabled.
+                        if (fill_cb_ && (disable_private_ws_ || !cfg_.supports_private_ws)) {
                             FillData f{};
                             f.client_order_id = request.client_order_id;
                             f.exchange_order_id = oid_str;
@@ -1061,6 +1157,9 @@ OrderResponse HyperliquidAdapter::place_order(const OrderRequest& request) {
                                     last_fill_px_[f.symbol] = pxv;
                                 }
                             } catch (...) {}
+                        } else if (fill_cb_) {
+                            // Private WS is active; skip inline fill and rely on userFills stream
+                            spdlog::info("[HL] inline fill skipped (private WS active)");
                         }
                         return {true, "ok", (oid_str.empty()? std::nullopt : std::optional<std::string>(oid_str)), request.client_order_id, std::optional<std::string>("filled"), {}};
                     }
@@ -1248,19 +1347,19 @@ OrderResponse HyperliquidAdapter::cancel_order(const std::string& client_order_i
     } catch (...) {}
     std::string resp_json;
     bool ok_send = false;
-    if (ws_post_ && ws_post_->is_connected()) {
-        spdlog::info("[HL] post cancel via WS");
+    // Default to HTTP first
+    try {
+        spdlog::info("[HL] post cancel via HTTP");
+        auto parts = parse_base_url(cfg_.rest_base);
+        latentspeed::nethttp::HttpClient httpc;
+        std::vector<latentspeed::nethttp::Header> hdrs = {{"Content-Type","application/json"}};
+        resp_json = httpc.request("POST", parts.scheme, parts.host, parts.port, "/exchange", hdrs, payload_json2);
+        ok_send = true;
+    } catch (...) {}
+    if (!ok_send && ws_post_ && ws_post_->is_connected()) {
+        spdlog::info("[HL] post cancel via WS (fallback)");
         auto resp = ws_post_->post("action", payload_json2, std::chrono::milliseconds(ws_post_timeout_ms_));
         if (resp) { resp_json = *resp; ok_send = true; }
-    } else {
-        try {
-            spdlog::info("[HL] post cancel via HTTP");
-            auto parts = parse_base_url(cfg_.rest_base);
-            latentspeed::nethttp::HttpClient httpc;
-            std::vector<latentspeed::nethttp::Header> hdrs = {{"Content-Type","application/json"}};
-            resp_json = httpc.request("POST", parts.scheme, parts.host, parts.port, "/exchange", hdrs, payload_json2);
-            ok_send = true;
-        } catch (...) {}
     }
     if (!ok_send) return {false, "hyperliquid: cancel send failed", std::nullopt, client_order_id, std::nullopt, {}};
     return {true, "ok", std::nullopt, client_order_id, std::optional<std::string>("canceled"), {}};
@@ -1742,24 +1841,23 @@ void HyperliquidAdapter::flush_queue(std::deque<std::shared_ptr<PendingOrderItem
 
 bool HyperliquidAdapter::send_signed_action_json(const std::string& payload_json, std::string& out_resp_json) {
     bool ok_send = false;
-    if (ws_post_ && ws_post_->is_connected()) {
+    // Default to HTTP first
+    try {
+        auto parts = parse_base_url(cfg_.rest_base);
+        latentspeed::nethttp::HttpClient httpc;
+        std::vector<latentspeed::nethttp::Header> hdrs = {{"Content-Type","application/json"}};
+        out_resp_json = httpc.request("POST", parts.scheme, parts.host, parts.port, "/exchange", hdrs, payload_json);
+        ok_send = true;
+    } catch (const std::exception& e) {
+        out_resp_json = e.what();
+        ok_send = false;
+    } catch (...) {
+        out_resp_json.clear();
+        ok_send = false;
+    }
+    if (!ok_send && ws_post_ && ws_post_->is_connected()) {
         auto resp = ws_post_->post("action", payload_json, std::chrono::milliseconds(ws_post_timeout_ms_));
         if (resp) { out_resp_json = *resp; ok_send = true; }
-    }
-    if (!ok_send) {
-        try {
-            auto parts = parse_base_url(cfg_.rest_base);
-            latentspeed::nethttp::HttpClient httpc;
-            std::vector<latentspeed::nethttp::Header> hdrs = {{"Content-Type","application/json"}};
-            out_resp_json = httpc.request("POST", parts.scheme, parts.host, parts.port, "/exchange", hdrs, payload_json);
-            ok_send = true;
-        } catch (const std::exception& e) {
-            out_resp_json = e.what();
-            ok_send = false;
-        } catch (...) {
-            out_resp_json.clear();
-            ok_send = false;
-        }
     }
     return ok_send;
 }

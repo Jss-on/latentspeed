@@ -67,6 +67,19 @@ bool HlWsPostClient::connect(const std::string& ws_url) {
         stop_.store(false, std::memory_order_release);
         last_rx_ = std::chrono::steady_clock::now();
         rx_thread_ = std::make_unique<std::thread>(&HlWsPostClient::rx_loop, this);
+        // Start heartbeat thread to send app-level ping periodically regardless of RX activity
+        stop_hb_.store(false, std::memory_order_release);
+        hb_thread_ = std::make_unique<std::thread>([this]() {
+            using namespace std::chrono_literals;
+            while (!stop_hb_.load(std::memory_order_acquire)) {
+                std::this_thread::sleep_for(30s);
+                if (stop_hb_.load(std::memory_order_acquire)) break;
+                if (!ensure_connected_locked()) continue;
+                try {
+                    send_ping();
+                } catch (...) {}
+            }
+        });
         return true;
     } catch (const std::exception& e) {
         spdlog::error("[HL-WS] connect failed (host={}, tls={}): {}", host_, use_tls_, e.what());
@@ -78,6 +91,10 @@ bool HlWsPostClient::connect(const std::string& ws_url) {
 void HlWsPostClient::close() {
     stop_.store(true, std::memory_order_release);
     connected_.store(false, std::memory_order_release);
+    // Stop heartbeat first
+    stop_hb_.store(true, std::memory_order_release);
+    if (hb_thread_ && hb_thread_->joinable()) hb_thread_->join();
+    hb_thread_.reset();
     if (rx_thread_ && rx_thread_->joinable()) {
         try { if (wss_) wss_->close(websocket::close_code::normal); } catch (...) {}
         try { if (ws_) ws_->close(websocket::close_code::normal); } catch (...) {}
@@ -101,6 +118,7 @@ bool HlWsPostClient::ensure_connected_locked() {
 
 void HlWsPostClient::send_ping() {
     try {
+        std::lock_guard<std::mutex> lk(tx_mutex_);
         if (wss_) wss_->write(net::buffer(std::string("{\"method\":\"ping\"}")));
         else if (ws_) ws_->write(net::buffer(std::string("{\"method\":\"ping\"}")));
     } catch (...) {

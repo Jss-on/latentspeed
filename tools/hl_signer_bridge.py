@@ -2,6 +2,7 @@
 import sys
 import json
 import traceback
+import signal
 
 try:
     from eth_account import Account
@@ -75,6 +76,18 @@ def _handle_sign_l1(req_id: int, params: dict):
 
 
 def main():
+    # Exit cleanly on SIGTERM/SIGINT to avoid noisy tracebacks during engine shutdown
+    def _exit_ok(signum, frame):
+        try:
+            sys.stderr.write("hl_signer_bridge: shutting down\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, _exit_ok)
+    signal.signal(signal.SIGINT, _exit_ok)
+
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -137,14 +150,11 @@ def main():
                         v_raw = getattr(sig, "v", None)
                         y_parity = getattr(sig, "yParity", None)
 
-                    # Use r/s exactly as returned by SDK to avoid altering signature recovery
-
                     payload = {
                         "action": action,
                         "nonce": nonce,
                         "signature": {"r": r, "s": s},
                     }
-                    # Prefer v; if missing, derive from yParity
                     if v_raw is not None:
                         try:
                             v_int = int(v_raw, 16) if isinstance(v_raw, str) and v_raw.startswith("0x") else int(v_raw)
@@ -159,7 +169,6 @@ def main():
                         payload["signature"]["v"] = 27 if yp == 0 else 28
                     if vault_address is not None:
                         payload["vaultAddress"] = vault_address
-                    # Do not include isMainnet in HTTP/WS payload; server infers from endpoint. It is only used for signing.
                     _print_line({"id": req_id, "result": {"payload": json.dumps(payload, separators=(",", ":")), "address": wallet.address.lower()}})
                 except Exception as e:
                     _print_line({"id": req_id, "error": {"message": f"{type(e).__name__}: {e}"}})
@@ -172,7 +181,10 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except Exception:
+    except KeyboardInterrupt:
+        # Exit quietly on Ctrl+C
+        sys.exit(0)
+    except BaseException:
         sys.stderr.write("hl_signer_bridge fatal error:\n" + traceback.format_exc() + "\n")
         sys.stderr.flush()
         sys.exit(1)

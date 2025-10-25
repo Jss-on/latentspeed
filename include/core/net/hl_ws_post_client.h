@@ -84,6 +84,9 @@ private:
 
     std::mutex tx_mutex_;
     uint64_t next_id_{1};
+    // Heartbeat thread to keep WS alive even when RX is idle
+    std::unique_ptr<std::thread> hb_thread_;
+    std::atomic<bool> stop_hb_{false};
 
     std::mutex corr_mutex_;
     struct Pending {

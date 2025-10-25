@@ -1297,17 +1297,29 @@ void TradingEngineService::place_cex_order_hft(const HFTExecutionOrder& order) {
         OrderResponse response = adapter->place_order(req);
 
         if (response.success) {
-            // Store pending order for tracking
-            auto* order_copy = order_pool_->allocate();
-            if (order_copy) {
-                *order_copy = order;
-                if (response.exchange_order_id.has_value()) {
-                    order_copy->params.insert(FixedString<32>("exchange_order_id"),
-                                             FixedString<64>(response.exchange_order_id->c_str()));
+            // Decide whether to store in pending map.
+            // Skip for terminal/IOC cases that will not generate further updates (keeps map clean for TTL flows).
+            auto to_lower = [](std::string s){ std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c){return static_cast<char>(std::tolower(c));}); return s; };
+            const bool has_oid = response.exchange_order_id.has_value() && !response.exchange_order_id->empty();
+            std::string tif = order.time_in_force.view().empty() ? std::string() : to_lower(std::string(order.time_in_force.view()));
+            const bool is_ioc = (tif == "ioc" || tif == "fok");
+            const bool is_terminal = (response.status.has_value() && (
+                to_lower(*response.status) == "filled" || to_lower(*response.status) == "canceled" || to_lower(*response.status) == "rejected"));
+
+            if (has_oid || (!is_ioc && !is_terminal)) {
+                // Store pending order for tracking (resting or non-IOC accepted)
+                auto* order_copy = order_pool_->allocate();
+                if (order_copy) {
+                    *order_copy = order;
+                    if (has_oid) {
+                        order_copy->params.insert(FixedString<32>("exchange_order_id"),
+                                                 FixedString<64>(response.exchange_order_id->c_str()));
+                    }
+                    pending_orders_->insert(order.cl_id, order_copy);
                 }
-                pending_orders_->insert(order.cl_id, order_copy);
             }
 
+            // Always emit acceptance report
             send_acceptance_report_hft(order, response.exchange_order_id, response.message);
         } else {
             send_rejection_report_hft(order, "exchange_rejected", response.message);

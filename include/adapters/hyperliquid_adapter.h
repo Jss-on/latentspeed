@@ -16,6 +16,7 @@
 #include <chrono>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "adapters/exchange_adapter.h"
 #include "adapters/hyperliquid_config.h"
@@ -76,6 +77,9 @@ private:
     std::unique_ptr<class HyperliquidNonceManager> nonce_mgr_;
     std::unique_ptr<class IHyperliquidSigner> signer_;
     std::unique_ptr<latentspeed::netws::HlWsPostClient> ws_post_;
+    // WS monitor for auto-reconnect + resubscribe
+    std::unique_ptr<std::thread> ws_monitor_thread_;
+    std::atomic<bool> stop_ws_monitor_{false};
     std::optional<std::string> vault_address_{}; // Optional vault/subaccount address; omit for master
     bool disable_ws_post_{false};
     bool disable_private_ws_{false};
@@ -127,6 +131,12 @@ private:
     // Map exchange oid -> client id and -> role for fill attribution
     std::unordered_map<std::string, std::string> oid_to_clientid_;
     std::unordered_map<std::string, std::string> oid_to_role_;
+
+    // Fill de-duplication across multiple private streams (userEvents vs userFills)
+    std::mutex fill_dedupe_mutex_;
+    std::deque<std::string> fill_dedupe_q_;
+    std::unordered_set<std::string> fill_dedupe_set_;
+    static constexpr size_t kFillDedupMax_ = 10000;
 
     // Minimal symbol -> last known fill price cache to support market fallback when BBO fetch fails
     std::mutex px_cache_mutex_;
