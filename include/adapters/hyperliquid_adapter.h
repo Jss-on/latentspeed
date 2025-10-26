@@ -163,12 +163,8 @@ private:
     uint64_t resubscribe_quiet_ms_{kResubscribeQuietMs_};
     uint64_t reconnect_quiet_ms_{kReconnectQuietMs_};
 
-    // Execution fill cursor (ms). Advanced on each processed fill to bound catch-up.
+    // Execution fill cursor (ms). Advanced on each processed fill for diagnostics.
     std::atomic<uint64_t> last_exec_time_cursor_ms_{0};
-    // One-time catch-up lookback after reconnect (ms)
-    static constexpr uint64_t kCatchupLookbackMs_ = 120000; // 120s window
-    // Throttle multiple catch-ups
-    std::atomic<uint64_t> last_catchup_ms_{0};
 
     static std::string ensure_hl_cloid(const std::string& maybe_id);
     void remember_cloid_mapping(const std::string& hl_cloid, const std::string& original_id);
@@ -177,8 +173,6 @@ private:
     void remember_oid_clientid(const std::string& oid, const std::string& client_id);
     void remember_oid_role(const std::string& oid, const std::string& role);
 
-    // Post-reconnect catch-up to recover missed fills during WS staleness
-    void catch_up_recent_fills();
     static uint64_t now_ms_();
     void maybe_advance_exec_cursor(uint64_t ts_ms);
 

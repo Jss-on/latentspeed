@@ -1653,6 +1653,29 @@ void TradingEngineService::on_order_update_hft(const OrderUpdate& update) {
  */
 void TradingEngineService::on_fill_hft(const FillData& fill_data) {
     try {
+        // Debug raw fill payload from adapter before parsing
+        try {
+            const char* role_c = "";
+            const char* intent_c = "";
+            auto itR = fill_data.extra_data.find("role");
+            if (itR != fill_data.extra_data.end()) role_c = itR->second.c_str();
+            auto itI = fill_data.extra_data.find("intent");
+            if (itI != fill_data.extra_data.end()) intent_c = itI->second.c_str();
+            spdlog::info(
+                "[HFT-Engine] on_fill_hft raw: cl_id_hint={} oid={} sym={} side={} px='{}' sz='{}' fee='{}' fee_ccy='{}' exec_id={} role={} intent={}",
+                fill_data.client_order_id,
+                fill_data.exchange_order_id,
+                fill_data.symbol,
+                fill_data.side,
+                fill_data.price,
+                fill_data.quantity,
+                fill_data.fee,
+                fill_data.fee_currency,
+                fill_data.exec_id,
+                role_c,
+                intent_c
+            );
+        } catch (...) {}
         // Allocate fill from pool
         auto* fill = fill_pool_->allocate();
         if (!fill) {
@@ -1928,7 +1951,9 @@ std::string TradingEngineService::serialize_fill_hft(const HFTFill& fill) {
     doc.AddMember("size", rapidjson::Value(fill.size), allocator);
     doc.AddMember("fee_currency", rapidjson::Value(fill.fee_currency.c_str(), allocator), allocator);
     doc.AddMember("fee_amount", rapidjson::Value(fill.fee_amount), allocator);
-    doc.AddMember("liquidity", rapidjson::Value(fill.liquidity.c_str(), allocator), allocator);
+    if (!fill.liquidity.empty()) {
+        doc.AddMember("liquidity", rapidjson::Value(fill.liquidity.c_str(), allocator), allocator);
+    }
     doc.AddMember("ts_ns", rapidjson::Value(fill.ts_ns.load()), allocator);
     
     // Serialize tags
