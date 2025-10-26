@@ -36,34 +36,74 @@ bool HlWsPostClient::connect(const std::string& ws_url) {
     parse_ws_url(ws_url, host_, port_, target_, use_tls_);
     try {
         auto const results = resolver_->resolve(host_, port_);
+        // Establish TCP & prepare streams
+        bool ok_handshake = false;
+        std::atomic<bool> done{false};
         if (use_tls_) {
             ssl_ctx_ = std::make_unique<ssl::context>(ssl::context::tls_client);
             ssl_ctx_->set_default_verify_paths();
             wss_ = std::make_unique<websocket::stream<ssl::stream<tcp::socket>>>(*ioc_, *ssl_ctx_);
             // Connect TCP then set SNI and perform SSL handshake
             net::connect(wss_->next_layer().next_layer(), results.begin(), results.end());
-            // Set SNI Hostname (many hosts require this)
-            if(!::SSL_set_tlsext_host_name(wss_->next_layer().native_handle(), host_.c_str())) {
-                beast::error_code ec{static_cast<int>(::ERR_get_error()), net::error::get_ssl_category()};
-                throw beast::system_error{ec};
+            // Handshake work in a helper thread with a hard deadline
+            std::thread hs_thr([&]() {
+                try {
+                    // SNI
+                    if(!::SSL_set_tlsext_host_name(wss_->next_layer().native_handle(), host_.c_str())) {
+                        beast::error_code ec{static_cast<int>(::ERR_get_error()), net::error::get_ssl_category()};
+                        throw beast::system_error{ec};
+                    }
+                    // Deadline enforcement handled by outer watchdog + cancel/close
+                    wss_->next_layer().handshake(ssl::stream_base::client);
+                    // WS handshake
+                    wss_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
+                    wss_->set_option(websocket::stream_base::decorator([](websocket::request_type& req) {
+                        req.set(beast::http::field::user_agent, std::string("LatentSpeed-HL/1.0"));
+                    }));
+                    // Handshake watchdog will abort via cancel/close on timeout
+                    wss_->handshake(host_, target_);
+                    ok_handshake = true;
+                } catch (...) {
+                    ok_handshake = false;
+                }
+                done.store(true, std::memory_order_release);
+            });
+            // Wait up to 8s total; abort on timeout
+            for (int i = 0; i < 80 && !done.load(std::memory_order_acquire); ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
-            wss_->next_layer().handshake(ssl::stream_base::client);
-            // Perform websocket handshake
-            wss_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
-            wss_->set_option(websocket::stream_base::decorator([](websocket::request_type& req) {
-                req.set(beast::http::field::user_agent, std::string("LatentSpeed-HL/1.0"));
-            }));
-            wss_->handshake(host_, target_);
+            if (!done.load(std::memory_order_acquire)) {
+                spdlog::warn("[HL-WS] connect timeout during handshake (wss) host={} target={}", host_, target_);
+                try { beast::error_code ec; beast::get_lowest_layer(*wss_).cancel(ec); beast::get_lowest_layer(*wss_).close(ec); } catch (...) {}
+            }
+            if (hs_thr.joinable()) hs_thr.join();
         } else {
             ws_ = std::make_unique<websocket::stream<tcp::socket>>(*ioc_);
             net::connect(ws_->next_layer(), results.begin(), results.end());
-            ws_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
-            ws_->set_option(websocket::stream_base::decorator([](websocket::request_type& req) {
-                req.set(beast::http::field::user_agent, std::string("LatentSpeed-HL/1.0"));
-            }));
-            ws_->handshake(host_, target_);
+            std::thread hs_thr([&]() {
+                try {
+                    ws_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
+                    ws_->set_option(websocket::stream_base::decorator([](websocket::request_type& req) {
+                        req.set(beast::http::field::user_agent, std::string("LatentSpeed-HL/1.0"));
+                    }));
+                    // Handshake watchdog will abort via cancel/close on timeout
+                    ws_->handshake(host_, target_);
+                    ok_handshake = true;
+                } catch (...) { ok_handshake = false; }
+                done.store(true, std::memory_order_release);
+            });
+            for (int i = 0; i < 80 && !done.load(std::memory_order_acquire); ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            if (!done.load(std::memory_order_acquire)) {
+                spdlog::warn("[HL-WS] connect timeout during handshake (ws) host={} target={}", host_, target_);
+                try { beast::error_code ec; beast::get_lowest_layer(*ws_).cancel(ec); beast::get_lowest_layer(*ws_).close(ec); } catch (...) {}
+            }
+            if (hs_thr.joinable()) hs_thr.join();
         }
+        if (!ok_handshake) { close(); return false; }
         connected_.store(true, std::memory_order_release);
+        try { spdlog::info("[HL-WS] ws connected host={} target={} tls={} ", host_, target_, (use_tls_?"yes":"no")); } catch (...) {}
         stop_.store(false, std::memory_order_release);
         last_rx_ = std::chrono::steady_clock::now();
         rx_thread_ = std::make_unique<std::thread>(&HlWsPostClient::rx_loop, this);
@@ -72,7 +112,7 @@ bool HlWsPostClient::connect(const std::string& ws_url) {
         hb_thread_ = std::make_unique<std::thread>([this]() {
             using namespace std::chrono_literals;
             while (!stop_hb_.load(std::memory_order_acquire)) {
-                std::this_thread::sleep_for(30s);
+                std::this_thread::sleep_for(10s);
                 if (stop_hb_.load(std::memory_order_acquire)) break;
                 if (!ensure_connected_locked()) continue;
                 try {
@@ -95,11 +135,23 @@ void HlWsPostClient::close() {
     stop_hb_.store(true, std::memory_order_release);
     if (hb_thread_ && hb_thread_->joinable()) hb_thread_->join();
     hb_thread_.reset();
-    if (rx_thread_ && rx_thread_->joinable()) {
-        try { if (wss_) wss_->close(websocket::close_code::normal); } catch (...) {}
-        try { if (ws_) ws_->close(websocket::close_code::normal); } catch (...) {}
-        rx_thread_->join();
-    }
+    // Tear down transport aggressively to unblock any blocking reads in rx thread.
+    // Avoid calling websocket::close() here (not thread-safe against concurrent read).
+    try {
+        if (wss_) {
+            beast::error_code ec;
+            beast::get_lowest_layer(*wss_).cancel(ec);
+            beast::get_lowest_layer(*wss_).close(ec);
+        }
+    } catch (...) {}
+    try {
+        if (ws_) {
+            beast::error_code ec;
+            beast::get_lowest_layer(*ws_).cancel(ec);
+            beast::get_lowest_layer(*ws_).close(ec);
+        }
+    } catch (...) {}
+    if (rx_thread_ && rx_thread_->joinable()) { rx_thread_->join(); }
     rx_thread_.reset();
     wss_.reset();
     ws_.reset();
@@ -199,9 +251,9 @@ void HlWsPostClient::rx_loop() {
             if (d.HasParseError() || !d.IsObject()) continue;
             if (d.HasMember("channel") && d["channel"].IsString()) {
                 std::string ch = d["channel"].GetString();
-                if (ch == "pong") {
-                    continue;
-                } else if (ch == "post" && d.HasMember("data") && d["data"].IsObject()) {
+                // Treat pong as a liveness event and forward to handler
+                // so adapters can update their last_private_event_ms_.
+                if (ch == "post" && d.HasMember("data") && d["data"].IsObject()) {
                     auto& data = d["data"];
                     if (data.HasMember("id") && data["id"].IsUint64()) {
                         uint64_t id = data["id"].GetUint64();
@@ -222,9 +274,9 @@ void HlWsPostClient::rx_loop() {
                     handler_(ch, d);
                 }
             }
-            // Heartbeat: if quiet > 50s, send ping
+            // Heartbeat: if quiet > ~12s, send ping (keeps private WS liveness under resubscribe threshold)
             auto now = std::chrono::steady_clock::now();
-            if (now - last_rx_ > std::chrono::seconds(50)) {
+            if (now - last_rx_ > std::chrono::seconds(12)) {
                 send_ping();
                 last_rx_ = now;
             }

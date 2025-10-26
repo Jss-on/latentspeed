@@ -132,6 +132,18 @@ private:
     std::unordered_map<std::string, std::string> oid_to_clientid_;
     std::unordered_map<std::string, std::string> oid_to_role_;
 
+    // Recent in-flight entry orders (helps attribute fills that arrive before ack)
+    struct RecentEntry {
+        std::string coin;      // e.g., BNB
+        bool is_buy{false};
+        std::string qty;       // canonical trimmed quantity string
+        std::string client_id; // original client order id
+        uint64_t ts_ms{0};
+    };
+    std::mutex recent_mutex_;
+    std::deque<RecentEntry> recent_entries_;
+    static constexpr size_t kRecentMax_ = 1024;
+
     // Fill de-duplication across multiple private streams (userEvents vs userFills)
     std::mutex fill_dedupe_mutex_;
     std::deque<std::string> fill_dedupe_q_;
@@ -142,12 +154,33 @@ private:
     std::mutex px_cache_mutex_;
     std::unordered_map<std::string, double> last_fill_px_;
 
+    // Private WS liveness tracking and auto-resubscribe
+    std::atomic<uint64_t> last_private_event_ms_{0};
+    uint64_t last_resubscribe_ms_{0};
+    static constexpr uint64_t kResubscribeQuietMs_ = 15000;   // 15s w/o private events → resubscribe
+    static constexpr uint64_t kReconnectQuietMs_   = 45000;   // 45s w/o private events → reconnect
+    // Runtime-configurable liveness thresholds (default to constants above)
+    uint64_t resubscribe_quiet_ms_{kResubscribeQuietMs_};
+    uint64_t reconnect_quiet_ms_{kReconnectQuietMs_};
+
+    // Execution fill cursor (ms). Advanced on each processed fill to bound catch-up.
+    std::atomic<uint64_t> last_exec_time_cursor_ms_{0};
+    // One-time catch-up lookback after reconnect (ms)
+    static constexpr uint64_t kCatchupLookbackMs_ = 120000; // 120s window
+    // Throttle multiple catch-ups
+    std::atomic<uint64_t> last_catchup_ms_{0};
+
     static std::string ensure_hl_cloid(const std::string& maybe_id);
     void remember_cloid_mapping(const std::string& hl_cloid, const std::string& original_id);
     std::string map_back_client_id(const std::string& hl_cloid);
     void remember_cloid_role(const std::string& hl_cloid, const std::string& role);
     void remember_oid_clientid(const std::string& oid, const std::string& client_id);
     void remember_oid_role(const std::string& oid, const std::string& role);
+
+    // Post-reconnect catch-up to recover missed fills during WS staleness
+    void catch_up_recent_fills();
+    static uint64_t now_ms_();
+    void maybe_advance_exec_cursor(uint64_t ts_ms);
 
     void batcher_loop();
     void flush_queue(std::deque<std::shared_ptr<PendingOrderItem>>& q);

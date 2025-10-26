@@ -52,6 +52,20 @@ inline bool is_valid_cloid(std::string_view s) {
     return true;
 }
 
+// Normalize an epoch-like timestamp to milliseconds.
+// Heuristic:
+//   - < 1e10  => seconds (multiply by 1000)
+//   - > 1e15  => nanoseconds (divide by 1e6)
+//   - > 1e13  => microseconds (divide by 1000)
+//   - otherwise assume already in milliseconds
+inline uint64_t normalize_epoch_ms(uint64_t t) {
+    if (t == 0) return 0ULL;
+    if (t < 10000000000ULL) return t * 1000ULL;            // seconds -> ms
+    if (t > 1000000000000000ULL) return t / 1000000ULL;    // ns -> ms
+    if (t > 10000000000000ULL) return t / 1000ULL;         // us -> ms
+    return t;                                              // ms
+}
+
 inline std::string map_tif_to_hl(std::optional<std::string> tif_in) {
     if (!tif_in.has_value() || tif_in->empty()) return std::string{"Gtc"};
     std::string t = to_lower_ascii(*tif_in);
@@ -233,6 +247,21 @@ inline std::string snap_and_format_perp_px(const std::string& px_in, bool is_buy
 HyperliquidAdapter::HyperliquidAdapter() = default;
 HyperliquidAdapter::~HyperliquidAdapter() = default;
 
+uint64_t HyperliquidAdapter::now_ms_() {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+}
+
+void HyperliquidAdapter::maybe_advance_exec_cursor(uint64_t ts_ms) {
+    if (!ts_ms) return;
+    uint64_t prev = last_exec_time_cursor_ms_.load(std::memory_order_relaxed);
+    while (ts_ms > prev &&
+           !last_exec_time_cursor_ms_.compare_exchange_weak(prev, ts_ms, std::memory_order_relaxed)) {
+        /* CAS retry */
+    }
+}
+
 bool HyperliquidAdapter::initialize(const std::string& api_key,
                                     const std::string& api_secret,
                                     bool testnet) {
@@ -262,6 +291,14 @@ bool HyperliquidAdapter::initialize(const std::string& api_key,
     if (const char* t = std::getenv("LATENTSPEED_HL_WS_POST_TIMEOUT_MS"); t && *t) {
         try { ws_post_timeout_ms_ = std::max(200, std::stoi(t)); } catch (...) {}
     }
+    // Private WS liveness env overrides (optional)
+    if (const char* e = std::getenv("LATENTSPEED_HL_RESUBSCRIBE_QUIET_MS"); e && *e) {
+        try { resubscribe_quiet_ms_ = std::max<uint64_t>(5000, static_cast<uint64_t>(std::stoll(e))); } catch (...) {}
+    }
+    if (const char* e = std::getenv("LATENTSPEED_HL_RECONNECT_QUIET_MS"); e && *e) {
+        try { reconnect_quiet_ms_ = std::max<uint64_t>(15000, static_cast<uint64_t>(std::stoll(e))); } catch (...) {}
+    }
+    try { spdlog::info("[HL-WS] liveness thresholds: resubscribe={} ms, reconnect={} ms", resubscribe_quiet_ms_, reconnect_quiet_ms_); } catch (...) {}
     // Prefetch meta/spotMeta to warm caches; do not fail init on network hiccups.
     if (resolver_) (void)resolver_->refresh_all();
 
@@ -289,6 +326,8 @@ bool HyperliquidAdapter::initialize(const std::string& api_key,
     if (const char* e = std::getenv("LATENTSPEED_HL_IOC_MARKET_SLIPPAGE_BPS"); e && *e) {
         try { ioc_slippage_bps_ = std::max(0, std::stoi(e)); } catch(...) {}
     }
+
+    // (no HTTP fill poller)
 
     // Start batcher if enabled
     if (enable_batching_) {
@@ -318,8 +357,26 @@ bool HyperliquidAdapter::connect() {
             // Install message handler for private streams
             ws_post_->set_message_handler([this](const std::string& channel, const rapidjson::Document& doc){
                 try {
+                    // Light liveness trace per private channel
+                    bool is_snapshot = (doc.HasMember("isSnapshot") && doc["isSnapshot"].IsBool() && doc["isSnapshot"].GetBool());
+                    try {
+                        if (channel == "orderUpdates" || channel == "userEvents" || channel == "userFills") {
+                            size_t cnt = 0;
+                            if (doc.HasMember("data")) {
+                                const auto& d = doc["data"];
+                                if (d.IsArray()) cnt = d.Size();
+                                else if (d.IsObject()) {
+                                    if (d.HasMember("fills") && d["fills"].IsArray()) cnt = d["fills"].Size();
+                                }
+                            }
+                            spdlog::info("[HL-WS] rx channel={} snapshot={} items={}", channel, (is_snapshot?"yes":"no"), cnt);
+                        }
+                    } catch (...) {}
+                    // Update private WS liveness on any channel we process
+                    last_private_event_ms_.store(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::system_clock::now().time_since_epoch()).count()), std::memory_order_relaxed);
                     // Ignore initial snapshots to avoid historical replays
-                    if (doc.HasMember("isSnapshot") && doc["isSnapshot"].IsBool() && doc["isSnapshot"].GetBool()) {
+                    if (is_snapshot) {
                         return;
                     }
                     if (!doc.HasMember("data")) return;
@@ -365,7 +422,8 @@ bool HyperliquidAdapter::connect() {
                                 else { upd.status = st; }
                             }
                             if (item.HasMember("statusTimestamp") && item["statusTimestamp"].IsUint64()) {
-                                upd.timestamp_ms = item["statusTimestamp"].GetUint64();
+                                uint64_t raw_ts = item["statusTimestamp"].GetUint64();
+                                upd.timestamp_ms = normalize_epoch_ms(raw_ts);
                                 // Drop historical updates before private WS connect (safety window 1s)
                                 if (private_ws_connected_ms_ && upd.timestamp_ms + 1000 < private_ws_connected_ms_) {
                                     continue;
@@ -389,24 +447,38 @@ bool HyperliquidAdapter::connect() {
                                 if (f.HasMember("sz") && f["sz"].IsString()) fill.quantity = f["sz"].GetString();
                                 if (f.HasMember("fee") && f["fee"].IsString()) fill.fee = f["fee"].GetString();
                                 if (f.HasMember("feeToken") && f["feeToken"].IsString()) fill.fee_currency = f["feeToken"].GetString();
-                                if (f.HasMember("time") && f["time"].IsUint64()) fill.timestamp_ms = f["time"].GetUint64();
+                                if (f.HasMember("time") && f["time"].IsUint64()) {
+                                    fill.timestamp_ms = normalize_epoch_ms(f["time"].GetUint64());
+                                }
                                 if (f.HasMember("tid") && (f["tid"].IsUint64() || f["tid"].IsInt64())) fill.exec_id = std::to_string(f["tid"].GetUint64());
                                 // liquidity from crossed
                                 if (f.HasMember("crossed") && f["crossed"].IsBool()) fill.liquidity = f["crossed"].GetBool() ? "taker" : "maker";
                                 // symbol mapping: coin string -> hyphen form if possible
+                                std::string coin_for_dedup;
                                 if (f.HasMember("coin") && f["coin"].IsString()) {
                                     std::string coin = f["coin"].GetString();
+                                    coin_for_dedup = coin;
                                     std::string sym_hyphen = coin;
                                     if (!coin.empty() && coin[0] == '@') {
                                         int idx = std::atoi(coin.c_str() + 1);
                                         if (auto pair = resolver_ ? resolver_->resolve_spot_pair_by_index(idx) : std::nullopt) {
                                             sym_hyphen = pair->first + std::string("-") + pair->second;
                                         }
+                                    } else if (!coin.empty()) {
+                                        sym_hyphen = coin + std::string("-USDC-PERP");
                                     }
                                     fill.symbol = sym_hyphen;
+                                    // Log coin -> symbol mapping guess for diagnostics
+                                    try {
+                                        bool looks_spot = (!coin.empty() && coin[0]=='@');
+                                        std::string expected = looks_spot ? coin : (coin + std::string("-USDC-PERP"));
+                                        spdlog::info("[HL-WS] coin.map channel=userEvents coin={} mapped_symbol={} expected_guess={}", coin, fill.symbol, expected);
+                                    } catch (...) {}
                                 }
-                                // Drop historical fills before private WS connect (safety window 1s)
-                                if (private_ws_connected_ms_ && fill.timestamp_ms && (fill.timestamp_ms + 1000 < private_ws_connected_ms_)) {
+                                // Drop historical fills before private WS connect (safety window 5s)
+                                if (private_ws_connected_ms_ && fill.timestamp_ms && (fill.timestamp_ms + 5000 < private_ws_connected_ms_)) {
+                                    try { spdlog::info("[HL-WS] drop fill(anti-replay) channel=userEvents oid={} time_ms={} connect_ms={} delta_ms={}",
+                                                       fill.exchange_order_id, fill.timestamp_ms, private_ws_connected_ms_, (long long)(fill.timestamp_ms - private_ws_connected_ms_)); } catch (...) {}
                                     continue;
                                 }
                                 // Map oid -> client id and role for intent attribution
@@ -421,6 +493,22 @@ bool HyperliquidAdapter::connect() {
                                         auto itr = oid_to_role_.find(fill.exchange_order_id);
                                         if (itr != oid_to_role_.end()) {
                                             fill.extra_data["role"] = itr->second;
+                                        }
+                                        if (itc == oid_to_clientid_.end() || itr == oid_to_role_.end()) {
+                                            try { spdlog::info("[HL-WS] mapping missing channel=userEvents oid={} intent_found={} role_found={}", fill.exchange_order_id, itc!=oid_to_clientid_.end(), itr!=oid_to_role_.end()); } catch (...) {}
+                                            // Heuristic map to recent entry
+                                            const uint64_t now_ms = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                std::chrono::system_clock::now().time_since_epoch()).count());
+                                            std::lock_guard<std::mutex> gr(recent_mutex_);
+                                            for (auto it = recent_entries_.rbegin(); it != recent_entries_.rend(); ++it) {
+                                                if (now_ms > it->ts_ms && now_ms - it->ts_ms > 10000) break;
+                                                if (it->coin == coin_for_dedup && it->qty == fill.quantity) {
+                                                    fill.client_order_id = it->client_id;
+                                                    fill.extra_data["intent"] = fill.client_order_id;
+                                                    try { remember_oid_clientid(fill.exchange_order_id, it->client_id); } catch (...) {}
+                                                    break;
+                                                }
+                                            }
                                         }
                                     }
                                 } catch (...) {}
@@ -439,6 +527,9 @@ bool HyperliquidAdapter::connect() {
                                 // De-duplicate across streams using exec_id (tid); fallback to oid+px+sz+side
                                 try {
                                     std::string dedup_key = fill.exec_id;
+                                    if (!dedup_key.empty()) {
+                                        dedup_key += std::string("|") + std::to_string(fill.timestamp_ms) + std::string("|") + coin_for_dedup;
+                                    }
                                     if (dedup_key.empty()) dedup_key = fill.exchange_order_id + "|" + fill.price + "|" + fill.quantity + "|" + fill.side;
                                     bool seen = false;
                                     {
@@ -457,6 +548,7 @@ bool HyperliquidAdapter::connect() {
                                     }
                                     if (!seen) {
                                         if (fill_cb_) fill_cb_(fill);
+                                        if (fill.timestamp_ms) { try { maybe_advance_exec_cursor(fill.timestamp_ms); } catch (...) {} }
                                     } else {
                                         spdlog::debug("[HL-WS] duplicate fill(userFills) ignored: exec_id={} oid={}", fill.exec_id, fill.exchange_order_id);
                                     }
@@ -485,21 +577,34 @@ bool HyperliquidAdapter::connect() {
                                 if (f.HasMember("sz") && f["sz"].IsString()) fill.quantity = f["sz"].GetString();
                                 if (f.HasMember("fee") && f["fee"].IsString()) fill.fee = f["fee"].GetString();
                                 if (f.HasMember("feeToken") && f["feeToken"].IsString()) fill.fee_currency = f["feeToken"].GetString();
-                                if (f.HasMember("time") && f["time"].IsUint64()) fill.timestamp_ms = f["time"].GetUint64();
+                                if (f.HasMember("time") && f["time"].IsUint64()) {
+                                    fill.timestamp_ms = normalize_epoch_ms(f["time"].GetUint64());
+                                }
                                 if (f.HasMember("tid") && (f["tid"].IsUint64() || f["tid"].IsInt64())) fill.exec_id = std::to_string(f["tid"].GetUint64());
                                 if (f.HasMember("crossed") && f["crossed"].IsBool()) fill.liquidity = f["crossed"].GetBool() ? "taker" : "maker";
+                                std::string coin_for_dedup;
                                 if (f.HasMember("coin") && f["coin"].IsString()) {
                                     std::string coin = f["coin"].GetString();
+                                    coin_for_dedup = coin;
                                     std::string sym_hyphen = coin;
                                     if (!coin.empty() && coin[0] == '@') {
                                         int idx = std::atoi(coin.c_str() + 1);
                                         if (auto pair = resolver_ ? resolver_->resolve_spot_pair_by_index(idx) : std::nullopt) {
                                             sym_hyphen = pair->first + std::string("-") + pair->second;
                                         }
+                                    } else if (!coin.empty()) {
+                                        sym_hyphen = coin + std::string("-USDC-PERP");
                                     }
                                     fill.symbol = sym_hyphen;
+                                    try {
+                                        bool looks_spot = (!coin.empty() && coin[0]=='@');
+                                        std::string expected = looks_spot ? coin : (coin + std::string("-USDC-PERP"));
+                                        spdlog::info("[HL-WS] coin.map channel=userFills coin={} mapped_symbol={} expected_guess={}", coin, fill.symbol, expected);
+                                    } catch (...) {}
                                 }
-                                if (private_ws_connected_ms_ && fill.timestamp_ms && (fill.timestamp_ms + 1000 < private_ws_connected_ms_)) {
+                                if (private_ws_connected_ms_ && fill.timestamp_ms && (fill.timestamp_ms + 5000 < private_ws_connected_ms_)) {
+                                    try { spdlog::info("[HL-WS] drop fill(anti-replay) channel=userFills oid={} time_ms={} connect_ms={} delta_ms={}",
+                                                       fill.exchange_order_id, fill.timestamp_ms, private_ws_connected_ms_, (long long)(fill.timestamp_ms - private_ws_connected_ms_)); } catch (...) {}
                                     continue;
                                 }
                                 // Map oid to client id and role for intent attribution
@@ -515,12 +620,30 @@ bool HyperliquidAdapter::connect() {
                                         if (itr != oid_to_role_.end()) {
                                             fill.extra_data["role"] = itr->second;
                                         }
+                                        // Heuristic mapping when ack/routing not ready yet
+                                        if (itc == oid_to_clientid_.end()) {
+                                            const uint64_t now_ms = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                std::chrono::system_clock::now().time_since_epoch()).count());
+                                            std::lock_guard<std::mutex> gr(recent_mutex_);
+                                            for (auto it = recent_entries_.rbegin(); it != recent_entries_.rend(); ++it) {
+                                                if (now_ms > it->ts_ms && now_ms - it->ts_ms > 10000) break; // within 10s window
+                                                if (it->coin == coin_for_dedup && it->qty == fill.quantity) {
+                                                    fill.client_order_id = it->client_id;
+                                                    fill.extra_data["intent"] = fill.client_order_id;
+                                                    try { remember_oid_clientid(fill.exchange_order_id, it->client_id); } catch (...) {}
+                                                    break;
+                                                }
+                                            }
+                                        }
                                     }
                                 } catch (...) {}
                                 if (!fill.side.empty()) fill.extra_data["side"] = fill.side;
                                 // De-duplicate across streams using exec_id when available (tid), else oid+px+sz
                                 try {
                                     std::string dedup_key = fill.exec_id;
+                                    if (!dedup_key.empty()) {
+                                        dedup_key += std::string("|") + std::to_string(fill.timestamp_ms) + std::string("|") + coin_for_dedup;
+                                    }
                                     if (dedup_key.empty()) dedup_key = fill.exchange_order_id + "|" + fill.price + "|" + fill.quantity + "|" + fill.side;
                                     bool seen = false;
                                     {
@@ -537,10 +660,13 @@ bool HyperliquidAdapter::connect() {
                                             }
                                         }
                                     }
+                                    try { spdlog::info("[HL-WS] dedup channel=userFills seen={} key={} tid={} oid={}", seen, dedup_key, fill.exec_id, fill.exchange_order_id); } catch (...) {}
                                     if (!seen) {
-                                        if (fill_cb_) fill_cb_(fill);
+                                        if (fill_cb_) { try { spdlog::info("[HL-WS] emit fill channel=userFills oid={} symbol={}", fill.exchange_order_id, fill.symbol); } catch (...) {} fill_cb_(fill); }
+                                        // advance fill cursor
+                                        if (fill.timestamp_ms) { try { maybe_advance_exec_cursor(fill.timestamp_ms); } catch (...) {} }
                                     } else {
-                                        spdlog::debug("[HL-WS] duplicate fill(userEvents) ignored: exec_id={} oid={}", fill.exec_id, fill.exchange_order_id);
+                                        spdlog::info("[HL-WS] duplicate fill(userFills) ignored: exec_id={} oid={}", fill.exec_id, fill.exchange_order_id);
                                     }
                                 } catch (...) { if (fill_cb_) fill_cb_(fill); }
                             }
@@ -558,6 +684,9 @@ bool HyperliquidAdapter::connect() {
             ws_post_->subscribe("orderUpdates", {{"user", user}});
             ws_post_->subscribe("userEvents", {{"user", user}});
             ws_post_->subscribe_with_bool("userFills", {{"user", user}}, {{"aggregateByTime", false}});
+            try { spdlog::info("[HL-WS] connected and subscribed for user {}", user); } catch (...) {}
+            last_private_event_ms_.store(private_ws_connected_ms_, std::memory_order_relaxed);
+            last_resubscribe_ms_ = private_ws_connected_ms_;
             // Start WS monitor thread to auto-reconnect and resubscribe on drops
             stop_ws_monitor_.store(false, std::memory_order_release);
             ws_monitor_thread_ = std::make_unique<std::thread>([this]() {
@@ -567,14 +696,88 @@ bool HyperliquidAdapter::connect() {
                         if (!ws_post_) continue;
                         if (!ws_post_->is_connected()) {
                             spdlog::warn("[HL-WS] detected disconnect; attempting reconnect");
-                            if (ws_post_->connect(cfg_.ws_url)) {
+                            try { spdlog::info("[HL-WS] reconnect(disconnect): closing existing socket before connect"); ws_post_->close(); } catch (...) {}
+                            bool ok = false;
+                            try {
+                                spdlog::info("[HL-WS] reconnect(disconnect): initiating connect(ws={})", cfg_.ws_url);
+                                ok = ws_post_->connect(cfg_.ws_url);
+                            } catch (const std::exception& e) {
+                                spdlog::warn("[HL-WS] reconnect(disconnect) error: {}", e.what());
+                                ok = false;
+                            } catch (...) {
+                                spdlog::warn("[HL-WS] reconnect(disconnect) error: unknown");
+                                ok = false;
+                            }
+                            if (ok) {
                                 const std::string user = util::to_lower_hex_address(api_key_);
-                                ws_post_->subscribe("orderUpdates", {{"user", user}});
-                                ws_post_->subscribe("userEvents", {{"user", user}});
-                                ws_post_->subscribe_with_bool("userFills", {{"user", user}}, {{"aggregateByTime", false}});
+                                bool s1 = ws_post_->subscribe("orderUpdates", {{"user", user}});
+                                bool s2 = ws_post_->subscribe("userEvents", {{"user", user}});
+                                bool s3 = ws_post_->subscribe_with_bool("userFills", {{"user", user}}, {{"aggregateByTime", false}});
                                 private_ws_connected_ms_ = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
                                     std::chrono::system_clock::now().time_since_epoch()).count());
-                                spdlog::info("[HL-WS] reconnected and resubscribed for user {}", user);
+                                spdlog::info("[HL-WS] reconnected and resubscribed for user {} (subs ok: orderUpdates={} userEvents={} userFills={})",
+                                             user, (s1?"yes":"no"), (s2?"yes":"no"), (s3?"yes":"no"));
+                                last_private_event_ms_.store(private_ws_connected_ms_, std::memory_order_relaxed);
+                                last_resubscribe_ms_ = private_ws_connected_ms_;
+                                if (!(s1 && s2 && s3)) {
+                                    spdlog::warn("[HL-WS] one or more subscriptions failed after reconnect; private events may be impaired");
+                                }
+                                // One-time catch-up to recover missed fills
+                                try { catch_up_recent_fills(); } catch (...) {}
+                            } else {
+                                spdlog::warn("[HL-WS] reconnect attempt failed (disconnected)");
+                            }
+                            continue;
+                        }
+                        // Connected but quiet? Try resubscribe/reconnect based on liveness
+                        const uint64_t now_ms = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::system_clock::now().time_since_epoch()).count());
+                        const uint64_t last_ev = last_private_event_ms_.load(std::memory_order_relaxed);
+                        const uint64_t quiet = (last_ev == 0 || now_ms < last_ev) ? 0 : (now_ms - last_ev);
+                        if (quiet > reconnect_quiet_ms_) {
+                            spdlog::warn("[HL-WS] quiet {} ms without private events; reconnecting socket", quiet);
+                            try { spdlog::info("[HL-WS] reconnect: closing existing socket before connect"); ws_post_->close(); } catch (...) {}
+                            bool ok = false;
+                            try {
+                                spdlog::info("[HL-WS] reconnect: initiating connect(ws={})", cfg_.ws_url);
+                                ok = ws_post_->connect(cfg_.ws_url);
+                            } catch (const std::exception& e) {
+                                spdlog::warn("[HL-WS] reconnect error: {}", e.what());
+                                ok = false;
+                            } catch (...) {
+                                spdlog::warn("[HL-WS] reconnect error: unknown");
+                                ok = false;
+                            }
+                            if (ok) {
+                                const std::string user = util::to_lower_hex_address(api_key_);
+                                bool s1 = ws_post_->subscribe("orderUpdates", {{"user", user}});
+                                bool s2 = ws_post_->subscribe("userEvents", {{"user", user}});
+                                bool s3 = ws_post_->subscribe_with_bool("userFills", {{"user", user}}, {{"aggregateByTime", false}});
+                                private_ws_connected_ms_ = now_ms;
+                                last_private_event_ms_.store(private_ws_connected_ms_, std::memory_order_relaxed);
+                                spdlog::info("[HL-WS] reconnect due to staleness; resubscribed for user {} (subs ok: orderUpdates={} userEvents={} userFills={})",
+                                             user, (s1?"yes":"no"), (s2?"yes":"no"), (s3?"yes":"no"));
+                                if (!(s1 && s2 && s3)) {
+                                    spdlog::warn("[HL-WS] one or more subscriptions failed after reconnect; private events may be impaired");
+                                }
+                                last_resubscribe_ms_ = now_ms;
+                                // One-time catch-up to recover missed fills
+                                try { catch_up_recent_fills(); } catch (...) {}
+                            } else {
+                                spdlog::warn("[HL-WS] reconnect attempt failed (stale)");
+                            }
+                        } else if (quiet > resubscribe_quiet_ms_) {
+                            if (now_ms - last_resubscribe_ms_ > resubscribe_quiet_ms_ / 2) {
+                                const std::string user = util::to_lower_hex_address(api_key_);
+                                bool s1 = ws_post_->subscribe("orderUpdates", {{"user", user}});
+                                bool s2 = ws_post_->subscribe("userEvents", {{"user", user}});
+                                bool s3 = ws_post_->subscribe_with_bool("userFills", {{"user", user}}, {{"aggregateByTime", false}});
+                                last_resubscribe_ms_ = now_ms;
+                                spdlog::info("[HL-WS] resubscribed due to quiet {} ms (subs ok: orderUpdates={} userEvents={} userFills={})",
+                                             quiet, (s1?"yes":"no"), (s2?"yes":"no"), (s3?"yes":"no"));
+                                if (!(s1 && s2 && s3)) {
+                                    spdlog::warn("[HL-WS] one or more subscriptions failed during resubscribe; will retry on next check");
+                                }
                             }
                         }
                     } catch (...) {}
@@ -901,6 +1104,22 @@ OrderResponse HyperliquidAdapter::place_order(const OrderRequest& request) {
         ord.AddMember("c", rapidjson::Value(hlc.c_str(), alloc), alloc);
     }
     orders.PushBack(ord, alloc);
+
+    // Record recent entry intent for attribution if private WS fill arrives before ack
+    try {
+        if (!is_spot) {
+            RecentEntry re;
+            re.coin = base; // perp coin
+            re.is_buy = is_buy;
+            re.qty = sz;
+            re.client_id = request.client_order_id;
+            re.ts_ms = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::system_clock::now().time_since_epoch()).count());
+            std::lock_guard<std::mutex> g(recent_mutex_);
+            recent_entries_.push_back(std::move(re));
+            while (recent_entries_.size() > kRecentMax_) recent_entries_.pop_front();
+        }
+    } catch (...) {}
 
     // If bracket bundling was requested (venue-agnostic params), append TP/SL as trigger orders.
     std::string grouping_val = "na";
@@ -1908,6 +2127,156 @@ std::optional<std::pair<double,double>> HyperliquidAdapter::fetch_top_of_book(co
         }
     } catch (...) {}
     return std::nullopt;
+}
+
+void HyperliquidAdapter::catch_up_recent_fills() {
+    // Throttle: run at most once every 20s
+    const uint64_t now = now_ms_();
+    uint64_t last = last_catchup_ms_.load(std::memory_order_relaxed);
+    if (now < last + 20000ULL) return;
+    last_catchup_ms_.store(now, std::memory_order_relaxed);
+
+    const std::string user = util::to_lower_hex_address(api_key_);
+    uint64_t cursor = last_exec_time_cursor_ms_.load(std::memory_order_relaxed);
+    uint64_t since = (cursor > 0 && cursor > kCatchupLookbackMs_) ? (cursor - kCatchupLookbackMs_) : 0ULL;
+    try { spdlog::info("[HL-WS] catch-up: requesting userFills user={} since_ms={} cursor_ms={}", user, since, cursor); } catch (...) {}
+
+    // Build Info request for userFills
+    rapidjson::Document req(rapidjson::kObjectType);
+    auto& alloc = req.GetAllocator();
+    // Use time-bounded variant per docs for precise catch-up
+    req.AddMember("type", rapidjson::Value("userFillsByTime", alloc), alloc);
+    req.AddMember("user", rapidjson::Value(user.c_str(), alloc), alloc);
+    req.AddMember("startTime", rapidjson::Value(static_cast<uint64_t>(since)), alloc);
+    req.AddMember("endTime", rapidjson::Value(static_cast<uint64_t>(now)), alloc);
+    req.AddMember("aggregateByTime", rapidjson::Value(false), alloc);
+    rapidjson::StringBuffer sb; { rapidjson::Writer<rapidjson::StringBuffer> wr(sb); req.Accept(wr); }
+
+    std::string resp_json;
+    bool ok = false;
+    // Prefer WS post for Info
+    try {
+        if (ws_post_ && ws_post_->is_connected()) {
+            auto resp = ws_post_->post("info", sb.GetString(), std::chrono::milliseconds(2000));
+            if (resp && !resp->empty()) { resp_json = *resp; ok = true; }
+        }
+    } catch (...) {}
+    // Fallback to REST /info
+    if (!ok) {
+        try {
+            auto parts = parse_base_url(cfg_.rest_base);
+            latentspeed::nethttp::HttpClient httpc;
+            std::vector<latentspeed::nethttp::Header> hdrs = {{"Content-Type","application/json"}};
+            resp_json = httpc.request("POST", parts.scheme, parts.host, parts.port, "/info", hdrs, sb.GetString());
+            ok = true;
+        } catch (...) { ok = false; }
+    }
+    if (!ok || resp_json.empty()) {
+        spdlog::warn("[HL-WS] catch-up: userFills request failed");
+        return;
+    }
+
+    // Parse and emit fills with same mapping/dedup as streaming handler
+    rapidjson::Document d; d.Parse(resp_json.c_str());
+    if (d.HasParseError() || !d.IsObject()) {
+        spdlog::warn("[HL-WS] catch-up: invalid JSON from userFills");
+        return;
+    }
+    const rapidjson::Value* root = &d;
+    if (d.HasMember("payload") && d["payload"].IsObject()) root = &d["payload"];
+    if (root->HasMember("response") && (*root)["response"].IsObject()) root = &(*root)["response"];
+    if (root->HasMember("data") && (*root)["data"].IsObject()) root = &(*root)["data"];
+
+    const rapidjson::Value* arr = nullptr;
+    if (root->IsObject() && root->HasMember("fills") && (*root)["fills"].IsArray()) {
+        arr = &(*root)["fills"];
+    } else if (root->IsArray()) {
+        arr = root;
+    }
+    if (!arr || !arr->IsArray()) {
+        spdlog::info("[HL-WS] catch-up: no fills array in response");
+        return;
+    }
+    size_t total = 0, emitted = 0;
+    uint64_t newest = cursor;
+    for (auto it = arr->Begin(); it != arr->End(); ++it) {
+        if (!it->IsObject()) continue;
+        ++total;
+        FillData fill{};
+        const auto& f = *it;
+        if (f.HasMember("oid") && f["oid"].IsUint64()) fill.exchange_order_id = std::to_string(f["oid"].GetUint64());
+        if (f.HasMember("side") && f["side"].IsString()) fill.side = (std::string(f["side"].GetString()) == "B") ? "buy" : "sell";
+        if (f.HasMember("px") && f["px"].IsString()) fill.price = f["px"].GetString();
+        if (f.HasMember("sz") && f["sz"].IsString()) fill.quantity = f["sz"].GetString();
+        if (f.HasMember("fee") && f["fee"].IsString()) fill.fee = f["fee"].GetString();
+        if (f.HasMember("feeToken") && f["feeToken"].IsString()) fill.fee_currency = f["feeToken"].GetString();
+        if (f.HasMember("time") && f["time"].IsUint64()) fill.timestamp_ms = normalize_epoch_ms(f["time"].GetUint64());
+        if (f.HasMember("tid") && (f["tid"].IsUint64() || f["tid"].IsInt64())) fill.exec_id = std::to_string(f["tid"].GetUint64());
+        if (f.HasMember("crossed") && f["crossed"].IsBool()) fill.liquidity = f["crossed"].GetBool() ? "taker" : "maker";
+        std::string coin_for_dedup;
+        if (f.HasMember("coin") && f["coin"].IsString()) {
+            std::string coin = f["coin"].GetString();
+            coin_for_dedup = coin;
+            std::string sym_hyphen = coin;
+            if (!coin.empty() && coin[0] == '@') {
+                int idx = std::atoi(coin.c_str() + 1);
+                if (auto pair = resolver_ ? resolver_->resolve_spot_pair_by_index(idx) : std::nullopt) {
+                    sym_hyphen = pair->first + std::string("-") + pair->second;
+                }
+            } else if (!coin.empty()) {
+                sym_hyphen = coin + std::string("-USDC-PERP");
+            }
+            fill.symbol = sym_hyphen;
+        }
+        // Time gating for catch-up
+        if (since > 0 && fill.timestamp_ms && fill.timestamp_ms < since) continue;
+        // Map oid->client id if known
+        try {
+            if (!fill.exchange_order_id.empty()) {
+                std::lock_guard<std::mutex> lk(cloid_map_mutex_);
+                auto itc = oid_to_clientid_.find(fill.exchange_order_id);
+                if (itc != oid_to_clientid_.end()) {
+                    fill.client_order_id = itc->second;
+                    fill.extra_data["intent"] = fill.client_order_id;
+                }
+                auto itr = oid_to_role_.find(fill.exchange_order_id);
+                if (itr != oid_to_role_.end()) fill.extra_data["role"] = itr->second;
+            }
+        } catch (...) {}
+        if (!fill.side.empty()) fill.extra_data["side"] = fill.side;
+
+        // Dedup with same key as stream: tid|time|coin or oid|px|sz|side
+        bool seen = false;
+        try {
+            std::string dedup_key = fill.exec_id;
+            if (!dedup_key.empty()) dedup_key += std::string("|") + std::to_string(fill.timestamp_ms) + std::string("|") + coin_for_dedup;
+            if (dedup_key.empty()) dedup_key = fill.exchange_order_id + "|" + fill.price + "|" + fill.quantity + "|" + fill.side;
+            {
+                std::lock_guard<std::mutex> lk(fill_dedupe_mutex_);
+                if (fill_dedupe_set_.find(dedup_key) != fill_dedupe_set_.end()) {
+                    seen = true;
+                } else {
+                    fill_dedupe_q_.push_back(dedup_key);
+                    fill_dedupe_set_.insert(dedup_key);
+                    if (fill_dedupe_q_.size() > kFillDedupMax_) {
+                        auto& old = fill_dedupe_q_.front();
+                        fill_dedupe_set_.erase(old);
+                        fill_dedupe_q_.pop_front();
+                    }
+                }
+            }
+        } catch (...) {}
+        if (!seen && fill_cb_) {
+            try { spdlog::info("[HL-WS] emit fill catch-up oid={} symbol={}", fill.exchange_order_id, fill.symbol); } catch (...) {}
+            try { fill_cb_(fill); } catch (...) {}
+            ++emitted;
+            if (fill.timestamp_ms) {
+                if (fill.timestamp_ms > newest) newest = fill.timestamp_ms;
+                maybe_advance_exec_cursor(fill.timestamp_ms);
+            }
+        }
+    }
+    try { spdlog::info("[HL-WS] catch-up: received {} items; emitted {} new; newest_ts={}", total, emitted, newest); } catch (...) {}
 }
 
 // keep namespace open for helper methods below
