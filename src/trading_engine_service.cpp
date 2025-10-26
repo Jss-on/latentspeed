@@ -1293,6 +1293,14 @@ void TradingEngineService::place_cex_order_hft(const HFTExecutionOrder& order) {
                          order.product_type.c_str(), req.category.value_or("NONE"));
         }
 
+        if (auto* hl_adapter = dynamic_cast<HyperliquidAdapter*>(adapter)) {
+            if (auto* intent_tag = order.tags.find(FixedString<32>("intent_id"))) {
+                if (!intent_tag->empty()) {
+                    hl_adapter->register_parent_intent(req.client_order_id, intent_tag->c_str());
+                }
+            }
+        }
+
         // Place order via exchange adapter
         OrderResponse response = adapter->place_order(req);
 
@@ -1676,6 +1684,16 @@ void TradingEngineService::on_fill_hft(const FillData& fill_data) {
                 intent_c
             );
         } catch (...) {}
+        auto intent_gate = fill_data.extra_data.find("intent");
+        if (intent_gate == fill_data.extra_data.end() || intent_gate->second.empty()) {
+            spdlog::info(
+                "[HFT-Engine] drop fill(no_intent) cl_id_hint={} oid={} exec_id={}",
+                fill_data.client_order_id,
+                fill_data.exchange_order_id,
+                fill_data.exec_id
+            );
+            return;
+        }
         // Allocate fill from pool
         auto* fill = fill_pool_->allocate();
         if (!fill) {

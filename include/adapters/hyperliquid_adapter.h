@@ -17,9 +17,11 @@
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include <functional>
 
 #include "adapters/exchange_adapter.h"
 #include "adapters/hyperliquid_config.h"
+#include <rapidjson/document.h>
 namespace latentspeed::netws { class HlWsPostClient; }
 
 // Forward declare resolver to avoid coupling in header consumers
@@ -65,7 +67,14 @@ public:
         const std::optional<std::string>& settle_coin = std::nullopt,
         const std::optional<std::string>& base_coin = std::nullopt) override;
 
+    // Allow engine to seed parent intent for bundled exits.
+    void register_parent_intent(const std::string& client_order_id, const std::string& intent_id);
+
 private:
+    void attach_ws_handler();
+    void install_private_ws_handler();
+    void recycle_ws_client(const char* reason, std::chrono::milliseconds timeout);
+
     // M1 scaffold state only; real client wiring arrives in later milestones
     bool connected_{false};
     bool testnet_{false};
@@ -77,6 +86,7 @@ private:
     std::unique_ptr<class HyperliquidNonceManager> nonce_mgr_;
     std::unique_ptr<class IHyperliquidSigner> signer_;
     std::unique_ptr<latentspeed::netws::HlWsPostClient> ws_post_;
+    std::function<void(const std::string&, const rapidjson::Document&)> ws_message_handler_;
     // WS monitor for auto-reconnect + resubscribe
     std::unique_ptr<std::thread> ws_monitor_thread_;
     std::atomic<bool> stop_ws_monitor_{false};
@@ -131,6 +141,8 @@ private:
     // Map exchange oid -> client id and -> role for fill attribution
     std::unordered_map<std::string, std::string> oid_to_clientid_;
     std::unordered_map<std::string, std::string> oid_to_role_;
+    // Track derived child (TP/SL) client ids back to their parent entry id
+    std::unordered_map<std::string, std::string> child_to_parent_;
 
     // Recent in-flight entry orders (helps attribute fills that arrive before ack)
     struct RecentEntry {
@@ -172,6 +184,8 @@ private:
     void remember_cloid_role(const std::string& hl_cloid, const std::string& role);
     void remember_oid_clientid(const std::string& oid, const std::string& client_id);
     void remember_oid_role(const std::string& oid, const std::string& role);
+    void remember_child_parent(const std::string& child_client_id, const std::string& parent_client_id);
+    std::string parent_for_client_id(const std::string& client_id);
 
     static uint64_t now_ms_();
     void maybe_advance_exec_cursor(uint64_t ts_ms);
