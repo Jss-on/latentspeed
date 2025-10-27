@@ -1,5 +1,6 @@
 # Connector Framework Library
 # Reorganized following Hummingbot pattern: Core + Exchange-specific subdirectories
+# USE THIS VERSION AFTER RUNNING: bash tools/execute_restructure.sh
 
 cmake_minimum_required(VERSION 3.20)
 
@@ -8,39 +9,21 @@ cmake_minimum_required(VERSION 3.20)
 # ============================================================================
 set(CONNECTOR_CORE_SOURCES
     connector_base.cpp
+    client_order_tracker.cpp
+    in_flight_order.cpp
     zmq_order_event_publisher.cpp
 )
 
-# Optional: Uncomment if these files exist
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/client_order_tracker.cpp")
-    list(APPEND CONNECTOR_CORE_SOURCES client_order_tracker.cpp)
-endif()
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/in_flight_order.cpp")
-    list(APPEND CONNECTOR_CORE_SOURCES in_flight_order.cpp)
-endif()
-
 # ============================================================================
-# Hyperliquid Exchange Implementation (CURRENT LOCATION)
-# After running restructure script, these will be in exchange/hyperliquid/
+# Hyperliquid Exchange Implementation
 # ============================================================================
 set(HYPERLIQUID_CONNECTOR_SOURCES
-    hyperliquid_auth.cpp
-    hyperliquid_integrated_connector.cpp
-    hyperliquid_perpetual_connector.cpp
-    hyperliquid_user_stream_data_source.cpp
+    exchange/hyperliquid/hyperliquid_auth.cpp
+    exchange/hyperliquid/hyperliquid_integrated_connector.cpp
+    exchange/hyperliquid/hyperliquid_perpetual_connector.cpp
+    exchange/hyperliquid/hyperliquid_user_stream_data_source.cpp
+    exchange/hyperliquid/hyperliquid_order_book_data_source.cpp
 )
-
-# Optional: Add if exists
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/hyperliquid_order_book_data_source.cpp")
-    list(APPEND HYPERLIQUID_CONNECTOR_SOURCES hyperliquid_order_book_data_source.cpp)
-endif()
-
-# After restructure, use this instead:
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/exchange/hyperliquid")
-    file(GLOB_RECURSE HYPERLIQUID_CONNECTOR_SOURCES 
-        exchange/hyperliquid/*.cpp
-    )
-endif()
 
 # ============================================================================
 # Combined Connector Library
@@ -49,10 +32,6 @@ add_library(connector_framework STATIC
     ${CONNECTOR_CORE_SOURCES}
     ${HYPERLIQUID_CONNECTOR_SOURCES}
 )
-
-# Alternative: Use GLOB for automatic discovery (useful for development)
-# Uncomment if you prefer automatic file discovery:
-# file(GLOB_RECURSE HYPERLIQUID_CONNECTOR_SOURCES exchange/hyperliquid/*.cpp)
 
 target_include_directories(connector_framework
     PUBLIC
@@ -83,10 +62,8 @@ target_link_libraries(connector_framework
 # ============================================================================
 # Compiler Settings
 # ============================================================================
-# Require C++20
 target_compile_features(connector_framework PUBLIC cxx_std_20)
 
-# Enable warnings
 if(MSVC)
     target_compile_options(connector_framework PRIVATE /W4)
 else()
@@ -102,7 +79,6 @@ install(TARGETS connector_framework
     RUNTIME DESTINATION bin
 )
 
-# Install headers (preserving directory structure)
 install(DIRECTORY ${CMAKE_SOURCE_DIR}/include/connector
     DESTINATION include
     FILES_MATCHING PATTERN "*.h"

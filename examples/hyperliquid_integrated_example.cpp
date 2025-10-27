@@ -1,5 +1,5 @@
-#include "connector/hyperliquid_integrated_connector.h"
-#include "connector/hyperliquid_auth.h"
+#include "connector/exchange/hyperliquid/hyperliquid_integrated_connector.h"
+#include "connector/exchange/hyperliquid/hyperliquid_auth.h"
 #include "exchange_interface.h"
 #include <zmq.hpp>
 #include <iostream>

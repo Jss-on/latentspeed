@@ -3,7 +3,7 @@
  * @brief Hyperliquid authentication implementation (PLACEHOLDER)
  */
 
-#include "connector/hyperliquid_auth.h"
+#include "connector/exchange/hyperliquid/hyperliquid_auth.h"
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <iomanip>
