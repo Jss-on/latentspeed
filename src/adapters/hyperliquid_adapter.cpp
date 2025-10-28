@@ -1226,18 +1226,20 @@ bool HyperliquidAdapter::connect() {
                             quiet = now_ms - last_ev;
                             if (quiet > resubscribe_quiet_ms_ && (now_ms - last_quiet_log_ms) > 5000) {
                                 try {
-                                    spdlog::info("[HL-WS] liveness monitor quiet={} ms (last_event_ms={}, resubscribe={} ms, reconnect={} ms)",
-                                                 quiet, last_ev, resubscribe_quiet_ms_, reconnect_quiet_ms_);
+                                    uint64_t ws_last_msg = ws_post_ ? ws_post_->get_last_msg_ms() : 0;
+                                    uint64_t ws_last_ping = ws_post_ ? ws_post_->get_last_ping_ms() : 0;
+                                    spdlog::info("[HL-WS] liveness monitor quiet={} ms (last_event_ms={}, ws_last_msg_ms={}, ws_last_ping_ms={}, resubscribe={} ms, reconnect={} ms)",
+                                                 quiet, last_ev, ws_last_msg, ws_last_ping, resubscribe_quiet_ms_, reconnect_quiet_ms_);
                                 } catch (...) {}
                                 last_quiet_log_ms = now_ms;
                             }
                         }
                         if (!ws_post_->is_connected()) {
                             try {
-                                spdlog::warn("[HL-WS] liveness monitor initiating recycle (now_ms={}, last_event_ms={}, quiet_ms={})",
-                                             now_ms,
-                                             last_ev,
-                                             quiet);
+                                uint64_t ws_last_msg = ws_post_ ? ws_post_->get_last_msg_ms() : 0;
+                                uint64_t ws_last_ping = ws_post_ ? ws_post_->get_last_ping_ms() : 0;
+                                spdlog::warn("[HL-WS] liveness monitor initiating recycle (now_ms={}, last_event_ms={}, quiet_ms={}, ws_last_msg_ms={}, ws_last_ping_ms={})",
+                                             now_ms, last_ev, quiet, ws_last_msg, ws_last_ping);
                             } catch (...) {}
                             spdlog::warn("[HL-WS] detected disconnect; attempting reconnect");
                             recycle_ws_client("reconnect(disconnect)", std::chrono::milliseconds(1000));
