@@ -13,6 +13,39 @@ namespace latentspeed::netws {
 HlWsPostClient::HlWsPostClient() {}
 HlWsPostClient::~HlWsPostClient() { close(); }
 
+uint64_t HlWsPostClient::now_ms() {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count());
+}
+
+void HlWsPostClient::mark_heartbeat_stale(uint64_t now_ms_val, uint64_t last_msg_ms, uint64_t last_ping_ms) {
+    uint64_t delta = (last_msg_ms > 0 && now_ms_val > last_msg_ms) ? (now_ms_val - last_msg_ms) : 0;
+    try {
+        spdlog::warn("[HL-WS] heartbeat stale: last server message {} ms ago (last_ping_ms={}, now_ms={}); marking disconnected",
+                     delta, last_ping_ms, now_ms_val);
+    } catch (...) {}
+    connected_.store(false, std::memory_order_release);
+    try {
+        if (wss_) {
+            beast::error_code ec;
+            beast::get_lowest_layer(*wss_).cancel(ec);
+        } else if (ws_) {
+            beast::error_code ec;
+            beast::get_lowest_layer(*ws_).cancel(ec);
+        }
+    } catch (...) {}
+}
+
+void HlWsPostClient::trace_rx(size_t bytes, const std::string& channel) {
+    try {
+        spdlog::info("[HL-WS] rx trace channel={} bytes={} last_msg_ms={} last_ping_ms={}",
+                     channel,
+                     bytes,
+                     last_msg_ms_.load(std::memory_order_acquire),
+                     last_ping_ms_.load(std::memory_order_acquire));
+    } catch (...) {}
+}
+
 void HlWsPostClient::parse_ws_url(const std::string& url, std::string& host, std::string& port, std::string& target, bool& tls) {
     tls = true; host.clear(); port = "443"; target = "/ws";
     std::string scheme = "wss";
@@ -34,6 +67,10 @@ bool HlWsPostClient::connect(const std::string& ws_url) {
     resolver_ = std::make_unique<tcp::resolver>(*ioc_);
 
     parse_ws_url(ws_url, host_, port_, target_, use_tls_);
+    try {
+        spdlog::info("[HL-WS] connect attempt url={} host={} port={} target={} tls={}",
+                     ws_url, host_, port_, target_, (use_tls_ ? "yes" : "no"));
+    } catch (...) {}
     try {
         auto const results = resolver_->resolve(host_, port_);
         // Establish TCP & prepare streams
@@ -106,13 +143,15 @@ bool HlWsPostClient::connect(const std::string& ws_url) {
         try { spdlog::info("[HL-WS] ws connected host={} target={} tls={} ", host_, target_, (use_tls_?"yes":"no")); } catch (...) {}
         stop_.store(false, std::memory_order_release);
         last_rx_ = std::chrono::steady_clock::now();
+        uint64_t now_ms_val = now_ms();
+        last_msg_ms_.store(now_ms_val, std::memory_order_release);
+        last_ping_ms_.store(0, std::memory_order_release);
         rx_thread_ = std::make_unique<std::thread>(&HlWsPostClient::rx_loop, this);
         // Start heartbeat thread to send app-level ping periodically regardless of RX activity
         stop_hb_.store(false, std::memory_order_release);
         hb_thread_ = std::make_unique<std::thread>([this]() {
-            using namespace std::chrono_literals;
             while (!stop_hb_.load(std::memory_order_acquire)) {
-                std::this_thread::sleep_for(10s);
+                std::this_thread::sleep_for(std::chrono::seconds(50));
                 if (stop_hb_.load(std::memory_order_acquire)) break;
                 if (!ensure_connected_locked()) continue;
                 try {
@@ -170,10 +209,39 @@ bool HlWsPostClient::ensure_connected_locked() {
 
 void HlWsPostClient::send_ping() {
     try {
+        constexpr uint64_t kPingResponseTimeoutMs = 20000; // allow up to 20s for a pong/data response
+        const uint64_t now_ms_val = now_ms();
+        const uint64_t prev_ping_ms = last_ping_ms_.load(std::memory_order_acquire);
+        const uint64_t last_msg_ms = last_msg_ms_.load(std::memory_order_acquire);
+        if (prev_ping_ms > 0 && last_msg_ms > 0 && last_msg_ms < prev_ping_ms &&
+            now_ms_val > prev_ping_ms && (now_ms_val - prev_ping_ms) > kPingResponseTimeoutMs) {
+            mark_heartbeat_stale(now_ms_val, last_msg_ms, prev_ping_ms);
+            return;
+        }
         std::lock_guard<std::mutex> lk(tx_mutex_);
-        if (wss_) wss_->write(net::buffer(std::string("{\"method\":\"ping\"}")));
-        else if (ws_) ws_->write(net::buffer(std::string("{\"method\":\"ping\"}")));
+        const std::string ping_payload = "{\"method\":\"ping\"}";
+        if (wss_) {
+            wss_->write(net::buffer(ping_payload));
+        } else if (ws_) {
+            ws_->write(net::buffer(ping_payload));
+        } else {
+            spdlog::warn("[HL-WS] ping send skipped: no active websocket stream");
+            connected_.store(false, std::memory_order_release);
+            return;
+        }
+        last_ping_ms_.store(now_ms_val, std::memory_order_release);
+        try {
+            spdlog::info("[HL-WS] ping sent");
+            spdlog::info("[HL-WS] ping diagnostics last_msg_ms={} prev_ping_ms={} now_ms={}",
+                         last_msg_ms_.load(std::memory_order_acquire),
+                         prev_ping_ms,
+                         now_ms_val);
+        } catch (...) {}
+    } catch (const std::exception& e) {
+        spdlog::warn("[HL-WS] ping send failed: {}", e.what());
+        connected_.store(false, std::memory_order_release);
     } catch (...) {
+        spdlog::warn("[HL-WS] ping send failed: unknown exception");
         connected_.store(false, std::memory_order_release);
     }
 }
@@ -204,11 +272,16 @@ std::optional<std::string> HlWsPostClient::post(const std::string& type,
     rapidjson::StringBuffer sb; rapidjson::Writer<rapidjson::StringBuffer> wr(sb); d.Accept(wr);
 
     // Prepare pending entry
-    auto pending = std::make_shared<Pending>();
+    std::shared_ptr<Pending> pending = std::make_shared<Pending>();
     {
         std::lock_guard<std::mutex> lk(corr_mutex_);
         pending_[id] = pending;
     }
+
+    try {
+        spdlog::info("[HL-WS] post request id={} type={} payload_bytes={} timeout_ms={} pending_count={}",
+                     id, type, payload_json.size(), timeout.count(), pending_.size());
+    } catch (...) {}
 
     try {
         if (wss_) wss_->write(net::buffer(sb.GetString(), sb.GetSize()));
@@ -220,16 +293,25 @@ std::optional<std::string> HlWsPostClient::post(const std::string& type,
     }
 
     // Wait for response
-    std::unique_lock<std::mutex> lk(corr_mutex_);
-    auto it = pending_.find(id);
-    if (it == pending_.end()) return std::nullopt;
-    auto& entry = it->second;
-    if (!entry->cv.wait_for(lk, timeout, [&]{ return entry->ready; })) {
-        pending_.erase(it);
+    std::shared_ptr<Pending> entry;
+    {
+        std::lock_guard<std::mutex> lk(corr_mutex_);
+        auto it = pending_.find(id);
+        if (it == pending_.end()) return std::nullopt;
+        entry = it->second;
+    }
+    std::unique_lock<std::mutex> entry_lk(entry->m);
+    if (!entry->cv.wait_for(entry_lk, timeout, [&]{ return entry->ready; })) {
+        entry->timed_out = true;
+        try {
+            spdlog::warn("[HL-WS] post timeout id={} type={} timeout_ms={}", id, type, timeout.count());
+        } catch (...) {}
         return std::nullopt;
     }
     std::string resp = std::move(entry->response);
-    pending_.erase(it);
+    try {
+        spdlog::info("[HL-WS] post response id={} type={} bytes={} pending_count={}", id, type, resp.size(), pending_.size());
+    } catch (...) {}
     return resp;
 }
 
@@ -244,17 +326,23 @@ void HlWsPostClient::rx_loop() {
             else break;
             (void)n;
             last_rx_ = std::chrono::steady_clock::now();
-            std::string msg = beast::buffers_to_string(buffer.cdata());
-            buffer.consume(buffer.size());
-            // Parse and route post response
-            rapidjson::Document d; d.Parse(msg.c_str());
-            if (d.HasParseError() || !d.IsObject()) continue;
-            if (d.HasMember("channel") && d["channel"].IsString()) {
-                std::string ch = d["channel"].GetString();
-                // Treat pong as a liveness event and forward to handler
-                // so adapters can update their last_private_event_ms_.
-                if (ch == "post" && d.HasMember("data") && d["data"].IsObject()) {
-                    auto& data = d["data"];
+            const uint64_t now_ms_val = now_ms();
+            last_msg_ms_.store(now_ms_val, std::memory_order_release);
+    std::string msg = beast::buffers_to_string(buffer.cdata());
+    buffer.consume(buffer.size());
+    // Parse and route post response
+    rapidjson::Document d; d.Parse(msg.c_str());
+    if (d.HasParseError() || !d.IsObject()) {
+        try {
+            spdlog::info("[HL-WS] rx non-object payload bytes={} data={}", msg.size(), msg.substr(0, std::min<std::size_t>(512, msg.size())));
+        } catch (...) {}
+        continue;
+    }
+    if (d.HasMember("channel") && d["channel"].IsString()) {
+        std::string ch = d["channel"].GetString();
+        trace_rx(msg.size(), ch);
+        if (ch == "post" && d.HasMember("data") && d["data"].IsObject()) {
+            auto& data = d["data"];
                     if (data.HasMember("id") && data["id"].IsUint64()) {
                         uint64_t id = data["id"].GetUint64();
                         std::string payload;
@@ -262,30 +350,89 @@ void HlWsPostClient::rx_loop() {
                             rapidjson::StringBuffer sb; rapidjson::Writer<rapidjson::StringBuffer> wr(sb); data["response"].Accept(wr);
                             payload = sb.GetString();
                         }
-                        std::lock_guard<std::mutex> lk(corr_mutex_);
-                        auto it = pending_.find(id);
-                        if (it != pending_.end()) {
-                            it->second->response = std::move(payload);
-                            it->second->ready = true;
-                            it->second->cv.notify_all();
+                        std::shared_ptr<Pending> entry;
+                        {
+                            std::lock_guard<std::mutex> lk(corr_mutex_);
+                            auto it = pending_.find(id);
+                            if (it != pending_.end()) {
+                                entry = it->second;
+                                pending_.erase(it);
+                            }
+                        }
+                        if (entry) {
+                            bool timed_out = false;
+                            {
+                                std::lock_guard<std::mutex> lk(entry->m);
+                                entry->response = std::move(payload);
+                                entry->ready = true;
+                                timed_out = entry->timed_out;
+                            }
+                            entry->cv.notify_all();
+                            if (timed_out) {
+                                try {
+                                    spdlog::info("[HL-WS] post response id={} delivered after caller timeout", id);
+                                } catch (...) {}
+                            }
+                        } else {
+                            try {
+                                spdlog::warn("[HL-WS] post response (id={}) arrived with no pending waiter", id);
+                            } catch (...) {}
                         }
                     }
-                } else if (handler_) {
+                } else {
+                    if (ch == "pong") {
+                        last_msg_ms_.store(now_ms_val, std::memory_order_release);
+                        try { spdlog::info("[HL-WS] pong received"); } catch (...) {}
+                    } else if (ch == "heartbeat") {
+                        try { spdlog::info("[HL-WS] heartbeat channel payload: {}", msg); } catch (...) {}
+                    } else if (ch != "orderUpdates" && ch != "userEvents" && ch != "userFills") {
+                        try {
+                            spdlog::info("[HL-WS] rx channel={} payload={}", ch, msg.substr(0, std::min<std::size_t>(512, msg.size())));
+                        } catch (...) {}
+                    }
+                    if (handler_) {
                     handler_(ch, d);
                 }
             }
-            // Heartbeat: if quiet > ~12s, send ping (keeps private WS liveness under resubscribe threshold)
+            } else {
+                try {
+                    spdlog::info("[HL-WS] rx frame without channel bytes={} payload={}",
+                                 msg.size(), msg.substr(0, std::min<std::size_t>(512, msg.size())));
+                } catch (...) {}
+            }
+            // Heartbeat: if quiet > ~55s, send ping to stay under server timeout
             auto now = std::chrono::steady_clock::now();
-            if (now - last_rx_ > std::chrono::seconds(12)) {
+            if (now - last_rx_ > std::chrono::seconds(55)) {
                 send_ping();
                 last_rx_ = now;
             }
+        } catch (const beast::system_error& e) {
+            try {
+                spdlog::warn("[HL-WS] rx_loop websocket error: code={} message={}", e.code().value(), e.what());
+            } catch (...) {}
+            try {
+                if (wss_ && wss_->is_open()) {
+                    auto cr = wss_->reason();
+                    spdlog::warn("[HL-WS] websocket close reason: code={} message={}", cr.code, std::string(cr.reason.begin(), cr.reason.end()));
+                }
+            } catch (...) {}
+            connected_.store(false, std::memory_order_release);
+            break;
         } catch (const std::exception& e) {
-            spdlog::warn("[HL-WS] rx_loop error: {}", e.what());
+            try {
+                spdlog::warn("[HL-WS] rx_loop error: {}", e.what());
+            } catch (...) {}
             connected_.store(false, std::memory_order_release);
             break;
         }
     }
+    try {
+        spdlog::info("[HL-WS] rx_loop exit stop={} connected={} last_msg_ms={} last_ping_ms={}",
+                     stop_.load(std::memory_order_acquire),
+                     connected_.load(std::memory_order_acquire),
+                     last_msg_ms_.load(std::memory_order_acquire),
+                     last_ping_ms_.load(std::memory_order_acquire));
+    } catch (...) {}
 }
 
 bool HlWsPostClient::subscribe(const std::string& type,

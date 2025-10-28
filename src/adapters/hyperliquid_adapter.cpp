@@ -368,8 +368,13 @@ void HyperliquidAdapter::install_private_ws_handler() {
             } catch (...) {}
             // Only treat data-bearing private channels as liveness events
             if (channel == "orderUpdates" || channel == "userEvents" || channel == "userFills") {
-                last_private_event_ms_.store(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::system_clock::now().time_since_epoch()).count()), std::memory_order_relaxed);
+                uint64_t now_ms = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count());
+                uint64_t prev = last_private_event_ms_.exchange(now_ms, std::memory_order_relaxed);
+                try {
+                    spdlog::info("[HL-WS] private event heartbeat channel={} ms_since_last={}", channel,
+                                 (prev == 0 || now_ms < prev) ? -1 : static_cast<long long>(now_ms - prev));
+                } catch (...) {}
             }
             // Ignore snapshots for orderUpdates/userEvents; allow userFills snapshot to dedupe through stream
             if (is_snapshot && channel != "userFills") {
@@ -769,10 +774,21 @@ void HyperliquidAdapter::recycle_ws_client(const char* reason, std::chrono::mill
 }
 
 bool HyperliquidAdapter::connect() {
+    try {
+        spdlog::info("[HL] connect: supports_ws_post={} disable_ws_post_={} disable_private_ws_={} ws_timeout_ms={}",
+                     (cfg_.supports_ws_post ? "yes" : "no"),
+                     (disable_ws_post_ ? "yes" : "no"),
+                     (disable_private_ws_ ? "yes" : "no"),
+                     ws_post_timeout_ms_);
+    } catch (...) {}
     // M5: Connect WS post client (optional)
     if (!ws_post_ && cfg_.supports_ws_post && !disable_ws_post_) {
         ws_post_ = std::make_unique<latentspeed::netws::HlWsPostClient>();
         connected_ = ws_post_->connect(cfg_.ws_url);
+        try {
+            spdlog::info("[HL] connect: ws_post connect result={} url={}",
+                         (connected_ ? "success" : "failure"), cfg_.ws_url);
+        } catch (...) {}
         if (connected_ && cfg_.supports_private_ws && !disable_private_ws_) {
             // Install message handler for private streams
             ws_post_->set_message_handler([this](const std::string& channel, const rapidjson::Document& doc){
@@ -1197,11 +1213,32 @@ bool HyperliquidAdapter::connect() {
             // Start WS monitor thread to auto-reconnect and resubscribe on drops
             stop_ws_monitor_.store(false, std::memory_order_release);
             ws_monitor_thread_ = std::make_unique<std::thread>([this]() {
+                uint64_t last_quiet_log_ms = 0;
                 while (!stop_ws_monitor_.load(std::memory_order_acquire)) {
                     try {
                         std::this_thread::sleep_for(std::chrono::seconds(2));
                         if (!ws_post_) continue;
+                        const uint64_t now_ms = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::system_clock::now().time_since_epoch()).count());
+                        const uint64_t last_ev = last_private_event_ms_.load(std::memory_order_relaxed);
+                        uint64_t quiet = 0;
+                        if (last_ev != 0 && now_ms >= last_ev) {
+                            quiet = now_ms - last_ev;
+                            if (quiet > resubscribe_quiet_ms_ && (now_ms - last_quiet_log_ms) > 5000) {
+                                try {
+                                    spdlog::info("[HL-WS] liveness monitor quiet={} ms (last_event_ms={}, resubscribe={} ms, reconnect={} ms)",
+                                                 quiet, last_ev, resubscribe_quiet_ms_, reconnect_quiet_ms_);
+                                } catch (...) {}
+                                last_quiet_log_ms = now_ms;
+                            }
+                        }
                         if (!ws_post_->is_connected()) {
+                            try {
+                                spdlog::warn("[HL-WS] liveness monitor initiating recycle (now_ms={}, last_event_ms={}, quiet_ms={})",
+                                             now_ms,
+                                             last_ev,
+                                             quiet);
+                            } catch (...) {}
                             spdlog::warn("[HL-WS] detected disconnect; attempting reconnect");
                             recycle_ws_client("reconnect(disconnect)", std::chrono::milliseconds(1000));
                             bool ok = false;
@@ -1235,57 +1272,6 @@ bool HyperliquidAdapter::connect() {
                                 spdlog::warn("[HL-WS] reconnect attempt failed (disconnected)");
                             }
                             continue;
-                        }
-                        // Connected but quiet? Try resubscribe/reconnect based on liveness
-                        const uint64_t now_ms = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
-                            std::chrono::system_clock::now().time_since_epoch()).count());
-                        const uint64_t last_ev = last_private_event_ms_.load(std::memory_order_relaxed);
-                        const uint64_t quiet = (last_ev == 0 || now_ms < last_ev) ? 0 : (now_ms - last_ev);
-                        if (quiet > reconnect_quiet_ms_) {
-                            spdlog::warn("[HL-WS] quiet {} ms without private events; reconnecting socket", quiet);
-                            recycle_ws_client("reconnect", std::chrono::milliseconds(1000));
-                            bool ok = false;
-                            if (ws_post_) {
-                                try {
-                                    spdlog::info("[HL-WS] reconnect: initiating connect(ws={})", cfg_.ws_url);
-                                    ok = ws_post_->connect(cfg_.ws_url);
-                                } catch (const std::exception& e) {
-                                    spdlog::warn("[HL-WS] reconnect error: {}", e.what());
-                                    ok = false;
-                                } catch (...) {
-                                    spdlog::warn("[HL-WS] reconnect error: unknown");
-                                    ok = false;
-                                }
-                            }
-                            if (ok && ws_post_) {
-                                const std::string user = util::to_lower_hex_address(api_key_);
-                                bool s1 = ws_post_->subscribe("orderUpdates", {{"user", user}});
-                                bool s2 = ws_post_->subscribe("userEvents", {{"user", user}});
-                                bool s3 = ws_post_->subscribe_with_bool("userFills", {{"user", user}}, {{"aggregateByTime", false}});
-                                private_ws_connected_ms_ = now_ms;
-                                last_private_event_ms_.store(private_ws_connected_ms_, std::memory_order_relaxed);
-                                spdlog::info("[HL-WS] reconnect due to staleness; resubscribed for user {} (subs ok: orderUpdates={} userEvents={} userFills={})",
-                                             user, (s1?"yes":"no"), (s2?"yes":"no"), (s3?"yes":"no"));
-                                if (!(s1 && s2 && s3)) {
-                                    spdlog::warn("[HL-WS] one or more subscriptions failed after reconnect; private events may be impaired");
-                                }
-                                last_resubscribe_ms_ = now_ms;
-                            } else {
-                                spdlog::warn("[HL-WS] reconnect attempt failed (stale)");
-                            }
-                        } else if (quiet > resubscribe_quiet_ms_) {
-                            if (now_ms - last_resubscribe_ms_ > resubscribe_quiet_ms_ / 2) {
-                                const std::string user = util::to_lower_hex_address(api_key_);
-                                bool s1 = ws_post_->subscribe("orderUpdates", {{"user", user}});
-                                bool s2 = ws_post_->subscribe("userEvents", {{"user", user}});
-                                bool s3 = ws_post_->subscribe_with_bool("userFills", {{"user", user}}, {{"aggregateByTime", false}});
-                                last_resubscribe_ms_ = now_ms;
-                                spdlog::info("[HL-WS] resubscribed due to quiet {} ms (subs ok: orderUpdates={} userEvents={} userFills={})",
-                                             quiet, (s1?"yes":"no"), (s2?"yes":"no"), (s3?"yes":"no"));
-                                if (!(s1 && s2 && s3)) {
-                                    spdlog::warn("[HL-WS] one or more subscriptions failed during resubscribe; will retry on next check");
-                                }
-                            }
                         }
                     } catch (...) {}
                 }
@@ -1778,31 +1764,11 @@ OrderResponse HyperliquidAdapter::place_order(const OrderRequest& request) {
         }
     } catch (...) {}
 
-    // Default to HTTP post; fallback to WS if enabled
+    // Send action (prefer private WS).
     std::string resp_json;
-    bool ok_send = false;
-    bool tried_http = false;
-    try {
-        spdlog::info("[HL] post via HTTP");
-        auto parts = parse_base_url(cfg_.rest_base);
-        latentspeed::nethttp::HttpClient httpc;
-        std::vector<latentspeed::nethttp::Header> hdrs = {{"Content-Type","application/json"}};
-        resp_json = httpc.request("POST", parts.scheme, parts.host, parts.port, "/exchange", hdrs, payload_json);
-        ok_send = true;
-        tried_http = true;
-    } catch (const std::exception& e) {
-        tried_http = true;
-        spdlog::warn("[HL] action HTTP send failed: {}", e.what());
-    } catch (...) {
-        tried_http = true;
-        spdlog::warn("[HL] action HTTP send failed: unknown");
+    if (!send_signed_action_json(payload_json, resp_json)) {
+        return {false, "hyperliquid: action send failed", std::nullopt, request.client_order_id, std::nullopt, {}};
     }
-    if (!ok_send && ws_post_ && ws_post_->is_connected()) {
-        spdlog::info("[HL] post via WS (fallback)");
-        auto resp = ws_post_->post("action", payload_json, std::chrono::milliseconds(ws_post_timeout_ms_));
-        if (resp) { resp_json = *resp; ok_send = true; }
-    }
-    if (!ok_send) return {false, "hyperliquid: action send failed", std::nullopt, request.client_order_id, std::nullopt, {}};
 
     // Parse response for exchange_order_id if resting
     rapidjson::Document dr; dr.Parse(resp_json.c_str());
@@ -2583,23 +2549,65 @@ void HyperliquidAdapter::flush_queue(std::deque<std::shared_ptr<PendingOrderItem
 
 bool HyperliquidAdapter::send_signed_action_json(const std::string& payload_json, std::string& out_resp_json) {
     bool ok_send = false;
-    // Default to HTTP first
+    const bool ws_available = (ws_post_ != nullptr);
+    const bool ws_connected = (ws_available && ws_post_->is_connected());
     try {
-        auto parts = parse_base_url(cfg_.rest_base);
-        latentspeed::nethttp::HttpClient httpc;
-        std::vector<latentspeed::nethttp::Header> hdrs = {{"Content-Type","application/json"}};
-        out_resp_json = httpc.request("POST", parts.scheme, parts.host, parts.port, "/exchange", hdrs, payload_json);
-        ok_send = true;
-    } catch (const std::exception& e) {
-        out_resp_json = e.what();
-        ok_send = false;
-    } catch (...) {
-        out_resp_json.clear();
-        ok_send = false;
+        spdlog::info("[HL] send_signed_action_json: ws_available={} ws_connected={} disable_ws_post_={} payload_bytes={}",
+                     (ws_available ? "yes" : "no"),
+                     (ws_connected ? "yes" : "no"),
+                     (disable_ws_post_ ? "yes" : "no"),
+                     payload_json.size());
+    } catch (...) {}
+    // Prefer WS post (matches official SDK behaviour), fall back to HTTP if unavailable.
+    if (ws_post_ && ws_post_->is_connected()) {
+        try {
+            spdlog::info("[HL] ws action post attempt (timeout={} ms)", ws_post_timeout_ms_);
+            auto resp = ws_post_->post("action", payload_json, std::chrono::milliseconds(ws_post_timeout_ms_));
+            if (resp) {
+                out_resp_json = *resp;
+                ok_send = true;
+                try { spdlog::info("[HL] ws action post ok (bytes={})", out_resp_json.size()); } catch (...) {}
+            } else {
+                if (ws_post_->is_connected()) {
+                    ok_send = true;
+                    out_resp_json.clear();
+                    try { spdlog::warn("[HL] ws action post pending ack (no response within {} ms)", ws_post_timeout_ms_); } catch (...) {}
+                } else {
+                    ok_send = false;
+                    try { spdlog::warn("[HL] ws action post failed: client not connected after write"); } catch (...) {}
+                }
+            }
+        } catch (const std::exception& e) {
+            out_resp_json = e.what();
+            ok_send = false;
+            try { spdlog::warn("[HL] ws action post error: {}", e.what()); } catch (...) {}
+        } catch (...) {
+            out_resp_json.clear();
+            ok_send = false;
+            try { spdlog::warn("[HL] ws action post error: unknown exception"); } catch (...) {}
+        }
+    } else if (ws_post_) {
+        try { spdlog::info("[HL] private WS client present but disconnected; falling back to HTTP"); } catch (...) {}
+    } else {
+        try { spdlog::info("[HL] private WS unavailable for action post; falling back to HTTP"); } catch (...) {}
     }
-    if (!ok_send && ws_post_ && ws_post_->is_connected()) {
-        auto resp = ws_post_->post("action", payload_json, std::chrono::milliseconds(ws_post_timeout_ms_));
-        if (resp) { out_resp_json = *resp; ok_send = true; }
+    if (!ok_send) {
+        try {
+            auto parts = parse_base_url(cfg_.rest_base);
+            latentspeed::nethttp::HttpClient httpc;
+            std::vector<latentspeed::nethttp::Header> hdrs = {{"Content-Type","application/json"}};
+            out_resp_json = httpc.request("POST", parts.scheme, parts.host, parts.port, "/exchange", hdrs, payload_json);
+            ok_send = true;
+            try { spdlog::info("[HL] post via HTTP (bytes={})", out_resp_json.size()); } catch (...) {}
+        } catch (const std::exception& e) {
+            out_resp_json = e.what();
+            ok_send = false;
+            try { spdlog::warn("[HL] http action post error: {}", e.what()); } catch (...) {}
+        } catch (...) {
+            out_resp_json.clear();
+            ok_send = false;
+            try { spdlog::warn("[HL] http action post error: unknown exception"); } catch (...) {}
+        }
     }
     return ok_send;
 }

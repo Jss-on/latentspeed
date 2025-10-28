@@ -13,6 +13,7 @@
 #include <unordered_map>
 #include <optional>
 #include <chrono>
+#include <cstdint>
 #include <functional>
 
 #include <boost/beast/core.hpp>
@@ -68,6 +69,9 @@ private:
     void send_ping();
     bool ensure_connected_locked();
     static void parse_ws_url(const std::string& url, std::string& host, std::string& port, std::string& target, bool& tls);
+    static uint64_t now_ms();
+    void mark_heartbeat_stale(uint64_t now_ms, uint64_t last_msg_ms, uint64_t last_ping_ms);
+    void trace_rx(size_t bytes, const std::string& channel);
 
     std::atomic<bool> connected_{false};
     std::atomic<bool> stop_{false};
@@ -87,12 +91,16 @@ private:
     // Heartbeat thread to keep WS alive even when RX is idle
     std::unique_ptr<std::thread> hb_thread_;
     std::atomic<bool> stop_hb_{false};
+    std::atomic<uint64_t> last_msg_ms_{0};
+    std::atomic<uint64_t> last_ping_ms_{0};
 
     std::mutex corr_mutex_;
     struct Pending {
         std::string response; // filled when ready
         bool ready{false};
         std::condition_variable cv;
+        std::mutex m;
+        bool timed_out{false};
     };
     std::unordered_map<uint64_t, std::shared_ptr<Pending>> pending_;
 
