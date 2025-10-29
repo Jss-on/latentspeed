@@ -93,6 +93,8 @@ private:
     std::unique_ptr<class IHyperliquidSigner> signer_;
     std::unique_ptr<latentspeed::netws::HlWsPostClient> ws_post_;        // POST actions only (order placement)
     std::unique_ptr<latentspeed::netws::HlWsPostClient> ws_subscribe_;   // Private subscriptions only (fills, updates)
+    // Guard access to ws_subscribe_ during proactive close and monitor-driven recycle
+    std::mutex ws_subscribe_mutex_;
     std::function<void(const std::string&, const rapidjson::Document&)> ws_message_handler_;
     // WS monitor for auto-reconnect + resubscribe
     std::unique_ptr<std::thread> ws_monitor_thread_;

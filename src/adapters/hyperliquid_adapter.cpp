@@ -962,8 +962,15 @@ bool HyperliquidAdapter::connect() {
                             quiet = now_ms - last_ev;
                             if (quiet > resubscribe_quiet_ms_ && (now_ms - last_quiet_log_ms) > 5000) {
                                 try {
-                                    uint64_t ws_last_msg = ws_subscribe_ ? ws_subscribe_->get_last_msg_ms() : 0;
-                                    uint64_t ws_last_ping = ws_subscribe_ ? ws_subscribe_->get_last_ping_ms() : 0;
+                                    uint64_t ws_last_msg = 0;
+                                    uint64_t ws_last_ping = 0;
+                                    {
+                                        std::lock_guard<std::mutex> lk(ws_subscribe_mutex_);
+                                        if (ws_subscribe_) {
+                                            ws_last_msg = ws_subscribe_->get_last_msg_ms();
+                                            ws_last_ping = ws_subscribe_->get_last_ping_ms();
+                                        }
+                                    }
                                     spdlog::info("[HL-WS] liveness monitor quiet={} ms (last_event_ms={}, ws_last_msg_ms={}, ws_last_ping_ms={}, resubscribe={} ms, reconnect={} ms)",
                                                  quiet, last_ev, ws_last_msg, ws_last_ping, resubscribe_quiet_ms_, reconnect_quiet_ms_);
                                 } catch (...) {}
@@ -971,32 +978,51 @@ bool HyperliquidAdapter::connect() {
                             }
                         }
 
-                        if (!ws_subscribe_->is_connected()) {
+                        bool need_reconnect = false;
+                        {
+                            std::lock_guard<std::mutex> lk(ws_subscribe_mutex_);
+                            if (ws_subscribe_ && !ws_subscribe_->is_connected()) need_reconnect = true;
+                        }
+                        if (need_reconnect) {
                             try {
-                                uint64_t ws_last_msg = ws_subscribe_ ? ws_subscribe_->get_last_msg_ms() : 0;
-                                uint64_t ws_last_ping = ws_subscribe_ ? ws_subscribe_->get_last_ping_ms() : 0;
+                                uint64_t ws_last_msg = 0;
+                                uint64_t ws_last_ping = 0;
+                                {
+                                    std::lock_guard<std::mutex> lk(ws_subscribe_mutex_);
+                                    if (ws_subscribe_) {
+                                        ws_last_msg = ws_subscribe_->get_last_msg_ms();
+                                        ws_last_ping = ws_subscribe_->get_last_ping_ms();
+                                    }
+                                }
                                 spdlog::warn("[HL-WS] liveness monitor initiating recycle (now_ms={}, last_event_ms={}, quiet_ms={}, ws_last_msg_ms={}, ws_last_ping_ms={})",
                                              now_ms, last_ev, quiet, ws_last_msg, ws_last_ping);
                             } catch (...) {}
                             spdlog::warn("[HL-WS-SUBSCRIBE] detected disconnect; attempting reconnect");
                             // Properly recycle ws_subscribe_ connection (shorter max wait)
-                            recycle_ws_subscribe_client(ws_subscribe_, "reconnect(disconnect)", std::chrono::milliseconds(150));
+                            {
+                                std::lock_guard<std::mutex> lk(ws_subscribe_mutex_);
+                                recycle_ws_subscribe_client(ws_subscribe_, "reconnect(disconnect)", std::chrono::milliseconds(150));
+                            }
                             bool ok = false;
-                            if (ws_subscribe_) {
-                                try {
-                                    spdlog::info("[HL-WS-SUBSCRIBE] reconnect(disconnect): initiating connect(ws={})", cfg_.ws_url);
-                                    ok = ws_subscribe_->connect(cfg_.ws_url);
-                                } catch (const std::exception& e) {
-                                    spdlog::warn("[HL-WS-SUBSCRIBE] reconnect(disconnect) error: {}", e.what());
-                                    ok = false;
-                                } catch (...) {
-                                    spdlog::warn("[HL-WS-SUBSCRIBE] reconnect(disconnect) error: unknown");
-                                    ok = false;
+                            {
+                                std::lock_guard<std::mutex> lk(ws_subscribe_mutex_);
+                                if (ws_subscribe_) {
+                                    try {
+                                        spdlog::info("[HL-WS-SUBSCRIBE] reconnect(disconnect): initiating connect(ws={})", cfg_.ws_url);
+                                        ok = ws_subscribe_->connect(cfg_.ws_url);
+                                    } catch (const std::exception& e) {
+                                        spdlog::warn("[HL-WS-SUBSCRIBE] reconnect(disconnect) error: {}", e.what());
+                                        ok = false;
+                                    } catch (...) {
+                                        spdlog::warn("[HL-WS-SUBSCRIBE] reconnect(disconnect) error: unknown");
+                                        ok = false;
+                                    }
                                 }
                             }
                             // Reinstall message handler on fresh client AFTER connect succeeds
-                            if (ok && ws_subscribe_) {
-                                ws_subscribe_->set_message_handler([this](const std::string& channel, const rapidjson::Document& doc){
+                            if (ok) {
+                                std::lock_guard<std::mutex> lk(ws_subscribe_mutex_);
+                                if (ws_subscribe_) ws_subscribe_->set_message_handler([this](const std::string& channel, const rapidjson::Document& doc){
                                     // Same handler as initial connection - process subscribe events only
                                     try {
                                         bool is_snapshot = (doc.HasMember("isSnapshot") && doc["isSnapshot"].IsBool() && doc["isSnapshot"].GetBool());
@@ -1032,11 +1058,17 @@ bool HyperliquidAdapter::connect() {
                                     } catch (...) {}
                                 });
                             }
-                            if (ok && ws_subscribe_) {
+                            if (ok) {
                                 const std::string user = util::to_lower_hex_address(api_key_);
-                                bool s1 = ws_subscribe_->subscribe("orderUpdates", {{"user", user}});
-                                bool s2 = ws_subscribe_->subscribe("userEvents", {{"user", user}});
-                                bool s3 = ws_subscribe_->subscribe_with_bool("userFills", {{"user", user}}, {{"aggregateByTime", false}});
+                                bool s1 = false, s2 = false, s3 = false;
+                                {
+                                    std::lock_guard<std::mutex> lk(ws_subscribe_mutex_);
+                                    if (ws_subscribe_) {
+                                        s1 = ws_subscribe_->subscribe("orderUpdates", {{"user", user}});
+                                        s2 = ws_subscribe_->subscribe("userEvents", {{"user", user}});
+                                        s3 = ws_subscribe_->subscribe_with_bool("userFills", {{"user", user}}, {{"aggregateByTime", false}});
+                                    }
+                                }
                                 private_ws_connected_ms_ = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
                                     std::chrono::system_clock::now().time_since_epoch()).count());
                                 spdlog::info("[HL-WS-SUBSCRIBE] reconnected and resubscribed for user {} (subs ok: orderUpdates={} userEvents={} userFills={})",
@@ -2652,9 +2684,12 @@ void HyperliquidAdapter::maybe_trigger_event_driven_reconnect_(const char* from_
         std::thread([this](){
             // tiny grace to allow trailing frames to arrive
             std::this_thread::sleep_for(std::chrono::milliseconds(80));
-            if (ws_subscribe_) {
-                try { spdlog::info("[HL-WS] closing ws_subscribe for proactive reconnect"); } catch (...) {}
-                ws_subscribe_->close();
+            {
+                std::lock_guard<std::mutex> lk(ws_subscribe_mutex_);
+                if (ws_subscribe_) {
+                    try { spdlog::info("[HL-WS] closing ws_subscribe for proactive reconnect"); } catch (...) {}
+                    ws_subscribe_->close();
+                }
             }
         }).detach();
     }
