@@ -382,8 +382,8 @@ bool HlWsPostClient::connect(const std::string& ws_url) {
         // Start heartbeat thread: check liveness frequently; ping near 50s; recycle if no server msg > 65s
         stop_hb_.store(false, std::memory_order_release);
         hb_thread_ = std::make_unique<std::thread>([this]() {
-            constexpr uint64_t kPingIntervalMs = 50000;   // send ping if no server message ~50s
-            constexpr uint64_t kStaleIntervalMs = 65000;  // consider dead if no server message >65s
+            constexpr uint64_t kPingIntervalMs = 20000;   // send ping if no server message ~20s
+            constexpr uint64_t kStaleIntervalMs = 45000;  // consider dead if no server message >45s
             while (!stop_hb_.load(std::memory_order_acquire)) {
                 std::this_thread::sleep_for(std::chrono::seconds(5));
                 if (stop_hb_.load(std::memory_order_acquire)) break;
@@ -584,11 +584,24 @@ void HlWsPostClient::rx_loop() {
             }
             std::size_t n = 0;
             bool frame_is_text = true;
+            bool frame_is_binary = false;
             try {
                 spdlog::trace("[HL-WS] rx_loop: calling read() to wait for next frame");
             } catch (...) {}
-            if (wss_) { n = wss_->read(buffer); try { frame_is_text = wss_->got_text(); } catch (...) {} }
-            else if (ws_) { n = ws_->read(buffer); try { frame_is_text = ws_->got_text(); } catch (...) {} }
+            if (wss_) {
+                n = wss_->read(buffer);
+                try {
+                    frame_is_text = wss_->got_text();
+                    frame_is_binary = wss_->got_binary();
+                } catch (...) {}
+            }
+            else if (ws_) {
+                n = ws_->read(buffer);
+                try {
+                    frame_is_text = ws_->got_text();
+                    frame_is_binary = ws_->got_binary();
+                } catch (...) {}
+            }
             else break;
             try {
                 spdlog::trace("[HL-WS] rx_loop: read() returned n={} bytes", n);
@@ -597,6 +610,14 @@ void HlWsPostClient::rx_loop() {
             last_rx_ = std::chrono::steady_clock::now();
             const uint64_t now_ms_val = now_ms();
             last_msg_ms_.store(now_ms_val, std::memory_order_release);
+
+            // Log control frames (pong, close, etc.) explicitly for diagnostics
+            if (!frame_is_text && !frame_is_binary) {
+                try {
+                    spdlog::info("[HL-WS] rx control frame: bytes={} (likely pong/close/ping) - last_msg_ms updated to {}",
+                                 n, now_ms_val);
+                } catch (...) {}
+            }
             std::string msg = beast::buffers_to_string(buffer.cdata());
             buffer.consume(buffer.size());
             // Parse and route post response

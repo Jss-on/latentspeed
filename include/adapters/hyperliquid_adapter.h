@@ -73,7 +73,13 @@ public:
 private:
     void attach_ws_handler();
     void install_private_ws_handler();
+    void install_ws_subscribe_handler();  // Shared handler for ws_subscribe_ (initial + reconnect)
     void recycle_ws_client(const char* reason, std::chrono::milliseconds timeout);
+
+    std::atomic<uint64_t> recon_last_seen_fill_ms_{0};
+    std::atomic<uint64_t> recon_last_seen_update_ms_{0};
+
+    void maybe_trigger_event_driven_reconnect_(const char* from_tag);
 
     // M1 scaffold state only; real client wiring arrives in later milestones
     bool connected_{false};
@@ -85,7 +91,8 @@ private:
     // Nonce + Signer (to be used in later milestones)
     std::unique_ptr<class HyperliquidNonceManager> nonce_mgr_;
     std::unique_ptr<class IHyperliquidSigner> signer_;
-    std::unique_ptr<latentspeed::netws::HlWsPostClient> ws_post_;
+    std::unique_ptr<latentspeed::netws::HlWsPostClient> ws_post_;        // POST actions only (order placement)
+    std::unique_ptr<latentspeed::netws::HlWsPostClient> ws_subscribe_;   // Private subscriptions only (fills, updates)
     std::function<void(const std::string&, const rapidjson::Document&)> ws_message_handler_;
     // WS monitor for auto-reconnect + resubscribe
     std::unique_ptr<std::thread> ws_monitor_thread_;
@@ -93,6 +100,7 @@ private:
     std::optional<std::string> vault_address_{}; // Optional vault/subaccount address; omit for master
     bool disable_ws_post_{false};
     bool disable_private_ws_{false};
+    bool subscribe_connected_{false};  // Track subscribe connection state independently
     int ws_post_timeout_ms_{1500};
     uint64_t private_ws_connected_ms_{0};
 
@@ -174,6 +182,11 @@ private:
     // Runtime-configurable liveness thresholds (default to constants above)
     uint64_t resubscribe_quiet_ms_{kResubscribeQuietMs_};
     uint64_t reconnect_quiet_ms_{kReconnectQuietMs_};
+
+    // Proactive reconnect after order placement (workaround for HL server bug)
+    std::atomic<uint64_t> last_order_placement_ms_{0};
+    bool enable_proactive_reconnect_{true};  // Enable by default
+    static constexpr uint64_t kProactiveReconnectDelayMs_ = 150;  // Wait 150ms after order for events
 
     // Execution fill cursor (ms). Advanced on each processed fill for diagnostics.
     std::atomic<uint64_t> last_exec_time_cursor_ms_{0};
