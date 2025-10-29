@@ -951,7 +951,8 @@ bool HyperliquidAdapter::connect() {
                 uint64_t last_quiet_log_ms = 0;
                 while (!stop_ws_monitor_.load(std::memory_order_acquire)) {
                     try {
-                        std::this_thread::sleep_for(std::chrono::seconds(2));
+                        // Reduce monitor cadence for faster reconnects (from 2s -> 25ms)
+                        std::this_thread::sleep_for(std::chrono::milliseconds(25));
                         if (!ws_subscribe_) continue;
                         const uint64_t now_ms = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
                             std::chrono::system_clock::now().time_since_epoch()).count());
@@ -978,8 +979,8 @@ bool HyperliquidAdapter::connect() {
                                              now_ms, last_ev, quiet, ws_last_msg, ws_last_ping);
                             } catch (...) {}
                             spdlog::warn("[HL-WS-SUBSCRIBE] detected disconnect; attempting reconnect");
-                            // Properly recycle ws_subscribe_ connection
-                            recycle_ws_subscribe_client(ws_subscribe_, "reconnect(disconnect)", std::chrono::milliseconds(1000));
+                            // Properly recycle ws_subscribe_ connection (shorter max wait)
+                            recycle_ws_subscribe_client(ws_subscribe_, "reconnect(disconnect)", std::chrono::milliseconds(150));
                             bool ok = false;
                             if (ws_subscribe_) {
                                 try {
