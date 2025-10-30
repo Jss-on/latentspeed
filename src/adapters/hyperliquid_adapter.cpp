@@ -418,6 +418,7 @@ void HyperliquidAdapter::install_ws_subscribe_handler() {
                     spdlog::warn("[HL-WS] DEBUG: item#{} starting processing", item_idx);
                     OrderUpdate upd{};
                     std::string hlc_for_log;
+                    std::string coin_symbol;
                     if (item.HasMember("order") && item["order"].IsObject()) {
                         const auto& o = item["order"];
                         if (o.HasMember("oid") && o["oid"].IsUint64()) {
@@ -428,6 +429,10 @@ void HyperliquidAdapter::install_ws_subscribe_handler() {
                             std::string hlc = o["cloid"].GetString();
                             hlc_for_log = hlc;
                             upd.client_order_id = map_back_client_id(hlc);
+                        }
+                        // Extract symbol (coin field) for lazy rehydration
+                        if (o.HasMember("coin") && o["coin"].IsString()) {
+                            coin_symbol = o["coin"].GetString();
                         }
                         // Role lookup - separate from cloid mapping to avoid lock conflicts
                         if (!hlc_for_log.empty() && !upd.exchange_order_id.empty()) {
@@ -477,6 +482,15 @@ void HyperliquidAdapter::install_ws_subscribe_handler() {
                         continue;
                     }
                     spdlog::warn("[HL-WS] DEBUG: item#{} passed anti-replay filters, oid={}", item_idx, upd.exchange_order_id);
+
+                    // Add symbol to extra_data for lazy rehydration in execution engine
+                    if (!coin_symbol.empty()) {
+                        std::string normalized_symbol = to_upper_ascii(coin_symbol) + "-USDC-PERP";
+                        upd.extra_data["symbol"] = normalized_symbol;
+                        upd.extra_data["category"] = "linear";
+                        upd.extra_data["exchange"] = "hyperliquid";
+                    }
+
                     try {
                         std::string role_m;
                         if (!upd.exchange_order_id.empty()) {

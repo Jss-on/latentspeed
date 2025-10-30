@@ -1530,69 +1530,84 @@ void TradingEngineService::on_order_update_hft(const OrderUpdate& update) {
                 return;
             }
 
-            // Non-terminal unknown update → try lazy rehydration from exchange
-            IExchangeAdapter* client_raw = nullptr;
-            if (venue_router_) {
-                // Prefer configured exchange key if present
-                client_raw = venue_router_->get(config_.exchange);
-                if (!client_raw) {
-                    // Fallback: if only one adapter was registered, take it
-                    // (We don't have an iterator API; this code path is best-effort.)
-                }
+            // Non-terminal unknown update → try lazy rehydration
+            // Priority 1: Use symbol from orderUpdate.extra_data (added by adapter for TP/SL orders)
+            // Priority 2: Query exchange API (for orders placed outside this session)
+            std::string sym;
+            std::string cat;
+            std::string venue_name;
+
+            // Check if adapter provided symbol in extra_data (fast path for TP/SL orders)
+            if (auto it = update.extra_data.find("symbol"); it != update.extra_data.end() && !it->second.empty()) {
+                sym = it->second;
+            }
+            if (auto it = update.extra_data.find("category"); it != update.extra_data.end() && !it->second.empty()) {
+                cat = it->second;
+            }
+            if (auto it = update.extra_data.find("exchange"); it != update.extra_data.end() && !it->second.empty()) {
+                venue_name = it->second;
             }
 
-            if (client_raw) {
-                OrderResponse qr = client_raw->query_order(update.client_order_id);
-                if (qr.success) {
-                    // Expect symbol/category in extra_data (added in BybitClient earlier)
-                    std::string sym;
-                    std::string cat;
-                    if (auto it = qr.extra_data.find("symbol"); it != qr.extra_data.end()) {
-                        sym = it->second;
-                    }
-                    if (auto it = qr.extra_data.find("category"); it != qr.extra_data.end()) {
-                        cat = it->second;
-                    }
+            // If symbol not in extra_data, fall back to query_order
+            if (sym.empty()) {
+                IExchangeAdapter* client_raw = nullptr;
+                if (venue_router_) {
+                    client_raw = venue_router_->get(config_.exchange);
+                }
 
-                    if (!sym.empty()) {
-                        auto* o = order_pool_->allocate();
-                        if (o) {
-                            new (o) HFTExecutionOrder(); // placement new
-                            o->version = 1;
-                            o->cl_id.assign(update.client_order_id.c_str());
-                            o->venue.assign(client_raw->get_exchange_name().c_str()); // venue from the queried client
-                            o->venue_type.assign("cex");
-                            // category → product_type
-                            // spot → "spot"; otherwise treat as perpetual
-                            if (!cat.empty() && to_lower_ascii(cat) == "spot") {
-                                o->product_type.assign("spot");
-                            } else {
-                                o->product_type.assign("perpetual");
-                            }
-                            o->symbol.assign(sym.c_str());
-
-                            // If exchange_order_id came back, store it in params for later use
-                            if (qr.exchange_order_id.has_value()) {
-                                o->params.insert(FixedString<32>("exchange_order_id"),
-                                                 FixedString<64>(qr.exchange_order_id->c_str()));
-                            }
-
-                            pending_orders_->insert(o->cl_id, o);
-                            // refresh local pointer after insert
-                            order_ptr = pending_orders_->find(cl_id);
-                            spdlog::info("[HFT-Engine] Lazy rehydrated live order {}", update.client_order_id);
+                if (client_raw) {
+                    OrderResponse qr = client_raw->query_order(update.client_order_id);
+                    if (qr.success) {
+                        if (auto it = qr.extra_data.find("symbol"); it != qr.extra_data.end()) {
+                            sym = it->second;
+                        }
+                        if (auto it = qr.extra_data.find("category"); it != qr.extra_data.end()) {
+                            cat = it->second;
+                        }
+                        if (venue_name.empty()) {
+                            venue_name = client_raw->get_exchange_name();
                         }
                     } else {
-                        spdlog::warn("[HFT-Engine] Lazy rehydrate failed: query_order({}) had no symbol",
+                        spdlog::warn("[HFT-Engine] Lazy rehydrate failed: query_order({}) not open/success",
                                      update.client_order_id);
                     }
                 } else {
-                    spdlog::warn("[HFT-Engine] Lazy rehydrate failed: query_order({}) not open/success",
-                                 update.client_order_id);
+                    spdlog::warn("[HFT-Engine] Update for unknown live order (no client available): {} status={}",
+                                 update.client_order_id, update.status);
+                }
+            }
+
+            // Proceed with rehydration if we have a symbol from either source
+            if (!sym.empty()) {
+                auto* o = order_pool_->allocate();
+                if (o) {
+                    new (o) HFTExecutionOrder(); // placement new
+                    o->version = 1;
+                    o->cl_id.assign(update.client_order_id.c_str());
+                    o->venue.assign(venue_name.empty() ? config_.exchange.c_str() : venue_name.c_str());
+                    o->venue_type.assign("cex");
+                    // category → product_type
+                    if (!cat.empty() && to_lower_ascii(cat) == "spot") {
+                        o->product_type.assign("spot");
+                    } else {
+                        o->product_type.assign("perpetual");
+                    }
+                    o->symbol.assign(sym.c_str());
+
+                    // Store exchange_order_id if present
+                    if (!update.exchange_order_id.empty()) {
+                        o->params.insert(FixedString<32>("exchange_order_id"),
+                                         FixedString<64>(update.exchange_order_id.c_str()));
+                    }
+
+                    pending_orders_->insert(o->cl_id, o);
+                    // refresh local pointer after insert
+                    order_ptr = pending_orders_->find(cl_id);
+                    spdlog::info("[HFT-Engine] Lazy rehydrated live order {} symbol={}", update.client_order_id, sym);
                 }
             } else {
-                spdlog::warn("[HFT-Engine] Update for unknown live order (no client available): {} status={}",
-                             update.client_order_id, update.status);
+                spdlog::warn("[HFT-Engine] Lazy rehydrate failed: no symbol available for {}",
+                             update.client_order_id);
             }
 
             // If still unknown after rehydrate attempt, bail out (non-terminal)
@@ -1703,15 +1718,40 @@ void TradingEngineService::on_fill_hft(const FillData& fill_data) {
 
         // Fast string-to-double conversion
         fill->version = 1;
+        std::string cl_id_str;
+        std::string intent_id_str;
+        std::string role_str;
         {
             const std::string& primary = fill_data.client_order_id.empty()
                 ? fill_data.exchange_order_id
                 : fill_data.client_order_id;
             fill->cl_id.assign(primary.c_str());
+            cl_id_str = primary;
+
+            // Parse cl_id to extract intent_id and role
+            // Format: "base_intent_id" or "base_intent_id::sl" or "base_intent_id::tp"
+            size_t suffix_pos = cl_id_str.find("::");
+            if (suffix_pos != std::string::npos) {
+                // Has suffix - extract base and role
+                intent_id_str = cl_id_str.substr(0, suffix_pos);
+                std::string suffix = cl_id_str.substr(suffix_pos + 2);
+                if (suffix == "sl" || suffix == "tp") {
+                    role_str = suffix;
+                } else {
+                    // Unknown suffix, treat as entry
+                    role_str = "entry";
+                    intent_id_str = cl_id_str;
+                }
+            } else {
+                // No suffix - this is an entry order
+                intent_id_str = cl_id_str;
+                role_str = "entry";
+            }
         }
         fill->exchange_order_id.assign(fill_data.exchange_order_id.c_str());
         fill->exec_id.assign(fill_data.exec_id.c_str());
         fill->symbol_or_pair.assign(fill_data.symbol.c_str());
+        fill->side.assign(fill_data.side.c_str());  // CRITICAL: Copy side for balance accounting
         fill->price = std::stod(fill_data.price);
         fill->size = std::stod(fill_data.quantity);
         fill->fee_amount = std::stod(fill_data.fee);
@@ -1719,19 +1759,7 @@ void TradingEngineService::on_fill_hft(const FillData& fill_data) {
         fill->liquidity.assign(fill_data.liquidity.c_str());
         fill->ts_ns.store(get_current_time_ns_hft(), std::memory_order_relaxed);
 
-        // Lift adapter-provided extra_data intent/role into tags for strategy routing
-        try {
-            auto itIntent = fill_data.extra_data.find("intent");
-            if (itIntent != fill_data.extra_data.end() && !itIntent->second.empty()) {
-                fill->tags.insert(FixedString<32>("intent_id"), FixedString<64>(itIntent->second.c_str()));
-            }
-            auto itRole = fill_data.extra_data.find("role");
-            if (itRole != fill_data.extra_data.end() && !itRole->second.empty()) {
-                fill->tags.insert(FixedString<32>("role"), FixedString<64>(itRole->second.c_str()));
-            }
-        } catch (...) {}
-
-        // Copy tags from original order if available
+        // Copy tags from original order if available (do this first, then override with parsed values)
         OrderId lookup_id(fill->cl_id.c_str());
         bool is_perp = false;
         if (auto* order_ptr = pending_orders_->find(lookup_id); order_ptr && *order_ptr) {
@@ -1740,35 +1768,54 @@ void TradingEngineService::on_fill_hft(const FillData& fill_data) {
                 fill->symbol_or_pair.assign((*order_ptr)->symbol.c_str());
             }
             fill->tags.insert(FixedString<32>("execution_type"), FixedString<64>("live"));
-            // Ensure venue tag is present for downstream analytics
-            if (fill->tags.find(FixedString<32>("venue")) == nullptr && !(*order_ptr)->venue.empty()) {
-                fill->tags.insert(FixedString<32>("venue"), FixedString<64>((*order_ptr)->venue.c_str()));
+            // Ensure venue tag is present for downstream analytics (prevents "unknown" in trading_core)
+            if (fill->tags.find(FixedString<32>("venue")) == nullptr) {
+                if (!(*order_ptr)->venue.empty()) {
+                    fill->tags.insert(FixedString<32>("venue"), FixedString<64>((*order_ptr)->venue.c_str()));
+                } else if (!config_.exchange.empty()) {
+                    // Fallback to config if order venue is missing
+                    fill->tags.insert(FixedString<32>("venue"), FixedString<64>(config_.exchange.c_str()));
+                }
             }
-            // Preserve lifted intent/role if not already present
-            try {
-                if (fill->tags.find(FixedString<32>("intent_id")) == nullptr) {
-                    auto it = fill_data.extra_data.find("intent");
-                    if (it != fill_data.extra_data.end() && !it->second.empty()) {
-                        fill->tags.insert(FixedString<32>("intent_id"), FixedString<64>(it->second.c_str()));
-                    }
-                }
-                if (fill->tags.find(FixedString<32>("role")) == nullptr) {
-                    auto it = fill_data.extra_data.find("role");
-                    if (it != fill_data.extra_data.end() && !it->second.empty()) {
-                        fill->tags.insert(FixedString<32>("role"), FixedString<64>(it->second.c_str()));
-                    }
-                }
-            } catch (...) {}
             // Determine perp from original order's product_type
             std::string pt = to_lower_ascii((*order_ptr)->product_type.view());
             is_perp = (pt == "perpetual");
         } else {
             // External/manual action: still publish with clear tagging
             fill->tags.insert(FixedString<32>("execution_type"), FixedString<64>("external"));
+            // CRITICAL: Always set venue tag for downstream routing (prevents "unknown" in trading_core)
+            if (!config_.exchange.empty()) {
+                fill->tags.insert(FixedString<32>("venue"), FixedString<64>(config_.exchange.c_str()));
+            }
             // Infer perp if ccxt style present (BASE/QUOTE:SETTLE)
             std::string cur = std::string(fill->symbol_or_pair.c_str());
             is_perp = (cur.find(':') != std::string::npos);
         }
+
+        // CRITICAL: Set parsed intent_id and role tags from cl_id for cleaner accounting
+        // Only set if not already present from order tags (preserve strategy-provided intent_id like UUIDs)
+        if (!intent_id_str.empty() && fill->tags.find(FixedString<32>("intent_id")) == nullptr) {
+            fill->tags.insert(FixedString<32>("intent_id"), FixedString<64>(intent_id_str.c_str()));
+        }
+        if (!role_str.empty() && fill->tags.find(FixedString<32>("role")) == nullptr) {
+            fill->tags.insert(FixedString<32>("role"), FixedString<64>(role_str.c_str()));
+        }
+
+        // Also preserve adapter-provided extra_data intent/role if different (for debugging/validation)
+        try {
+            auto itIntent = fill_data.extra_data.find("intent");
+            if (itIntent != fill_data.extra_data.end() && !itIntent->second.empty()) {
+                if (itIntent->second != intent_id_str) {
+                    fill->tags.insert(FixedString<32>("adapter_intent_id"), FixedString<64>(itIntent->second.c_str()));
+                }
+            }
+            auto itRole = fill_data.extra_data.find("role");
+            if (itRole != fill_data.extra_data.end() && !itRole->second.empty()) {
+                if (itRole->second != role_str) {
+                    fill->tags.insert(FixedString<32>("adapter_role"), FixedString<64>(itRole->second.c_str()));
+                }
+            }
+        } catch (...) {}
 
         // Normalize to hyphen symbol regardless of source form (Phase 2: via mapper)
         std::string hyphen = symbol_mapper_ ? symbol_mapper_->to_hyphen(fill->symbol_or_pair.c_str(), is_perp)
@@ -1965,6 +2012,7 @@ std::string TradingEngineService::serialize_fill_hft(const HFTFill& fill) {
     doc.AddMember("exchange_order_id", rapidjson::Value(fill.exchange_order_id.c_str(), allocator), allocator);
     doc.AddMember("exec_id", rapidjson::Value(fill.exec_id.c_str(), allocator), allocator);
     doc.AddMember("symbol_or_pair", rapidjson::Value(fill.symbol_or_pair.c_str(), allocator), allocator);
+    doc.AddMember("side", rapidjson::Value(fill.side.c_str(), allocator), allocator);  // CRITICAL: Required for balance accounting
     doc.AddMember("price", rapidjson::Value(fill.price), allocator);
     doc.AddMember("size", rapidjson::Value(fill.size), allocator);
     doc.AddMember("fee_currency", rapidjson::Value(fill.fee_currency.c_str(), allocator), allocator);

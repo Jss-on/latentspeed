@@ -79,6 +79,7 @@ struct OrderUpdate {
     std::string reason;
     uint64_t timestamp_ms;
     std::optional<FillData> fill;  // Populated if this update includes a fill
+    std::map<std::string, std::string> extra_data;  // Symbol, category, exchange for lazy rehydration
 };
 
 /**
