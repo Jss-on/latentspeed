@@ -297,12 +297,14 @@ bool HlWsPostClient::connect(const std::string& ws_url) {
                     // Deadline enforcement handled by outer watchdog + cancel/close
                     wss_->next_layer().handshake(ssl::stream_base::client);
                     // WS handshake
-                    // Disable automatic timeout/ping - we handle keepalive at application layer
+                    // Set timeouts for WebSocket operations
+                    // Ultra-short 100ms idle timeout for near-instant proactive reconnect detection
+                    // Timeline: 80ms grace + up to 100ms timeout = ~180ms total reconnect time
                     wss_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
                     wss_->set_option(websocket::stream_base::timeout{
-                        std::chrono::seconds(300),  // handshake timeout
-                        std::chrono::seconds(0),    // idle timeout (disable auto ping)
-                        false                        // keep-alive pings disabled
+                        std::chrono::seconds(300),       // handshake timeout
+                        std::chrono::milliseconds(100),  // idle timeout - wake every 100ms to check stop_ flag
+                        false                             // keep-alive pings disabled (we handle at app layer)
                     });
                     wss_->set_option(websocket::stream_base::decorator([](websocket::request_type& req) {
                         req.set(beast::http::field::user_agent, std::string("LatentSpeed-HL/1.0"));
@@ -337,12 +339,14 @@ bool HlWsPostClient::connect(const std::string& ws_url) {
             } catch (...) {}
             std::thread hs_thr([&]() {
                 try {
-                    // Disable automatic timeout/ping - we handle keepalive at application layer
+                    // Set timeouts for WebSocket operations
+                    // Ultra-short 100ms idle timeout for near-instant proactive reconnect detection
+                    // Timeline: 80ms grace + up to 100ms timeout = ~180ms total reconnect time
                     ws_->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
                     ws_->set_option(websocket::stream_base::timeout{
-                        std::chrono::seconds(300),  // handshake timeout
-                        std::chrono::seconds(0),    // idle timeout (disable auto ping)
-                        false                        // keep-alive pings disabled
+                        std::chrono::seconds(300),       // handshake timeout
+                        std::chrono::milliseconds(100),  // idle timeout - wake every 100ms to check stop_ flag
+                        false                             // keep-alive pings disabled (we handle at app layer)
                     });
                     ws_->set_option(websocket::stream_base::decorator([](websocket::request_type& req) {
                         req.set(beast::http::field::user_agent, std::string("LatentSpeed-HL/1.0"));
@@ -573,6 +577,8 @@ void HlWsPostClient::rx_loop() {
     while (!stop_.load(std::memory_order_acquire)) {
         try {
             if (!ensure_connected_locked()) break;
+            // Check stop flag before blocking read (for fast proactive reconnect)
+            if (stop_.load(std::memory_order_acquire)) break;
             // Periodic heartbeat to detect if rx_loop is alive but blocked
             uint64_t now_val = now_ms();
             if (last_heartbeat_log == 0 || (now_val - last_heartbeat_log) >= 10000) {
@@ -709,10 +715,33 @@ void HlWsPostClient::rx_loop() {
             }
             // Heartbeat is driven by a dedicated scheduler; no implicit RX-driven pings here.
         } catch (const beast::system_error& e) {
+            // Check for idle timeout (expected - allows fast stop_ detection for proactive reconnect)
+            bool is_timeout = (e.code() == beast::error::timeout);
+            if (is_timeout) {
+                // Idle timeout after 2s of no data - check if we should exit
+                if (stop_.load(std::memory_order_acquire)) {
+                    // Proactive reconnect or shutdown triggered - exit quickly
+                    try {
+                        spdlog::info("[HL-WS] rx_loop: Fast exit on idle timeout (proactive reconnect)");
+                    } catch (...) {}
+                    break;
+                }
+                // Otherwise continue - normal quiet period
+                continue;
+            }
+
+            // EBADF (9) and ECANCELED (125) are expected during intentional close/reconnect
+            bool expected_close = (e.code().value() == 9 || e.code().value() == 125);
             try {
-                spdlog::warn("[HL-WS] rx_loop websocket error: code={} message={}", e.code().value(), e.what());
+                if (expected_close) {
+                    spdlog::info("[HL-WS] rx_loop: WebSocket closed (expected during reconnect, code={})", e.code().value());
+                } else {
+                    spdlog::warn("[HL-WS] rx_loop websocket error: code={} message={}", e.code().value(), e.what());
+                }
             } catch (...) {}
-            diag_dump_recent("rx_loop_error");
+            if (!expected_close) {
+                diag_dump_recent("rx_loop_error");
+            }
             try {
                 if (wss_ && wss_->is_open()) {
                     auto cr = wss_->reason();

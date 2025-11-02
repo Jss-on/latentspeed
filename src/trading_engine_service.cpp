@@ -1521,6 +1521,10 @@ void TradingEngineService::on_order_update_hft(const OrderUpdate& update) {
         OrderId cl_id(update.client_order_id.c_str());
         auto* order_ptr = pending_orders_->find(cl_id);
 
+        // Track if order was already in pending_orders_ BEFORE any rehydration
+        // Used to prevent duplicate "accepted" confirmations from exchange
+        const bool was_already_tracked = (order_ptr && *order_ptr);
+
         if (!order_ptr || !*order_ptr) {
             // Unknown order
             if (is_terminal_status(update.status)) {
@@ -1622,6 +1626,12 @@ void TradingEngineService::on_order_update_hft(const OrderUpdate& update) {
         const std::string raw_status = update.status;
         auto normalized_status = normalize_report_status(raw_status);
         if (!normalized_status) {
+            return;
+        }
+
+        // Skip duplicate "accepted" confirmations from exchange
+        // If order was already tracked, we already sent acceptance (either from placement or first rehydration)
+        if (*normalized_status == "accepted" && was_already_tracked) {
             return;
         }
 
