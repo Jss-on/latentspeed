@@ -104,6 +104,7 @@ private:
     bool disable_private_ws_{false};
     bool subscribe_connected_{false};  // Track subscribe connection state independently
     int ws_post_timeout_ms_{1500};
+    bool ws_first_{false};  // Prefer WS post for actions when true (HTTP fallback)
     uint64_t private_ws_connected_ms_{0};
 
     // Batching and rate-limit controls
@@ -184,6 +185,9 @@ private:
     // Runtime-configurable liveness thresholds (default to constants above)
     uint64_t resubscribe_quiet_ms_{kResubscribeQuietMs_};
     uint64_t reconnect_quiet_ms_{kReconnectQuietMs_};
+    // Optional safety gate: reject fast (IOC/FOK/market/trigger) placements when private WS is stale
+    // 0 disables the gate. Configurable via env LATENTSPEED_HL_PRIVATE_STALE_REJECT_MS
+    uint64_t private_stale_reject_ms_{0};
 
     // Proactive reconnect after order placement (workaround for HL server bug)
     std::atomic<uint64_t> last_order_placement_ms_{0};

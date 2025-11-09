@@ -853,6 +853,10 @@ void TradingEngineService::stop() {
             auto result = order_receiver_socket_->recv(request, zmq::recv_flags::dontwait);
             
             if (result.has_value()) [[likely]] {
+                // Receipt logging at ingress
+                try {
+                    spdlog::info("[HFT-Engine] order recv: bytes={}", request.size());
+                } catch (...) {}
                 stats_->orders_received.fetch_add(1, std::memory_order_relaxed);
                 
                 // Zero-copy string view
@@ -863,6 +867,21 @@ void TradingEngineService::stop() {
                 
                 // Parse and process with minimal allocations
                 if (auto* order = parse_execution_order_hft(message)) [[likely]] {
+                    // Post-parse log with cl_id and pending-before state
+                    try {
+                        bool pending_before = false;
+                        if (pending_orders_) {
+                            if (auto* p = pending_orders_->find(order->cl_id); p && *p) pending_before = true;
+                        }
+                        spdlog::info(
+                            "[HFT-Engine] order parsed: cl_id={} action={} venue={} symbol={} pending_before={}",
+                            order->cl_id.c_str(),
+                            order->action.c_str(),
+                            order->venue.c_str(),
+                            order->symbol.c_str(),
+                            (pending_before ? 1 : 0)
+                        );
+                    } catch (...) {}
                     // Prefetch pending orders map for lookup
                     prefetch(pending_orders_.get());
                     
@@ -1330,11 +1349,27 @@ void TradingEngineService::place_cex_order_hft(const HFTExecutionOrder& order) {
             // Always emit acceptance report
             send_acceptance_report_hft(order, response.exchange_order_id, response.message);
         } else {
-            send_rejection_report_hft(order, "exchange_rejected", response.message);
+            // Map transport-level failures to network_error so upstream can react immediately
+            auto msg_l = to_lower_ascii(response.message);
+            const bool is_network = (
+                msg_l.find("curl error") != std::string::npos ||
+                msg_l.find("timed out") != std::string::npos ||
+                msg_l.find("timeout") != std::string::npos ||
+                msg_l.find("resolve") != std::string::npos ||      // DNS resolve
+                msg_l.find("host not found") != std::string::npos ||
+                msg_l.find("connection refused") != std::string::npos ||
+                msg_l.find("connection reset") != std::string::npos ||
+                msg_l.find("connection aborted") != std::string::npos ||
+                msg_l.find("network unreachable") != std::string::npos ||
+                msg_l.find("private_ws_stale") != std::string::npos || // adapter-level liveness gate
+                msg_l.find("http status 5") != std::string::npos   // 5xx typically transient network/backend
+            );
+            send_rejection_report_hft(order, is_network ? "network_error" : "venue_reject", response.message);
         }
 
     } catch (const std::exception& e) {
-        send_rejection_report_hft(order, "exchange_error", e.what());
+        // Treat transport exceptions as network_error to prevent watchdog stalls upstream
+        send_rejection_report_hft(order, "network_error", e.what());
         spdlog::error("[HFT-Engine] Order placement error: {}", e.what());
     }
 }
@@ -1440,11 +1475,25 @@ void TradingEngineService::cancel_cex_order_hft(const HFTExecutionOrder& order) 
                 pending_orders_->erase(original_id_lookup);
             }
         } else {
-            send_rejection_report_hft(order, "cancel_rejected", response.message);
+            // Map transport failures to network_error; otherwise classify as cancel_rejected
+            auto msg_l = to_lower_ascii(response.message);
+            const bool is_network = (
+                msg_l.find("curl error") != std::string::npos ||
+                msg_l.find("timed out") != std::string::npos ||
+                msg_l.find("timeout") != std::string::npos ||
+                msg_l.find("resolve") != std::string::npos ||
+                msg_l.find("host not found") != std::string::npos ||
+                msg_l.find("connection refused") != std::string::npos ||
+                msg_l.find("connection reset") != std::string::npos ||
+                msg_l.find("connection aborted") != std::string::npos ||
+                msg_l.find("network unreachable") != std::string::npos ||
+                msg_l.find("http status 5") != std::string::npos
+            );
+            send_rejection_report_hft(order, is_network ? "network_error" : "cancel_rejected", response.message);
         }
 
     } catch (const std::exception& e) {
-        send_rejection_report_hft(order, "exchange_error", e.what());
+        send_rejection_report_hft(order, "network_error", e.what());
         spdlog::error("[HFT-Engine] Order closing error: {}", e.what());
     }
 }
@@ -1499,11 +1548,24 @@ void TradingEngineService::replace_cex_order_hft(const HFTExecutionOrder& order)
         if (response.success) {
             send_acceptance_report_hft(order, std::nullopt, "Order modified");
         } else {
-            send_rejection_report_hft(order, "modify_rejected", response.message);
+            auto msg_l = to_lower_ascii(response.message);
+            const bool is_network = (
+                msg_l.find("curl error") != std::string::npos ||
+                msg_l.find("timed out") != std::string::npos ||
+                msg_l.find("timeout") != std::string::npos ||
+                msg_l.find("resolve") != std::string::npos ||
+                msg_l.find("host not found") != std::string::npos ||
+                msg_l.find("connection refused") != std::string::npos ||
+                msg_l.find("connection reset") != std::string::npos ||
+                msg_l.find("connection aborted") != std::string::npos ||
+                msg_l.find("network unreachable") != std::string::npos ||
+                msg_l.find("http status 5") != std::string::npos
+            );
+            send_rejection_report_hft(order, is_network ? "network_error" : "modify_rejected", response.message);
         }
 
     } catch (const std::exception& e) {
-        send_rejection_report_hft(order, "exchange_error", e.what());
+        send_rejection_report_hft(order, "network_error", e.what());
         spdlog::error("[HFT-Engine] Modify error: {}", e.what());
     }
 }
@@ -1528,9 +1590,47 @@ void TradingEngineService::on_order_update_hft(const OrderUpdate& update) {
         if (!order_ptr || !*order_ptr) {
             // Unknown order
             if (is_terminal_status(update.status)) {
-                // Late terminal update: idempotent; safe to ignore
-                spdlog::info("[HFT-Engine] Late terminal update for non-tracked order: {} status={}",
-                             update.client_order_id, update.status);
+                // For rejected/canceled status, emit a report even if not tracked
+                // This handles IOC orders that were rejected before tracking could occur
+                auto normalized_status = normalize_report_status(update.status);
+                if (normalized_status && (*normalized_status == "rejected" || *normalized_status == "canceled")) {
+                    auto* report = report_pool_->allocate();
+                    if (report) {
+                        report->version = 1;
+                        report->cl_id = cl_id;
+                        report->exchange_order_id.assign(update.exchange_order_id.c_str());
+                        report->status.assign(normalized_status->c_str());
+
+                        std::string reason_code;
+                        std::string reason_text;
+                        if (reason_mapper_) {
+                            auto mapped = reason_mapper_->map(*normalized_status, update.reason);
+                            reason_code = mapped.reason_code;
+                            reason_text = mapped.reason_text;
+                        } else {
+                            reason_code = normalize_reason_code(*normalized_status, update.reason);
+                            reason_text = build_reason_text(*normalized_status, update.reason);
+                        }
+                        report->reason_code.assign(reason_code.c_str());
+                        report->reason_text.assign(reason_text.c_str());
+                        report->ts_ns.store(get_current_time_ns_hft(), std::memory_order_relaxed);
+
+                        // Add venue tag for routing
+                        if (!config_.exchange.empty()) {
+                            report->tags.insert(FixedString<32>("venue"), FixedString<64>(config_.exchange.c_str()));
+                        }
+
+                        publish_execution_report_hft(*report);
+                        report_pool_->deallocate(report);
+
+                        spdlog::info("[HFT-Engine] Published rejection report for non-tracked order: {} status={} reason={}",
+                                     update.client_order_id, *normalized_status, update.reason);
+                    }
+                } else {
+                    // Filled orders that we don't track are truly late/external; safe to ignore
+                    spdlog::info("[HFT-Engine] Late terminal update for non-tracked order: {} status={}",
+                                 update.client_order_id, update.status);
+                }
                 return;
             }
 
