@@ -16,7 +16,7 @@
  *   - Same data format and preprocessing features
  */
 
-#include "feed_handler.h"
+#include "marketstream/feed_handler.h"
 #include <yaml-cpp/yaml.h>
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
@@ -50,10 +50,10 @@ public:
     }
     
     void on_orderbook(const OrderBookSnapshot& snapshot) override {
-        spdlog::info("[BOOK] {}:{} - Mid: ${:.2f} Spread: {:.2f} bps",
+        spdlog::info("[BOOK] {}:{} - Bid: ${:.4f} x {:.4f} | Ask: ${:.4f} x {:.4f}",
                      snapshot.exchange.c_str(), snapshot.symbol.c_str(),
-                     snapshot.midpoint,
-                     snapshot.relative_spread * 10000);
+                     snapshot.bids[0].price, snapshot.bids[0].quantity,
+                     snapshot.asks[0].price, snapshot.asks[0].quantity);
         book_count_++;
     }
     

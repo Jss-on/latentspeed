@@ -54,7 +54,9 @@ void HyperliquidMarketstreamAdapter::stop() {
 }
 
 bool HyperliquidMarketstreamAdapter::is_connected() const {
-    return exchange_ && exchange_->is_connected();
+    // NOTE: HyperliquidExchange doesn't have is_connected() method
+    // Assume connected if exchange exists
+    return exchange_ != nullptr;
 }
 
 // ============================================================================
@@ -67,14 +69,10 @@ void HyperliquidMarketstreamAdapter::subscribe_orderbook(const std::string& trad
         return;
     }
     
-    // Convert trading_pair to your format
-    // e.g., "BTC-USD" -> "BTC"
+    // NOTE: HyperliquidExchange doesn't have subscribe_orderbook method
+    // This is a placeholder for future market data integration
     std::string coin = normalize_symbol(trading_pair);
-    
-    spdlog::info("HyperliquidMarketstreamAdapter: Subscribing to orderbook for {}", coin);
-    
-    // Subscribe via your existing marketstream
-    exchange_->subscribe_orderbook(coin);
+    spdlog::warn("[HyperliquidMarketstreamAdapter] subscribe_orderbook not implemented for {}", coin);
 }
 
 void HyperliquidMarketstreamAdapter::unsubscribe_orderbook(const std::string& trading_pair) {
@@ -83,48 +81,43 @@ void HyperliquidMarketstreamAdapter::unsubscribe_orderbook(const std::string& tr
     }
     
     std::string coin = normalize_symbol(trading_pair);
-    spdlog::info("HyperliquidMarketstreamAdapter: Unsubscribing from orderbook for {}", coin);
-    exchange_->unsubscribe_orderbook(coin);
+    spdlog::warn("[HyperliquidMarketstreamAdapter] unsubscribe_orderbook not implemented for {}", coin);
 }
 
 // ============================================================================
 // DATA RETRIEVAL
 // ============================================================================
 
-std::optional<OrderBook> HyperliquidMarketstreamAdapter::get_snapshot(const std::string& trading_pair) {
+std::optional<connector::OrderBook> HyperliquidMarketstreamAdapter::get_snapshot(const std::string& trading_pair) {
     if (!exchange_) {
         return std::nullopt;
     }
     
-    // Get snapshot from your existing orderbook cache
-    // You may need to adapt this based on your actual HyperliquidExchange API
+    // NOTE: HyperliquidExchange doesn't have get_orderbook_snapshot method
+    // This adapter is a placeholder for future market data integration
+    // For now, return empty
+    spdlog::warn("[HyperliquidMarketstreamAdapter] get_snapshot not implemented - market data integration pending");
+    return std::nullopt;
+    
+    /* TODO: Implement when market data methods are available
     auto snapshot = exchange_->get_orderbook_snapshot(trading_pair);
+    if (!snapshot) return std::nullopt;
     
-    if (!snapshot) {
-        return std::nullopt;
-    }
-    
-    // Convert your snapshot format to our OrderBook format
-    OrderBook orderbook(trading_pair);
-    
-    // Assuming your snapshot has bids/asks
+    connector::OrderBook orderbook(trading_pair);
     for (const auto& [price, size] : snapshot->bids) {
         orderbook.apply_bid(price, size);
     }
-    
     for (const auto& [price, size] : snapshot->asks) {
         orderbook.apply_ask(price, size);
     }
-    
     return orderbook;
+    */
 }
 
 std::vector<std::string> HyperliquidMarketstreamAdapter::get_trading_pairs() const {
-    // Return trading pairs available in your marketstream
-    if (!exchange_) {
-        return {};
-    }
-    return exchange_->get_available_pairs();
+    // NOTE: HyperliquidExchange doesn't have get_available_pairs method
+    // Return empty for now
+    return {};
 }
 
 std::string HyperliquidMarketstreamAdapter::connector_name() const {
@@ -140,30 +133,29 @@ void HyperliquidMarketstreamAdapter::setup_message_forwarding() {
         return;
     }
     
-    // Hook into your existing marketstream callbacks
-    // Adapt this based on your actual HyperliquidExchange callback API
+    // NOTE: This is a placeholder for future market data integration
+    // HyperliquidExchange doesn't have set_orderbook_callback method yet
+    // When market data methods are available, implement callback forwarding
     
+    spdlog::info("[HyperliquidMarketstreamAdapter] Message forwarding not yet implemented");
+    
+    /* TODO: Implement when HyperliquidExchange has callback support
     exchange_->set_orderbook_callback([this](const auto& data) {
-        // Convert your orderbook update to our OrderBookMessage format
-        OrderBookMessage msg;
-        msg.type = OrderBookMessageType::SNAPSHOT;  // or DIFF based on your data
+        connector::OrderBookMessage msg;
+        msg.type = connector::OrderBookMessage::Type::SNAPSHOT;
         msg.trading_pair = data.symbol;
         msg.timestamp = data.timestamp;
         
-        // Convert bids/asks
         for (const auto& [price, size] : data.bids) {
             msg.bids.emplace_back(price, size);
         }
-        
         for (const auto& [price, size] : data.asks) {
             msg.asks.emplace_back(price, size);
         }
         
-        // Emit to our subscribers (Phase 3 callback mechanism)
         emit_message(msg);
     });
-    
-    spdlog::info("HyperliquidMarketstreamAdapter: Message forwarding configured");
+    */
 }
 
 std::string HyperliquidMarketstreamAdapter::normalize_symbol(const std::string& trading_pair) const {

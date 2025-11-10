@@ -1,33 +1,26 @@
 cmake_minimum_required(VERSION 3.20)
-
-project(latentspeed VERSION 0.1.0 LANGUAGES CXX)
-
-# Feature toggles for venue adapters (deprecated ones default OFF)
-option(LATENTSPEED_ENABLE_BYBIT "Build Bybit adapter/client" OFF)
-option(LATENTSPEED_ENABLE_BINANCE "Build Binance adapter/client" OFF)
-
-# Enable CTest even though we keep dependencies minimal
-include(CTest)
-
 # C++ standard
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 
 # HFT Compiler optimizations
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
     set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -DNDEBUG -march=native -mtune=native")
-    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -flto -ffast-math -funroll-loops")
+    # TEMPORARY: Disable LTO due to system/vcpkg library conflicts
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -flto")
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -ffast-math -funroll-loops")
     set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -falign-functions=32 -falign-loops=32")
 endif()
 
 # Required packages
 find_package(OpenSSL REQUIRED)
 find_package(Threads REQUIRED)
+find_package(ZLIB REQUIRED)
 find_package(CURL REQUIRED)
-find_package(spdlog REQUIRED)
 find_package(Boost REQUIRED COMPONENTS system)
 find_package(RapidJSON REQUIRED)
+find_package(spdlog REQUIRED)
 find_package(yaml-cpp REQUIRED)
 find_package(args REQUIRED)
 find_package(PkgConfig REQUIRED)
@@ -35,6 +28,9 @@ pkg_check_modules(ZMQ REQUIRED libzmq)
 
 # Add subdirectories
 add_subdirectory(benchmark)
+
+# MarketStream library
+add_subdirectory(src/marketstream)
 
 # Phase 1: Connector Framework (Hummingbot Architecture)
 add_subdirectory(src/connector)
@@ -47,13 +43,10 @@ endif()
 
 # Trading Engine Service executable
 set(LS_ENGINE_SOURCES
-  src/main.cpp
   src/trading_engine_service.cpp
-  src/market_data_provider.cpp
-  src/exchange_interface.cpp
-  src/feed_handler.cpp
   src/exchange/exchange_client.cpp
   src/adapters/hyperliquid_adapter.cpp
+  src/adapters/hyperliquid/hyperliquid_connector_adapter.cpp
   src/adapters/hyperliquid_asset_resolver.cpp
   src/adapters/python_hl_signer.cpp
   src/core/symbol/symbol_mapper.cpp
@@ -65,32 +58,16 @@ set(LS_ENGINE_SOURCES
   src/core/auth/credentials_resolver.cpp
 )
 
-if(LATENTSPEED_ENABLE_BYBIT)
-  list(APPEND LS_ENGINE_SOURCES
-    src/exchange/bybit_client.cpp
-    src/adapters/bybit_adapter.cpp
-  )
-endif()
-
-if(LATENTSPEED_ENABLE_BINANCE)
-  list(APPEND LS_ENGINE_SOURCES
-    src/exchange/binance_client.cpp
-    src/adapters/binance_adapter.cpp
-  )
-endif()
-
-add_executable(trading_engine_service ${LS_ENGINE_SOURCES})
+add_executable(trading_engine_service ${LS_ENGINE_SOURCES} $<TARGET_OBJECTS:marketstream_lib>)
 
 # MarketStream - Production Market Data Provider (YAML-based)
 add_executable(marketstream
   src/marketstream.cpp
-  src/market_data_provider.cpp
-  src/exchange_interface.cpp
-  src/feed_handler.cpp
+  $<TARGET_OBJECTS:marketstream_lib>
 )
 
-target_include_directories(trading_engine_service PRIVATE ${CMAKE_SOURCE_DIR}/include)
-target_include_directories(marketstream PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_include_directories(trading_engine_service BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_include_directories(marketstream BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/include)
 
 if(TARGET args)
     target_link_libraries(trading_engine_service PRIVATE args)
@@ -98,7 +75,10 @@ endif()
 
 # HFT-optimized link libraries
 target_link_libraries(trading_engine_service PRIVATE 
+  connector_framework  # Hummingbot-pattern connector library
   OpenSSL::SSL 
+  OpenSSL::Crypto
+  ZLIB::ZLIB
   Threads::Threads 
   ${ZMQ_LIBRARIES} 
   CURL::libcurl
@@ -111,7 +91,8 @@ target_link_libraries(trading_engine_service PRIVATE
 # MarketStream executable libraries
 target_link_libraries(marketstream PRIVATE 
   OpenSSL::SSL 
-  OpenSSL::Crypto 
+  OpenSSL::Crypto
+  ZLIB::ZLIB
   Threads::Threads 
   ${ZMQ_LIBRARIES} 
   Boost::system
@@ -158,24 +139,3 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
     )
 endif()
 
-if(BUILD_TESTING)
-    add_executable(action_dispatch_tests
-        tests/action_dispatch_test.cpp
-    )
-    target_include_directories(action_dispatch_tests PRIVATE include)
-    add_test(NAME action_dispatch_tests COMMAND action_dispatch_tests)
-
-    add_executable(symbol_mapper_test
-        tests/symbol_mapper_test.cpp
-        src/core/symbol/symbol_mapper.cpp
-    )
-    target_include_directories(symbol_mapper_test PRIVATE include)
-    add_test(NAME symbol_mapper_test COMMAND symbol_mapper_test)
-
-    add_executable(reason_mapper_test
-        tests/reason_mapper_test.cpp
-        src/core/reasons/reason_mapper.cpp
-    )
-    target_include_directories(reason_mapper_test PRIVATE include)
-    add_test(NAME reason_mapper_test COMMAND reason_mapper_test)
-endif()

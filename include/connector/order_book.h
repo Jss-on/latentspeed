@@ -12,6 +12,7 @@
 #include <optional>
 #include <vector>
 #include <cstdint>
+#include <chrono>
 
 namespace latentspeed::connector {
 

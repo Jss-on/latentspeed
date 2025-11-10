@@ -4,9 +4,10 @@
  */
 
 #include <gtest/gtest.h>
-#include "connector/hyperliquid_web_utils.h"
-#include "connector/hyperliquid_auth.h"
+#include "connector/exchange/hyperliquid/hyperliquid_web_utils.h"
+#include "connector/exchange/hyperliquid/hyperliquid_auth.h"
 
+using namespace latentspeed::connector;
 using namespace latentspeed::connector::hyperliquid;
 
 // ============================================================================

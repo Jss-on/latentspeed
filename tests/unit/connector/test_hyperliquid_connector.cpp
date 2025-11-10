@@ -1,12 +1,11 @@
 #include <gtest/gtest.h>
-#include "connector/hyperliquid_perpetual_connector.h"
-#include "connector/hyperliquid_auth.h"
+#include "connector/exchange/hyperliquid/hyperliquid_perpetual_connector.h"
+#include "connector/exchange/hyperliquid/hyperliquid_auth.h"
 #include <memory>
 #include <thread>
 #include <chrono>
 
 using namespace latentspeed::connector;
-using latentspeed::connector::hyperliquid::HyperliquidAuth;
 
 /**
  * @brief Mock event listener for testing

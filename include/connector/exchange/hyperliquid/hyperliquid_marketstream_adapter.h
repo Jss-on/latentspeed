@@ -1,7 +1,7 @@
 #pragma once
 
 #include "connector/order_book_tracker_data_source.h"
-#include "exchange_interface.h"  // Your existing HyperliquidExchange
+#include "marketstream/exchange_interface.h"  // Your existing HyperliquidExchange
 #include <memory>
 #include <string>
 #include <optional>
@@ -16,7 +16,7 @@ namespace latentspeed {
  * This allows us to reuse your battle-tested marketstream implementation
  * while integrating with the new connector architecture.
  */
-class HyperliquidMarketstreamAdapter : public OrderBookTrackerDataSource {
+class HyperliquidMarketstreamAdapter : public connector::OrderBookTrackerDataSource {
 public:
     /**
      * @brief Construct adapter with existing HyperliquidExchange
@@ -40,11 +40,12 @@ public:
 
     void unsubscribe_orderbook(const std::string& trading_pair) override;
 
-    std::optional<OrderBook> get_snapshot(const std::string& trading_pair) override;
+    std::optional<connector::OrderBook> get_snapshot(const std::string& trading_pair) override;
 
-    std::vector<std::string> get_trading_pairs() const override;
+    // Additional methods (not from base class)
+    std::vector<std::string> get_trading_pairs() const;
 
-    std::string connector_name() const override;
+    std::string connector_name() const;
 
 private:
     /**

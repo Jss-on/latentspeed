@@ -7,6 +7,14 @@
 #include <string>
 #include <spdlog/spdlog.h>
 
+namespace latentspeed::connector {
+
+// Forward declarations
+class InFlightOrder;
+struct TradeUpdate;
+
+}  // namespace latentspeed::connector
+
 namespace latentspeed {
 
 /**
@@ -20,7 +28,7 @@ public:
     /**
      * @brief Construct ZMQ publisher
      * @param context Shared ZMQ context (reuse your existing context)
-     * @param endpoint ZMQ endpoint (e.g., "tcp://*:5555" or "ipc:///tmp/orders.ipc")
+     * @param endpoint ZMQ endpoint (e.g., "tcp://0.0.0.0:5555" or "ipc:///tmp/orders.ipc")
      * @param topic_prefix Topic prefix for order events (e.g., "orders.hyperliquid")
      */
     ZMQOrderEventPublisher(
@@ -32,12 +40,12 @@ public:
     /**
      * @brief Publish order created event
      */
-    void publish_order_created(const InFlightOrder& order);
-    void publish_order_filled(const InFlightOrder& order);
-    void publish_order_cancelled(const InFlightOrder& order);
-    void publish_order_failed(const InFlightOrder& order, const std::string& reason);
-    void publish_order_partially_filled(const InFlightOrder& order, const TradeUpdate& trade);
-    void publish_order_update(const InFlightOrder& order);
+    void publish_order_created(const connector::InFlightOrder& order);
+    void publish_order_filled(const connector::InFlightOrder& order);
+    void publish_order_cancelled(const connector::InFlightOrder& order);
+    void publish_order_failed(const connector::InFlightOrder& order, const std::string& reason);
+    void publish_order_partially_filled(const connector::InFlightOrder& order, const connector::TradeUpdate& trade);
+    void publish_order_update(const connector::InFlightOrder& order);
 
     /**
      * @brief Get current endpoint
@@ -56,8 +64,8 @@ public:
 private:
     // Private method declarations - implementations in .cpp file
     void publish_event(const std::string& subtopic, const nlohmann::json& event);
-    nlohmann::json order_to_json(const InFlightOrder& order) const;
-    nlohmann::json trade_to_json(const TradeUpdate& trade) const;
+    nlohmann::json order_to_json(const connector::InFlightOrder& order) const;
+    nlohmann::json trade_to_json(const connector::TradeUpdate& trade) const;
 
     // Member variables
     std::shared_ptr<zmq::context_t> context_;

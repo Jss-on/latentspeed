@@ -8,9 +8,11 @@
 
 namespace latentspeed {
 
+using namespace connector;
+
 // Constructor
 HyperliquidIntegratedConnector::HyperliquidIntegratedConnector(
-    std::shared_ptr<HyperliquidAuth> auth,
+    std::shared_ptr<connector::hyperliquid::HyperliquidAuth> auth,
     std::shared_ptr<HyperliquidExchange> existing_exchange,
     std::shared_ptr<zmq::context_t> zmq_context,
     const std::string& zmq_endpoint,

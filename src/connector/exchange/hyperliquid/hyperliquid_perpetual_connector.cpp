@@ -352,10 +352,18 @@ std::pair<std::string, uint64_t> HyperliquidPerpetualConnector::execute_place_or
         param_order_type = {{"limit", {{"tif", "Ioc"}}}};  // Immediate or cancel
     }
     
-    // 3. Convert price and size to wire format
-    int decimals = HyperliquidWebUtils::get_default_size_decimals(coin);
-    std::string limit_px = HyperliquidWebUtils::float_to_wire(order.price, 2);  // 2 decimals for price
-    std::string sz = HyperliquidWebUtils::float_to_wire(order.amount, decimals);
+    // 3. Convert price and size to wire format using trading rules
+    auto rule_opt = get_trading_rule(order.trading_pair);
+    int size_decimals = HyperliquidWebUtils::get_default_size_decimals(coin);
+    int price_decimals = 5;  // Hyperliquid default
+    
+    if (rule_opt.has_value()) {
+        size_decimals = rule_opt->size_decimals;
+        price_decimals = rule_opt->price_decimals;
+    }
+    
+    std::string limit_px = HyperliquidWebUtils::float_to_wire(order.price, price_decimals);
+    std::string sz = HyperliquidWebUtils::float_to_wire(order.amount, size_decimals);
     
     // 4. Get cloid (always use client_order_id)
     std::string cloid = order.client_order_id;
@@ -413,8 +421,26 @@ bool HyperliquidPerpetualConnector::execute_cancel(
     }
     
     const auto& order = *order_opt;
+    
+    // Fallback: if exchange_order_id is missing, wait briefly for WS update to populate it
     if (!order.exchange_order_id.has_value()) {
-        throw std::runtime_error("Order has no exchange ID: " + client_order_id);
+        spdlog::warn("[HL] Order {} missing exchange_order_id, waiting for WS update...", client_order_id);
+        
+        // Wait up to 2 seconds for exchange_order_id to arrive via WS
+        for (int retry = 0; retry < 20; ++retry) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            
+            auto updated_order = order_tracker_.get_order(client_order_id);
+            if (updated_order.has_value() && updated_order->exchange_order_id.has_value()) {
+                spdlog::info("[HL] exchange_order_id {} acquired for order {}",
+                           *updated_order->exchange_order_id, client_order_id);
+                return execute_cancel_order(*updated_order);
+            }
+        }
+        
+        // Still missing after timeout - cannot cancel without oid
+        spdlog::error("[HL] Timeout waiting for exchange_order_id for order {}", client_order_id);
+        throw std::runtime_error("Order has no exchange ID after timeout: " + client_order_id);
     }
     
     // Get asset index
@@ -449,6 +475,12 @@ bool HyperliquidPerpetualConnector::execute_cancel(
 }
 
 bool HyperliquidPerpetualConnector::execute_cancel_order(const InFlightOrder& order) {
+    // Check if we have exchange_order_id
+    if (!order.exchange_order_id.has_value()) {
+        spdlog::error("[HL] Cannot cancel order {} without exchange_order_id", order.client_order_id);
+        return false;
+    }
+    
     std::string coin = extract_coin_from_pair(order.trading_pair);
     
     if (coin_to_asset_.find(coin) == coin_to_asset_.end()) {
@@ -467,7 +499,13 @@ bool HyperliquidPerpetualConnector::execute_cancel_order(const InFlightOrder& or
     };
     
     try {
-        api_post_with_auth(CANCEL_ORDER_URL, action);
+        auto result = api_post_with_auth(CANCEL_ORDER_URL, action);
+        
+        // Check response status
+        if (result["status"] == "err") {
+            spdlog::error("[HL] Cancel rejected: {}", result.dump());
+            return false;
+        }
         
         OrderUpdate update;
         update.client_order_id = order.client_order_id;
@@ -475,6 +513,8 @@ bool HyperliquidPerpetualConnector::execute_cancel_order(const InFlightOrder& or
         update.update_timestamp = current_timestamp_ns();
         order_tracker_.process_order_update(update);
         
+        spdlog::info("[HL] Cancel request sent for order {} (oid={})",
+                    order.client_order_id, *order.exchange_order_id);
         return true;
     } catch (const std::exception& e) {
         spdlog::error("Failed to execute cancel: {}", e.what());
@@ -510,7 +550,7 @@ void HyperliquidPerpetualConnector::process_trade_update(const UserStreamMessage
         
         const auto& order = *order_opt;
         
-        // Build trade update
+        // Build trade update with liquidity flag
         TradeUpdate trade;
         trade.trade_id = std::to_string(msg.data.value("trade_id", 0));
         trade.client_order_id = order.client_order_id;
@@ -523,7 +563,25 @@ void HyperliquidPerpetualConnector::process_trade_update(const UserStreamMessage
         trade.fee_currency = "USDC";
         trade.fill_timestamp = msg.data.value("time", 0ULL) * 1000000;  // ms to ns
         
+        // Extract liquidity flag (maker/taker) if available
+        // Hyperliquid may report this in the fill message
+        if (msg.data.contains("liquidity")) {
+            trade.liquidity = msg.data.value("liquidity", "taker");
+        } else {
+            // Infer from fee: negative fee = maker rebate
+            trade.liquidity = (trade.fee_amount < 0) ? "maker" : "taker";
+        }
+        
         order_tracker_.process_trade_update(trade);
+        
+        // Emit fill event with actual data
+        if (event_listener_) {
+            event_listener_->on_order_filled(
+                order.client_order_id,
+                trade.fill_price,
+                trade.fill_base_amount
+            );
+        }
         
     } catch (const std::exception& e) {
         spdlog::error("Failed to process trade update: {}", e.what());
@@ -536,30 +594,80 @@ void HyperliquidPerpetualConnector::process_order_update(const UserStreamMessage
         auto order_opt = order_tracker_.get_order(cloid);
         
         if (!order_opt.has_value()) {
-            return;
+            // Try to find by exchange order ID if cloid lookup failed
+            if (msg.data.contains("exchange_order_id")) {
+                int64_t oid = msg.data.value("exchange_order_id", 0);
+                if (oid > 0) {
+                    order_opt = order_tracker_.get_order_by_exchange_id(std::to_string(oid));
+                }
+            }
+            
+            if (!order_opt.has_value()) {
+                return;
+            }
         }
         
+        const auto& order = *order_opt;
         std::string status = msg.data.value("status", "");
         OrderState new_state = OrderState::OPEN;
         
+        // Determine state from status and fill progress
         if (status == "filled") {
             new_state = OrderState::FILLED;
         } else if (status == "cancelled" || status == "rejected") {
             new_state = OrderState::CANCELLED;
+        } else if (status == "open" || status.empty()) {
+            // Check for partial fills using filled_sz/orig_sz
+            if (msg.data.contains("filled_sz") && msg.data.contains("orig_sz")) {
+                try {
+                    double filled_sz = std::stod(msg.data.value("filled_sz", "0"));
+                    double orig_sz = std::stod(msg.data.value("orig_sz", "0"));
+                    
+                    if (filled_sz > 0 && filled_sz < orig_sz) {
+                        new_state = OrderState::PARTIALLY_FILLED;
+                    } else if (filled_sz >= orig_sz && orig_sz > 0) {
+                        new_state = OrderState::FILLED;
+                    } else {
+                        new_state = OrderState::OPEN;
+                    }
+                } catch (...) {
+                    new_state = OrderState::OPEN;
+                }
+            } else {
+                new_state = OrderState::OPEN;
+            }
         }
         
         OrderUpdate update;
-        update.client_order_id = cloid;
+        update.client_order_id = order.client_order_id;
         update.new_state = new_state;
         update.update_timestamp = current_timestamp_ns();
         
+        // Backfill exchange_order_id from WS update if missing in tracker
+        if (!order.exchange_order_id.has_value() && msg.data.contains("exchange_order_id")) {
+            int64_t oid = msg.data.value("exchange_order_id", 0);
+            if (oid > 0) {
+                update.exchange_order_id = std::to_string(oid);
+                spdlog::debug("[HL] Backfilled exchange_order_id {} for order {}", 
+                             *update.exchange_order_id, order.client_order_id);
+            }
+        }
+        
         order_tracker_.process_order_update(update);
         
-        // Emit events
+        // Emit events (don't emit zeroed fills - actual fills come via process_trade_update)
         if (new_state == OrderState::FILLED && event_listener_) {
-            event_listener_->on_order_filled(cloid, 0.0, 0.0);  // TODO: Get actual fill info
+            // Get accumulated fill info from tracker
+            auto updated_order = order_tracker_.get_order(order.client_order_id);
+            if (updated_order.has_value()) {
+                event_listener_->on_order_completed(
+                    order.client_order_id,
+                    updated_order->average_fill_price,
+                    updated_order->filled_amount
+                );
+            }
         } else if (new_state == OrderState::CANCELLED && event_listener_) {
-            event_listener_->on_order_cancelled(cloid);
+            event_listener_->on_order_cancelled(order.client_order_id);
         }
         
     } catch (const std::exception& e) {
@@ -630,15 +738,22 @@ void HyperliquidPerpetualConnector::fetch_trading_rules() {
             std::string trading_pair = name + "-USD";
             int sz_decimals = std::stoi(asset.value("szDecimals", "3"));
             
+            // Extract price decimals from maxLeverage or default to 5 sig figs (Hyperliquid default)
+            // Hyperliquid uses 5 significant figures for most assets
+            int price_decimals = 5;  // Default for Hyperliquid
+            
             TradingRule rule;
             rule.trading_pair = trading_pair;
-            rule.min_order_size = 0.0;  // TODO: Get from API
+            rule.min_order_size = 0.0;  // Hyperliquid has dynamic minimums based on notional
             rule.max_order_size = 1000000.0;
-            rule.tick_size = 0.01;
+            rule.tick_size = std::pow(10.0, -price_decimals);
             rule.step_size = std::pow(10.0, -sz_decimals);
-            rule.price_decimals = 2;
+            rule.price_decimals = price_decimals;
             rule.size_decimals = sz_decimals;
             trading_rules_[trading_pair] = rule;
+            
+            spdlog::debug("[HL] Trading rule for {}: price_decimals={}, sz_decimals={}, tick_size={}, step_size={}",
+                         trading_pair, price_decimals, sz_decimals, rule.tick_size, rule.step_size);
         }
         
         spdlog::info("Fetched trading rules for {} pairs", trading_rules_.size());
