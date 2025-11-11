@@ -1,0 +1,122 @@
+@startuml Order Placement Flow
+!theme plain
+skinparam sequenceMessageAlign center
+skinparam maxMessageSize 200
+
+title Order Placement Flow (Hot Path)
+
+actor "Client" as Client
+participant "ZMQ PULL\n:5601" as ZMQ
+participant "Receiver Thread\n(Core 2)" as Recv
+participant "Parser" as Parser
+participant "Memory Pool" as Pool
+participant "Processor" as Proc
+participant "Venue Router" as Router
+participant "Adapter" as Adapter
+participant "Connector" as Conn
+participant "REST API" as REST
+participant "Exchange" as Exch
+
+== Order Ingestion ==
+
+Client -> ZMQ: JSON Order
+activate Client
+activate ZMQ
+
+loop Non-blocking
+    Recv -> ZMQ: recv(DONTWAIT)
+    activate Recv
+    ZMQ --> Recv: Message
+end
+
+Recv -> Parser: parse_execution_order_hft()
+activate Parser
+
+Parser -> Pool: Allocate HFTExecutionOrder
+activate Pool
+alt Pool Available
+    Pool --> Parser: Order Object
+else Pool Exhausted
+    Pool --> Parser: nullptr
+    Parser --> Recv: Error
+    Recv -> Recv: Log + Stats
+end
+deactivate Pool
+
+Parser -> Parser: Parse JSON (Zero-copy)
+Parser -> Parser: Fill Fixed Strings
+Parser --> Recv: HFTExecutionOrder*
+deactivate Parser
+
+== Order Processing ==
+
+Recv -> Proc: process_execution_order_hft()
+activate Proc
+
+Proc -> Proc: Decode Action (FNV-1a)
+Proc -> Proc: Validate Fields
+
+alt Validation Failed
+    Proc -> Proc: Create Rejection
+    Proc --> Recv: Return
+else Valid
+    Proc -> Router: get_adapter(venue)
+    activate Router
+    Router --> Proc: IExchangeAdapter*
+    deactivate Router
+    
+    Proc -> Adapter: place_order(request)
+    activate Adapter
+    Adapter -> Conn: buy/sell()
+    activate Conn
+    Conn -> REST: POST /exchange
+    activate REST
+    REST -> Exch: HTTPS Request
+    activate Exch
+    
+    alt Success
+        Exch --> REST: Order Accepted
+        deactivate Exch
+        REST --> Conn: Response
+        deactivate REST
+        Conn --> Adapter: OrderResponse (success)
+        deactivate Conn
+        Adapter --> Proc: Success
+        deactivate Adapter
+        
+        Proc -> Proc: Cache in pending_orders_
+        Proc -> Proc: Create Acceptance Report
+        Proc -> Proc: Serialize + Queue
+        
+    else Error
+        Exch --> REST: Error
+        deactivate Exch
+        REST --> Conn: Error
+        deactivate REST
+        Conn --> Adapter: Failure
+        deactivate Conn
+        Adapter --> Proc: Error
+        deactivate Adapter
+        
+        Proc -> Proc: Create Rejection Report
+    end
+end
+
+Proc --> Recv: Complete
+deactivate Proc
+deactivate Recv
+deactivate ZMQ
+deactivate Client
+
+note over Client,Exch
+  **Latency: ~10-70 μs**
+  (excluding network)
+  
+  Hot path optimizations:
+  - Zero-copy parsing
+  - Memory pools
+  - Lock-free queues
+  - TSC timestamps
+end note
+
+@enduml

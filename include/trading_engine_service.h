@@ -57,6 +57,8 @@
 #include <rapidjson/writer.h>
 #include <rapidjson/stringbuffer.h>
 
+#include "utils/hft_utils.h"
+
 // HFT-optimized data structures
 #include "hft_data_structures.h"
 
@@ -79,14 +81,7 @@ namespace latentspeed {
 // HFT structures are already declared in hft_data_structures.h
 // No forward declarations needed since the header is included above
 
-/**
- * @brief CPU usage modes for adaptive performance tuning
- */
-enum class CpuMode {
-    NORMAL,     // Balanced CPU usage with moderate sleeps  
-    HIGH_PERF,  // 100% CPU usage, minimal latency
-    ECO         // CPU-friendly with longer sleeps
-};
+using CpuMode = hft::CpuMode;
 
 /**
  * @struct ExecutionOrder
@@ -157,6 +152,10 @@ struct TradingEngineConfig {
     std::vector<std::string> symbols = {"BTCUSDT", "ETHUSDT"};  ///< Symbols to subscribe to
     bool enable_trades = true;              ///< Enable trade data streaming
     bool enable_orderbook = true;           ///< Enable orderbook data streaming
+    
+    // ZMQ endpoint configuration
+    std::string order_endpoint = "tcp://127.0.0.1:5601";   ///< Order receiver endpoint
+    std::string report_endpoint = "tcp://127.0.0.1:5602";  ///< Report publisher endpoint
     
     /**
      * @brief Validate configuration parameters
@@ -249,7 +248,7 @@ private:
      * @param json_message Zero-copy string view of JSON message
      * @return Pointer to allocated HFTExecutionOrder or nullptr on failure
      */
-    hft::HFTExecutionOrder* parse_execution_order_hft(std::string_view json_message);
+    [[nodiscard]] hft::HFTExecutionOrder* parse_execution_order_hft(std::string_view json_message);
     
     /**
      * @brief Ultra-low latency order processing with minimal allocations
@@ -271,6 +270,16 @@ private:
      * @brief HFT-optimized order replacement
      */
     void replace_cex_order_hft(const hft::HFTExecutionOrder& order);
+    
+    /**
+     * @brief Find parameter or tag value in order
+     * @param order The order to search
+     * @param key The key to find
+     * @return Pointer to value if found, nullptr otherwise
+     */
+    const hft::FixedString<64>* find_order_param_or_tag(
+        const hft::HFTExecutionOrder& order, 
+        const char* key) const;
     /// @}
     
     /// @name HFT-Optimized Callback Handlers
@@ -323,17 +332,17 @@ private:
     /**
      * @brief Ultra-fast timestamp generation
      */
-    inline uint64_t get_current_time_ns_hft();
+    [[nodiscard]] inline uint64_t get_current_time_ns_hft();
     
     /**
      * @brief Fast execution report serialization
      */
-    std::string serialize_execution_report_hft(const hft::HFTExecutionReport& report);
+    [[nodiscard]] std::string serialize_execution_report_hft(const hft::HFTExecutionReport& report);
     
     /**
      * @brief Fast fill serialization
      */
-    std::string serialize_fill_hft(const hft::HFTFill& fill);
+    [[nodiscard]] std::string serialize_fill_hft(const hft::HFTFill& fill);
     /// @}
     
     /// @name Legacy Methods (for backward compatibility)

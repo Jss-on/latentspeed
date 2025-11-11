@@ -32,11 +32,7 @@ using hyperliquid::HyperliquidAuth;
  */
 class HyperliquidUserStreamDataSource : public UserStreamTrackerDataSource {
 public:
-    static constexpr const char* WS_URL = "api.hyperliquid.xyz";
-    static constexpr const char* WS_PORT = "443";
-    static constexpr const char* WS_PATH = "/ws";
-
-    HyperliquidUserStreamDataSource(std::shared_ptr<HyperliquidAuth> auth);
+    HyperliquidUserStreamDataSource(std::shared_ptr<HyperliquidAuth> auth, bool testnet = false);
 
     ~HyperliquidUserStreamDataSource() override;
 
@@ -86,6 +82,10 @@ private:
     // ========================================================================
 
     std::shared_ptr<HyperliquidAuth> auth_;
+    bool testnet_;
+    
+    // Dynamic URLs based on testnet flag
+    std::string ws_host_;  // e.g., "api.hyperliquid.xyz" or "api.hyperliquid-testnet.xyz"
     
     net::io_context io_context_;
     ssl::context ssl_context_;

@@ -39,11 +39,6 @@ using hyperliquid::HyperliquidWebUtils;
  */
 class HyperliquidPerpetualConnector : public ConnectorBase {
 public:
-    static constexpr const char* REST_URL = "https://api.hyperliquid.xyz";
-    static constexpr const char* CREATE_ORDER_URL = "/exchange";
-    static constexpr const char* CANCEL_ORDER_URL = "/exchange";
-    static constexpr const char* INFO_URL = "/info";
-
     HyperliquidPerpetualConnector(
         std::shared_ptr<HyperliquidAuth> auth,
         bool testnet = false
@@ -170,6 +165,11 @@ private:
 
     std::shared_ptr<HyperliquidAuth> auth_;
     bool testnet_;
+    
+    // Dynamic URLs based on testnet flag
+    std::string rest_host_;      // e.g., "api.hyperliquid.xyz" or "api.hyperliquid-testnet.xyz"
+    std::string rest_base_url_;  // e.g., "https://api.hyperliquid.xyz"
+    std::string ws_host_;        // e.g., "api.hyperliquid.xyz" or "api.hyperliquid-testnet.xyz"
     
     ClientOrderTracker order_tracker_;
     

@@ -26,8 +26,6 @@ find_package(args REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(ZMQ REQUIRED libzmq)
 
-# Add subdirectories
-add_subdirectory(benchmark)
 
 # MarketStream library
 add_subdirectory(src/marketstream)
@@ -43,7 +41,12 @@ endif()
 
 # Trading Engine Service executable
 set(LS_ENGINE_SOURCES
+  src/main_trading_engine.cpp
   src/trading_engine_service.cpp
+  src/utils/string_utils.cpp
+  src/utils/hft_utils.cpp
+  src/engine/cli_config.cpp
+  src/engine/order_serializer.cpp
   src/exchange/exchange_client.cpp
   src/adapters/hyperliquid_adapter.cpp
   src/adapters/hyperliquid/hyperliquid_connector_adapter.cpp

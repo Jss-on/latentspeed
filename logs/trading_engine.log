@@ -1,0 +1,13 @@
+[2025-11-10 22:32:14.640834] [PID:479764] [TID:479764] [info] [:] [] === Latentspeed Trading Engine Service ===
+[2025-11-10 22:32:14.640943] [PID:479764] [TID:479764] [info] [:] [] Starting up...
+[2025-11-10 22:32:14.640952] [PID:479764] [TID:479764] [info] [:] [] [Main] Configuration Summary:
+[2025-11-10 22:32:14.640961] [PID:479764] [TID:479764] [info] [:] [] [Main]   Exchange: hyperliquid
+[2025-11-10 22:32:14.640966] [PID:479764] [TID:479764] [info] [:] [] [Main]   Trading Mode: DEMO/TESTNET
+[2025-11-10 22:32:14.640970] [PID:479764] [TID:479764] [info] [:] [] [Main]   API Key: 0x44...69be (masked)
+[2025-11-10 22:32:14.675975] [PID:479764] [TID:479764] [info] [:] [] [HFT-Engine] Memory locked to prevent paging
+[2025-11-10 22:32:14.676058] [PID:479764] [TID:479764] [info] [:] [] [HFT-Engine] Ultra-low latency trading engine initialized
+[2025-11-10 22:32:14.676070] [PID:479764] [TID:479764] [info] [:] [] [HFT-Engine] Memory pools pre-warmed with 128 entries
+[2025-11-10 22:32:14.676074] [PID:479764] [TID:479764] [info] [:] [] [HFT-Engine] Lock-free queues ready
+[2025-11-10 22:32:14.676079] [PID:479764] [TID:479764] [info] [:] [] [HFT-Engine] Unix domain sockets: tcp://127.0.0.1:5601, tcp://127.0.0.1:5602
+[2025-11-10 22:32:14.676085] [PID:479764] [TID:479764] [info] [:] [] [HFT-Engine] Starting initialization...
+Resource temporarily unavailable (/home/tensor/latentspeed/external/vcpkg/buildtrees/zeromq/src/v4.3.5-37c87b6b8c.clean/src/thread.cpp:241)

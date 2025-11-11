@@ -38,7 +38,7 @@ HyperliquidIntegratedConnector::HyperliquidIntegratedConnector(
     
     // Create user stream (Phase 5 - for authenticated data)
     user_stream_ = std::make_shared<HyperliquidUserStreamDataSource>(
-        auth_->get_address(),
+        auth_,
         testnet_
     );
     

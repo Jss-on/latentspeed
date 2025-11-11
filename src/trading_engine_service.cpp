@@ -16,15 +16,11 @@
 #include "hft_data_structures.h"
 #include "action_dispatch.h"
 #include "reason_code_mapper.h"
-#include <args.hxx>
+#include "utils/string_utils.h"
+#include "utils/hft_utils.h"
+#include "engine/order_serializer.h"
 #include <filesystem>
 #include <signal.h>
-#ifdef LATENTSPEED_ENABLE_BYBIT
-#include "adapters/bybit_adapter.h"
-#endif
-#ifdef LATENTSPEED_ENABLE_BINANCE
-#include "adapters/binance_adapter.h"
-#endif
 #include "adapters/hyperliquid/hyperliquid_connector_adapter.h"
 #include "engine/venue_router.h"
 #include "core/auth/credentials_resolver.h"
@@ -64,15 +60,9 @@
 #include <rapidjson/error/en.h>
 
 // C++20 features for HFT optimization
-#include <bit>
-#include <span>
-#include <ranges>
-#include <concepts>
-#include <coroutine>
-#include <latch>
-#include <barrier>
-#include <semaphore>
-#include <source_location>
+#include <bit>       // For std::bit_cast if used
+#include <span>      // For zero-copy views
+#include <concepts>  // For concept constraints
 
 // x86 intrinsics for SIMD and low-level optimizations
 #ifdef __x86_64__
@@ -88,347 +78,21 @@
 
 namespace latentspeed {
 
+// HFT memory pool sizes - tuned for typical trading workload
+namespace pool_config {
+    constexpr size_t ORDER_POOL_SIZE = 1024;       // Max concurrent orders
+    constexpr size_t REPORT_POOL_SIZE = 2048;      // 2x orders for updates
+    constexpr size_t FILL_POOL_SIZE = 2048;        // Match report pool
+    constexpr size_t PUBLISH_QUEUE_SIZE = 8192;    // High-water mark for publishing
+    constexpr size_t PENDING_ORDERS_SIZE = 1024;   // Match order pool
+    constexpr size_t PROCESSED_ORDERS_SIZE = 2048; // Larger for dedupe tracking
+} // namespace pool_config
+
 using namespace hft;
-
-namespace {
-
-std::string to_lower_ascii(std::string_view input) {
-    std::string out(input.begin(), input.end());
-    std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) {
-        return static_cast<char>(std::tolower(c));
-    });
-    return out;
-}
-
-std::string to_upper_ascii(std::string_view input) {
-    std::string out(input.begin(), input.end());
-    std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) {
-        return static_cast<char>(std::toupper(c));
-    });
-    return out;
-}
-
-std::string trim_trailing_zeros(std::string value) {
-    if (auto pos = value.find('.'); pos != std::string::npos) {
-        auto last = value.find_last_not_of('0');
-        if (last != std::string::npos) {
-            value.erase(last + 1);
-        }
-        if (!value.empty() && value.back() == '.') {
-            value.pop_back();
-        }
-    }
-    if (value.empty()) {
-        return std::string{"0"};
-    }
-    return value;
-}
-
-// Normalize venue names coming from various upstreams to engine client keys
-std::string normalize_venue_key(std::string_view venue) {
-    std::string v = to_lower_ascii(venue);
-    if (v == "binance_futures" || v == "binanceusdm" || v == "binance-perp" || v == "binance_um" || v == "binance_umfutures") {
-        return std::string{"binance"};
-    }
-    if (v == "bybit_futures" || v == "bybit-perp" || v == "bybit_um" || v == "bybit_umfutures") {
-        return std::string{"bybit"};
-    }
-    return v;
-}
-
-// Try to split a compact symbol like BNBUSDT into (BNB, USDT)
-std::optional<std::pair<std::string,std::string>> split_compact_symbol(std::string_view sym) {
-    static const std::array<const char*, 8> quotes = {
-        "USDT","USDC","BTC","ETH","USD","EUR","DAI","FDUSD"
-    };
-    std::string s(sym.begin(), sym.end());
-    for (auto q : quotes) {
-        const size_t qlen = std::strlen(q);
-        if (s.size() > qlen && s.rfind(q) == s.size() - qlen) {
-            return std::make_pair(s.substr(0, s.size() - qlen), std::string(q));
-        }
-    }
-    return std::nullopt;
-}
-
-// Convert various symbol forms to hyphen style: BASE-QUOTE or BASE-QUOTE-PERP
-std::string to_hyphen_symbol(std::string_view symbol, bool is_perp) {
-    std::string s(symbol.begin(), symbol.end());
-    if (s.empty()) return s;
-
-    // If ccxt perp style: BASE/QUOTE:SETTLE
-    if (auto colon = s.find(':'); colon != std::string::npos) {
-        std::string left = s.substr(0, colon);
-        if (auto slash = left.find('/'); slash != std::string::npos) {
-            std::string base = left.substr(0, slash);
-            std::string quote = left.substr(slash+1);
-            return base + "-" + quote + (is_perp ? "-PERP" : "");
-        }
-    }
-    // If ccxt spot style: BASE/QUOTE
-    if (auto slash = s.find('/'); slash != std::string::npos) {
-        std::string base = s.substr(0, slash);
-        std::string quote = s.substr(slash+1);
-        return base + "-" + quote + (is_perp ? "-PERP" : "");
-    }
-    // If already hyphenated
-    if (s.find('-') != std::string::npos) {
-        // Ensure PERP suffix if requested
-        if (is_perp && s.rfind("-PERP") != s.size() - 5) {
-            return s + "-PERP";
-        }
-        return s;
-    }
-    // Compact form like BNBUSDT
-    if (auto parts = split_compact_symbol(s)) {
-        return parts->first + std::string("-") + parts->second + (is_perp ? "-PERP" : "");
-    }
-    return s;
-}
-
-std::string format_decimal(double value, int precision = 12) {
-    if (!std::isfinite(value)) {
-        return std::string{"0"};
-    }
-    std::ostringstream oss;
-    oss.setf(std::ios::fixed, std::ios::floatfield);
-    oss << std::setprecision(precision) << value;
-    return trim_trailing_zeros(oss.str());
-}
-
-// Compact symbol normalization suitable for multiple CEXes (e.g., Bybit/Binance)
-std::string normalize_symbol_compact(std::string_view symbol, [[maybe_unused]] std::string_view product_type) {
-    std::string s(symbol.begin(), symbol.end());
-    if (s.empty()) {
-        return s;
-    }
-
-    // Remove settle suffix if present (e.g., ETH/USDT:USDT)
-    if (auto colon = s.find(':'); colon != std::string::npos) {
-        s = s.substr(0, colon);
-    }
-
-    std::string upper = to_upper_ascii(s);
-    const std::string perp_suffix = "-PERP";
-    if (upper.size() > perp_suffix.size()) {
-        auto tail = upper.substr(upper.size() - perp_suffix.size());
-        if (tail == perp_suffix) {
-            upper.erase(upper.size() - perp_suffix.size());
-        }
-    }
-
-    std::string compact;
-    compact.reserve(upper.size());
-    for (char c : upper) {
-        if (c == '-' || c == '/') {
-            continue;
-        }
-        compact.push_back(c);
-    }
-
-    // Fallback: if product_type signals spot but compact is empty, return original upper
-    if (compact.empty()) {
-        return upper;
-    }
-    return compact;
-}
-
-std::optional<std::string> map_time_in_force(std::string_view tif_raw) {
-    if (tif_raw.empty()) {
-        return std::nullopt;
-    }
-    auto upper = to_upper_ascii(tif_raw);
-    if (upper == "GTC") {
-        return std::string{"GTC"};
-    }
-    if (upper == "IOC") {
-        return std::string{"IOC"};
-    }
-    if (upper == "FOK") {
-        return std::string{"FOK"};
-    }
-    if (upper == "PO" || upper == "POST_ONLY") {
-        return std::string{"PostOnly"};
-    }
-    return std::string(tif_raw);
-}
-
-std::optional<std::string> normalize_report_status(std::string_view raw_status) {
-    auto lower = to_lower_ascii(raw_status);
-    if (lower == "new" || lower == "partiallyfilled" || lower == "filled" || lower == "accepted") {
-        return std::string{"accepted"};
-    }
-    if (lower == "cancelled" || lower == "canceled" || lower == "partiallyfilledcancelled" || lower == "inactive" || lower == "deactivated") {
-        return std::string{"canceled"};
-    }
-    if (lower == "rejected") {
-        return std::string{"rejected"};
-    }
-    if (lower == "amended" || lower == "replaced") {
-        return std::string{"replaced"};
-    }
-    return std::nullopt;
-}
-
-std::string normalize_reason_code(std::string_view normalized_status, std::string_view raw_reason) {
-    if (normalized_status == "rejected") {
-        std::string lower_reason = to_lower_ascii(raw_reason);
-        if (lower_reason.find("balance") != std::string::npos) {
-            return std::string{"insufficient_balance"};
-        }
-        return std::string{"venue_reject"};
-    }
-    if (normalized_status == "canceled") {
-        return std::string{"ok"};
-    }
-    if (normalized_status == "replaced") {
-        return std::string{"ok"};
-    }
-    return std::string{"ok"};
-}
-
-std::string build_reason_text(std::string_view normalized_status, std::string_view raw_reason) {
-    if (!raw_reason.empty()) {
-        if (raw_reason == "EC_NoError") {
-            return std::string{"OK"};
-        }
-        return std::string(raw_reason);
-    }
-    if (normalized_status == "canceled") {
-        return std::string{"Order cancelled"};
-    }
-    if (normalized_status == "rejected") {
-        return std::string{"Order rejected"};
-    }
-    if (normalized_status == "replaced") {
-        return std::string{"Order replaced"};
-    }
-    return std::string{"OK"};
-}
-
-bool is_terminal_status(std::string_view raw_status) {
-    auto lower = to_lower_ascii(raw_status);
-    return lower == "filled" || lower == "cancelled" || lower == "canceled" || lower == "rejected" || lower == "partiallyfilledcancelled";
-}
-
-} // namespace
+using namespace utils;
 
 
-// ============================================================================
-// ULTRA-LOW LATENCY UTILITIES
-// ============================================================================
-
-#ifdef __x86_64__
-/**
- * @brief Ultra-fast TSC-based timestamp with serializing instruction
- * @return CPU timestamp counter value
- */
-[[gnu::hot, gnu::flatten]] inline uint64_t rdtscp() noexcept {
-    uint32_t aux;
-    return __rdtscp(&aux);
-}
-
-/**
- * @brief Non-serializing TSC read (faster but may reorder)
- */
-[[gnu::hot, gnu::flatten]] inline uint64_t rdtsc() noexcept {
-    return __rdtsc();
-}
-
-// Calibration constants for TSC to nanoseconds conversion
-static thread_local uint64_t tsc_frequency = 0;
-static thread_local double tsc_to_ns_scale = 0.0;
-
-/**
- * @brief Get adaptive sleep duration based on CPU mode
- */
-std::chrono::nanoseconds get_adaptive_sleep(CpuMode cpu_mode) {
-    switch (cpu_mode) {
-        case CpuMode::HIGH_PERF:
-            // Aggressive spinning for maximum performance (yield or minimal sleep)
-            return std::chrono::nanoseconds(0); // No sleep, pure busy-wait
-        case CpuMode::ECO:
-            // Eco mode: longer sleep to conserve power
-            return std::chrono::microseconds(100); // Sleep for 100 microseconds
-        case CpuMode::NORMAL:
-        default:
-            return std::chrono::microseconds(10); // Default balanced sleep
-    }
-}
-
-/**
- * @brief Calibrate TSC frequency on startup
- */
-void calibrate_tsc() {
-    using namespace std::chrono;
-    
-    const auto start_tsc = rdtscp();
-    const auto start_time = high_resolution_clock::now();
-    
-    // Busy wait for calibration period
-    const auto calibration_duration = milliseconds(100);
-    while (high_resolution_clock::now() - start_time < calibration_duration) {
-        __builtin_ia32_pause();
-    }
-    
-    const auto end_tsc = rdtscp();
-    const auto end_time = high_resolution_clock::now();
-    
-    const auto elapsed_ns = duration_cast<nanoseconds>(end_time - start_time).count();
-    const auto elapsed_tsc = end_tsc - start_tsc;
-    
-    tsc_frequency = (elapsed_tsc * 1'000'000'000ULL) / elapsed_ns;
-    tsc_to_ns_scale = static_cast<double>(elapsed_ns) / static_cast<double>(elapsed_tsc);
-    
-    spdlog::info("[HFT-Engine] TSC frequency calibrated: {} Hz", tsc_frequency);
-}
-#endif
-
-/**
- * @brief Memory prefetch hint for cache optimization
- */
-template<typename T>
-[[gnu::always_inline]] inline void prefetch(const T* ptr, int locality = 3) noexcept {
-    if (ptr == nullptr) {
-        return;
-    }
-
-    switch (locality) {
-        case 0:
-            __builtin_prefetch(ptr, 0, 0);
-            break;
-        case 1:
-            __builtin_prefetch(ptr, 0, 1);
-            break;
-        case 2:
-            __builtin_prefetch(ptr, 0, 2);
-            break;
-        case 3:
-            __builtin_prefetch(ptr, 0, 3);
-            break;
-        default:
-            __builtin_prefetch(ptr, 0, 3);
-            break;
-    }
-}
-
-/**
- * @brief Compiler fence to prevent reordering
- */
-[[gnu::always_inline]] inline void compiler_fence() noexcept {
-    asm volatile("" ::: "memory");
-}
-
-/**
- * @brief CPU pause instruction for spinlocks
- */
-[[gnu::always_inline]] inline void cpu_pause() noexcept {
-#ifdef __x86_64__
-    __builtin_ia32_pause();
-#else
-    std::this_thread::yield();
-#endif
-}
+// HFT utility functions now in utils/hft_utils.h and utils/string_utils.h
 
 // ============================================================================
 // HFT-OPTIMIZED TRADING ENGINE SERVICE
@@ -441,8 +105,8 @@ template<typename T>
 TradingEngineService::TradingEngineService(const TradingEngineConfig& config)
     : running_(false)
     , config_(config)
-    , order_endpoint_("tcp://127.0.0.1:5601")
-    , report_endpoint_("tcp://127.0.0.1:5602")
+    , order_endpoint_(config.order_endpoint)
+    , report_endpoint_(config.report_endpoint)
     , cpu_mode_(config.cpu_mode)
 {
     // Validate configuration
@@ -450,31 +114,17 @@ TradingEngineService::TradingEngineService(const TradingEngineConfig& config)
         throw std::invalid_argument("Invalid trading engine configuration: exchange, api_key, and api_secret are required");
     }
     
-// #ifdef HFT_NUMA_SUPPORT
-//     // Initialize NUMA if available
-//     if (numa_available() >= 0) {
-//         // Bind to local NUMA node for better memory locality
-//         numa_set_localalloc();
-//         spdlog::info("[HFT-Engine] NUMA support enabled, using local allocation");
-        
-//         // Get NUMA node count and current node
-//         int num_nodes = numa_num_configured_nodes();
-//         int current_node = numa_node_of_cpu(sched_getcpu());
-//         spdlog::info("[HFT-Engine] NUMA nodes: {}, current node: {}", num_nodes, current_node);
-//     }
-// #endif
-
     // ============================================================================
     // REAL-TIME OPTIMIZATIONS (thread-level only; avoid process-wide RT/affinity)
     // ============================================================================
 
     // Initialize memory pools with NUMA awareness
-    publish_queue_ = std::make_unique<LockFreeSPSCQueue<PublishMessage, 8192>>();
-    order_pool_ = std::make_unique<MemoryPool<HFTExecutionOrder, 1024>>();
-    report_pool_ = std::make_unique<MemoryPool<HFTExecutionReport, 2048>>();
-    fill_pool_ = std::make_unique<MemoryPool<HFTFill, 2048>>();
-    pending_orders_ = std::make_unique<FlatMap<OrderId, HFTExecutionOrder*, 1024>>();
-    processed_orders_ = std::make_unique<FlatMap<OrderId, uint64_t, 2048>>();
+    publish_queue_ = std::make_unique<LockFreeSPSCQueue<PublishMessage, pool_config::PUBLISH_QUEUE_SIZE>>();
+    order_pool_ = std::make_unique<MemoryPool<HFTExecutionOrder, pool_config::ORDER_POOL_SIZE>>();
+    report_pool_ = std::make_unique<MemoryPool<HFTExecutionReport, pool_config::REPORT_POOL_SIZE>>();
+    fill_pool_ = std::make_unique<MemoryPool<HFTFill, pool_config::FILL_POOL_SIZE>>();
+    pending_orders_ = std::make_unique<FlatMap<OrderId, HFTExecutionOrder*, pool_config::PENDING_ORDERS_SIZE>>();
+    processed_orders_ = std::make_unique<FlatMap<OrderId, uint64_t, pool_config::PROCESSED_ORDERS_SIZE>>();
     stats_ = std::make_unique<HFTStats>();
     
     // Pre-warm memory pools and page tables
@@ -525,7 +175,7 @@ TradingEngineService::TradingEngineService(const TradingEngineConfig& config)
     spdlog::info("[HFT-Engine] Ultra-low latency trading engine initialized");
     spdlog::info("[HFT-Engine] Memory pools pre-warmed with {} entries", WARMUP_COUNT);
     spdlog::info("[HFT-Engine] Lock-free queues ready");
-    spdlog::info("[HFT-Engine] Unix domain sockets: {}, {}", order_endpoint_, report_endpoint_);
+    spdlog::info("[HFT-Engine] ZMQ endpoints: orders={}, reports={}", order_endpoint_, report_endpoint_);
 }
 
 TradingEngineService::~TradingEngineService() {
@@ -580,48 +230,6 @@ bool TradingEngineService::initialize() {
 
         // ---- Exchange adapter wiring -------------------------------------------------
         bool wired = false;
-#ifdef LATENTSPEED_ENABLE_BYBIT
-        if (config_.exchange == "bybit") {
-            if (api_key.empty() || api_secret.empty()) {
-                spdlog::error("[HFT-Engine] Missing Bybit credentials. Provide via config or env: LATENTSPEED_BYBIT_API_KEY / LATENTSPEED_BYBIT_API_SECRET");
-                return false;
-            }
-            auto adapter = std::make_unique<BybitAdapter>();
-            if (!adapter->initialize(api_key, api_secret, use_testnet)) {
-                spdlog::error("[HFT-Engine] Failed to initialize Bybit adapter with provided credentials");
-                return false;
-            }
-            adapter->set_order_update_callback([this](const OrderUpdate& u) { this->on_order_update_hft(u); });
-            adapter->set_fill_callback([this](const FillData& f) { this->on_fill_hft(f); });
-            if (!adapter->connect()) {
-                spdlog::warn("[HFT-Engine] Bybit WebSocket not connected; fills/updates may be delayed");
-            }
-            venue_router_->register_adapter(std::move(adapter));
-            spdlog::info("[HFT-Engine] Exchange adapter initialized: bybit");
-            wired = true;
-        } else
-#endif
-#ifdef LATENTSPEED_ENABLE_BINANCE
-        if (config_.exchange == "binance") {
-            if (api_key.empty() || api_secret.empty()) {
-                spdlog::error("[HFT-Engine] Missing Binance credentials. Provide via config or env: LATENTSPEED_BINANCE_API_KEY / LATENTSPEED_BINANCE_API_SECRET");
-                return false;
-            }
-            auto adapter = std::make_unique<BinanceAdapter>();
-            if (!adapter->initialize(api_key, api_secret, use_testnet)) {
-                spdlog::error("[HFT-Engine] Failed to initialize Binance adapter with provided credentials");
-                return false;
-            }
-            adapter->set_order_update_callback([this](const OrderUpdate& u) { this->on_order_update_hft(u); });
-            adapter->set_fill_callback([this](const FillData& f) { this->on_fill_hft(f); });
-            if (!adapter->connect()) {
-                spdlog::warn("[HFT-Engine] Binance WebSocket not connected; fills/updates may be delayed");
-            }
-            venue_router_->register_adapter(std::move(adapter));
-            spdlog::info("[HFT-Engine] Exchange adapter initialized: binance");
-            wired = true;
-        } else
-#endif
         if (config_.exchange == "hyperliquid") {
             if (api_key.empty() || api_secret.empty()) {
                 spdlog::error("[HFT-Engine] Missing Hyperliquid credentials. Provide via config or env: LATENTSPEED_HYPERLIQUID_USER_ADDRESS / LATENTSPEED_HYPERLIQUID_PRIVATE_KEY");
@@ -647,12 +255,6 @@ bool TradingEngineService::initialize() {
 
         if (!wired) {
             std::string supported = "hyperliquid";
-#ifdef LATENTSPEED_ENABLE_BYBIT
-            supported += ", bybit";
-#endif
-#ifdef LATENTSPEED_ENABLE_BINANCE
-            supported += ", binance";
-#endif
             throw std::runtime_error("Unsupported exchange: " + config_.exchange + ". Supported: " + supported);
         }
 
@@ -800,9 +402,7 @@ void TradingEngineService::start() {
         spdlog::info("[HFT-Engine] Market data streaming to ZMQ ports 5556 (trades) and 5557 (orderbook)");
     }
     
-    spdlog::info("[HFT-Engine] Ultra-low latency service started");
-    spdlog::info("[HFT-Engine] Real-time scheduling enabled");
-    spdlog::info("[HFT-Engine] CPU affinity configured");
+    spdlog::info("[HFT-Engine] Ultra-low latency service started (RT scheduling + CPU affinity)");
 }
 
 void TradingEngineService::stop() {
@@ -1179,7 +779,7 @@ void TradingEngineService::place_cex_order_hft(const HFTExecutionOrder& order) {
         OrderRequest req;
         req.client_order_id = std::string(order.cl_id.view());
 
-        // Normalise symbol for Bybit requirements and ensure lowercase side/order type
+        // Normalise symbol and ensure lowercase side/order type
         const std::string product_type_lower = to_lower_ascii(order.product_type.view());
         std::string category = product_type_lower.empty() || product_type_lower == "spot" ? "spot" : "linear";
         // Infer derivatives category if symbol indicates a perpetual and product_type is missing/spot
@@ -1190,8 +790,8 @@ void TradingEngineService::place_cex_order_hft(const HFTExecutionOrder& order) {
             }
         }
         req.category = category;
-        if (symbol_mapper_) req.symbol = symbol_mapper_->to_compact(order.symbol.view(), order.product_type.view());
-        else req.symbol = normalize_symbol_compact(order.symbol.view(), order.product_type.view());
+        // Always use mapper (initialized in constructor)
+        req.symbol = symbol_mapper_->to_compact(order.symbol.view(), order.product_type.view());
         req.side = to_lower_ascii(order.side.view());
 
         auto order_type_lower = to_lower_ascii(order.order_type.view());
@@ -1277,13 +877,11 @@ void TradingEngineService::place_cex_order_hft(const HFTExecutionOrder& order) {
                 send_rejection_report_hft(order, "invalid_reduce_only", "reduce_only not supported for spot orders");
                 return;
             }
-            spdlog::info("[HFT-Engine] 🔒 REDUCE-ONLY order: {} {} {} @ {} (product: {}, category: {})", 
-                        order.cl_id.c_str(), order.side.c_str(), order.size, order.price,
-                        order.product_type.c_str(), req.category.value_or("NONE"));
+            spdlog::info("[HFT-Engine] 🔒 REDUCE-ONLY order: {} {} {} @ {}", 
+                        order.cl_id.c_str(), order.side.c_str(), order.size, order.price);
         } else {
-            spdlog::debug("[HFT-Engine] Regular order: {} {} {} @ {} (product: {}, category: {})", 
-                         order.cl_id.c_str(), order.side.c_str(), order.size, order.price,
-                         order.product_type.c_str(), req.category.value_or("NONE"));
+            spdlog::trace("[HFT-Engine] Regular order: {} {} {} @ {}", 
+                          order.cl_id.c_str(), order.side.c_str(), order.size, order.price);
         }
 
         // Place order via exchange adapter
@@ -1313,6 +911,18 @@ void TradingEngineService::place_cex_order_hft(const HFTExecutionOrder& order) {
 }
 
 /**
+ * @brief Find parameter or tag value in order
+ */
+const FixedString<64>* TradingEngineService::find_order_param_or_tag(
+    const HFTExecutionOrder& order,
+    const char* key) const {
+    if (auto* param = order.params.find(FixedString<32>(key))) {
+        return param;
+    }
+    return order.tags.find(FixedString<32>(key));
+}
+
+/**
  * @brief HFT-optimized native cancellation flow
  */
 void TradingEngineService::cancel_cex_order_hft(const HFTExecutionOrder& order) {
@@ -1324,21 +934,14 @@ void TradingEngineService::cancel_cex_order_hft(const HFTExecutionOrder& order) 
         }
         auto& client = *adapter; // alias for readability
 
-        auto find_value = [&](const char* key) -> const FixedString<64>* {
-            if (auto* param = order.params.find(FixedString<32>(key))) {
-                return param;
-            }
-            return order.tags.find(FixedString<32>(key));
-        };
-
-        const auto* cl_id_to_cancel = find_value("cancel_cl_id_to_cancel");
+        const auto* cl_id_to_cancel = find_order_param_or_tag(order, "cancel_cl_id_to_cancel");
         if (!cl_id_to_cancel) {
             send_rejection_report_hft(order, "missing_cancel_id", "Missing cl_id_to_cancel for cancel request");
             return;
         }
 
         std::optional<std::string> exchange_order_id;
-        if (auto* exch = find_value("cancel_exchange_order_id")) {
+        if (auto* exch = find_order_param_or_tag(order, "cancel_exchange_order_id")) {
             exchange_order_id = std::string(exch->c_str());
         }
 
@@ -1346,19 +949,16 @@ void TradingEngineService::cancel_cex_order_hft(const HFTExecutionOrder& order) 
 
         std::optional<std::string> symbol;
         if (!order.symbol.empty()) {
-            if (symbol_mapper_) {
-                symbol = symbol_mapper_->to_compact(order.symbol.view(), order.product_type.view());
-            } else {
-                symbol = normalize_symbol_compact(order.symbol.view(), order.product_type.view());
-            }
+            // Always use mapper (initialized in constructor)
+            symbol = symbol_mapper_->to_compact(order.symbol.view(), order.product_type.view());
         }
 
         // Fallback to cached pending order metadata when not supplied in request
         OrderId original_id_lookup(cl_to_cancel_str.c_str());
         if (!symbol.has_value()) {
             if (auto* pending_order = pending_orders_->find(original_id_lookup); pending_order && *pending_order) {
-                if (symbol_mapper_) symbol = symbol_mapper_->to_compact((*pending_order)->symbol.view(), (*pending_order)->product_type.view());
-                else symbol = normalize_symbol_compact((*pending_order)->symbol.view(), (*pending_order)->product_type.view());
+                // Always use mapper (initialized in constructor)
+                symbol = symbol_mapper_->to_compact((*pending_order)->symbol.view(), (*pending_order)->product_type.view());
             }
         }
         if (!exchange_order_id.has_value()) {
@@ -1371,12 +971,8 @@ void TradingEngineService::cancel_cex_order_hft(const HFTExecutionOrder& order) 
 
         OrderResponse response = client.cancel_order(cl_to_cancel_str, symbol, exchange_order_id);
 
-        auto to_lower = [](std::string s) {
-            std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c){return static_cast<char>(std::tolower(c));});
-            return s;
-        };
-
-        const std::string msg_lower = to_lower(response.message);
+        // Use existing utility from utils/string_utils.h
+        const std::string msg_lower = to_lower_ascii(response.message);
         const bool idempotent_missing = (!response.success) && (
             msg_lower.find("does not exist") != std::string::npos ||
             msg_lower.find("not exists") != std::string::npos ||
@@ -1434,14 +1030,7 @@ void TradingEngineService::replace_cex_order_hft(const HFTExecutionOrder& order)
         }
         auto& client = *adapter;
 
-        auto find_value = [&](const char* key) -> const FixedString<64>* {
-            if (auto* param = order.params.find(FixedString<32>(key))) {
-                return param;
-            }
-            return order.tags.find(FixedString<32>(key));
-        };
-
-        const auto* cl_id_to_replace = find_value("replace_cl_id_to_replace");
+        const auto* cl_id_to_replace = find_order_param_or_tag(order, "replace_cl_id_to_replace");
         if (!cl_id_to_replace) {
             send_rejection_report_hft(order, "missing_replace_id", "Missing cl_id_to_replace");
             return;
@@ -1450,7 +1039,7 @@ void TradingEngineService::replace_cex_order_hft(const HFTExecutionOrder& order)
         std::optional<std::string> new_price;
         std::optional<std::string> new_quantity;
 
-        if (auto* price_override = find_value("replace_new_price")) {
+        if (auto* price_override = find_order_param_or_tag(order, "replace_new_price")) {
             if (!price_override->empty()) {
                 new_price = price_override->c_str();
             }
@@ -1458,7 +1047,7 @@ void TradingEngineService::replace_cex_order_hft(const HFTExecutionOrder& order)
             new_price = format_decimal(order.price);
         }
 
-        if (auto* size_override = find_value("replace_new_size")) {
+        if (auto* size_override = find_order_param_or_tag(order, "replace_new_size")) {
             if (!size_override->empty()) {
                 new_quantity = size_override->c_str();
             }
@@ -1517,7 +1106,7 @@ void TradingEngineService::on_order_update_hft(const OrderUpdate& update) {
             if (client_raw) {
                 OrderResponse qr = client_raw->query_order(update.client_order_id);
                 if (qr.success) {
-                    // Expect symbol/category in extra_data (added in BybitClient earlier)
+                    // Expect symbol/category in extra_data
                     std::string sym;
                     std::string cat;
                     if (auto it = qr.extra_data.find("symbol"); it != qr.extra_data.end()) {
@@ -1594,18 +1183,10 @@ void TradingEngineService::on_order_update_hft(const OrderUpdate& update) {
         report->exchange_order_id.assign(update.exchange_order_id.c_str());
         report->status.assign(normalized_status->c_str());
 
-        std::string reason_code;
-        std::string reason_text;
-        if (reason_mapper_) {
-            auto mapped = reason_mapper_->map(*normalized_status, update.reason);
-            reason_code = mapped.reason_code;
-            reason_text = mapped.reason_text;
-        } else {
-            reason_code = normalize_reason_code(*normalized_status, update.reason);
-            reason_text = build_reason_text(*normalized_status, update.reason);
-        }
-        report->reason_code.assign(reason_code.c_str());
-        report->reason_text.assign(reason_text.c_str());
+        // Always use reason_mapper_ (initialized in constructor)
+        auto mapped = reason_mapper_->map(*normalized_status, update.reason);
+        report->reason_code.assign(mapped.reason_code.c_str());
+        report->reason_text.assign(mapped.reason_text.c_str());
         report->ts_ns.store(get_current_time_ns_hft(), std::memory_order_relaxed);
         report->tags = original_order.tags; // placeholder will have empty tags, which is fine
 
@@ -1683,9 +1264,8 @@ void TradingEngineService::on_fill_hft(const FillData& fill_data) {
             is_perp = (cur.find(':') != std::string::npos);
         }
 
-        // Normalize to hyphen symbol regardless of source form (Phase 2: via mapper)
-        std::string hyphen = symbol_mapper_ ? symbol_mapper_->to_hyphen(fill->symbol_or_pair.c_str(), is_perp)
-                                            : to_hyphen_symbol(fill->symbol_or_pair.c_str(), is_perp);
+        // Normalize to hyphen symbol (always use mapper, initialized in constructor)
+        std::string hyphen = symbol_mapper_->to_hyphen(fill->symbol_or_pair.c_str(), is_perp);
         fill->symbol_or_pair.assign(hyphen.c_str());
 
         publish_fill_hft(*fill);
@@ -1820,8 +1400,8 @@ void TradingEngineService::send_rejection_report_hft(const HFTExecutionOrder& or
 [[gnu::hot, gnu::flatten]] inline uint64_t TradingEngineService::get_current_time_ns_hft() {
 #ifdef __x86_64__
     // Use TSC for ultra-low latency (2-3 cycles)
-    if (tsc_to_ns_scale > 0.0) [[likely]] {
-        return static_cast<uint64_t>(rdtsc() * tsc_to_ns_scale);
+    if (get_tsc_to_ns_scale() > 0.0) [[likely]] {
+        return static_cast<uint64_t>(rdtsc() * get_tsc_to_ns_scale());
     }
 #endif
     // Fallback to standard chrono
@@ -1833,343 +1413,14 @@ void TradingEngineService::send_rejection_report_hft(const HFTExecutionOrder& or
  * @brief Fast execution report serialization
  */
 std::string TradingEngineService::serialize_execution_report_hft(const HFTExecutionReport& report) {
-    rapidjson::Document doc;
-    doc.SetObject();
-    auto& allocator = doc.GetAllocator();
-    
-    doc.AddMember("version", rapidjson::Value(report.version), allocator);
-    doc.AddMember("cl_id", rapidjson::Value(report.cl_id.c_str(), allocator), allocator);
-    doc.AddMember("status", rapidjson::Value(report.status.c_str(), allocator), allocator);
-    
-    if (!report.exchange_order_id.empty()) {
-        doc.AddMember("exchange_order_id", rapidjson::Value(report.exchange_order_id.c_str(), allocator), allocator);
-    }
-    
-    doc.AddMember("reason_code", rapidjson::Value(report.reason_code.c_str(), allocator), allocator);
-    doc.AddMember("reason_text", rapidjson::Value(report.reason_text.c_str(), allocator), allocator);
-    doc.AddMember("ts_ns", rapidjson::Value(report.ts_ns.load()), allocator);
-    
-    // Serialize tags
-    rapidjson::Value tags_obj(rapidjson::kObjectType);
-    report.tags.for_each([&](const auto& key, const auto& value) {
-        rapidjson::Value json_key(key.c_str(), allocator);
-        rapidjson::Value json_val(value.c_str(), allocator);
-        tags_obj.AddMember(json_key, json_val, allocator);
-    });
-    doc.AddMember("tags", tags_obj, allocator);
-    
-    rapidjson::StringBuffer buffer;
-    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
-    doc.Accept(writer);
-    
-    return buffer.GetString();
+    return engine::serialize_execution_report(report);
 }
 
 /**
  * @brief Fast fill serialization
  */
 std::string TradingEngineService::serialize_fill_hft(const HFTFill& fill) {
-    rapidjson::Document doc;
-    doc.SetObject();
-    auto& allocator = doc.GetAllocator();
-    
-    doc.AddMember("version", rapidjson::Value(fill.version), allocator);
-    doc.AddMember("cl_id", rapidjson::Value(fill.cl_id.c_str(), allocator), allocator);
-    doc.AddMember("exchange_order_id", rapidjson::Value(fill.exchange_order_id.c_str(), allocator), allocator);
-    doc.AddMember("exec_id", rapidjson::Value(fill.exec_id.c_str(), allocator), allocator);
-    doc.AddMember("symbol_or_pair", rapidjson::Value(fill.symbol_or_pair.c_str(), allocator), allocator);
-    doc.AddMember("price", rapidjson::Value(fill.price), allocator);
-    doc.AddMember("size", rapidjson::Value(fill.size), allocator);
-    doc.AddMember("fee_currency", rapidjson::Value(fill.fee_currency.c_str(), allocator), allocator);
-    doc.AddMember("fee_amount", rapidjson::Value(fill.fee_amount), allocator);
-    doc.AddMember("liquidity", rapidjson::Value(fill.liquidity.c_str(), allocator), allocator);
-    doc.AddMember("ts_ns", rapidjson::Value(fill.ts_ns.load()), allocator);
-    
-    // Serialize tags
-    rapidjson::Value tags_obj(rapidjson::kObjectType);
-    fill.tags.for_each([&](const auto& key, const auto& value) {
-        rapidjson::Value json_key(key.c_str(), allocator);
-        rapidjson::Value json_val(value.c_str(), allocator);
-        tags_obj.AddMember(json_key, json_val, allocator);
-    });
-    doc.AddMember("tags", tags_obj, allocator);
-    
-    rapidjson::StringBuffer buffer;
-    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
-    doc.Accept(writer);
-    
-    return buffer.GetString();
-}
-
-// ============================================================================
-// Main Entry Point and Command Line Parsing
-// ============================================================================
-
-/**
- * @brief Global pointer to trading engine instance for signal handling
- * 
- * Used by the signal handler to gracefully shutdown the service when
- * receiving termination signals (Ctrl+C, SIGTERM, etc.)
- */
-TradingEngineService* g_trading_engine = nullptr;
-
-/**
- * @brief Parse command line arguments using args library
- * @param argc Argument count
- * @param argv Argument vector
- * @return TradingEngineConfig with parsed values
- */
-TradingEngineConfig parse_command_line_args(int argc, char* argv[]) {
-    args::ArgumentParser parser("Latentspeed Trading Engine Service", 
-                                "Ultra-low latency trading engine for cryptocurrency exchanges.");
-    
-    args::HelpFlag help(parser, "help", "Display this help menu", {'h', "help"});
-    args::ValueFlag<std::string> exchange(parser, "name", "Exchange name (e.g., bybit) [REQUIRED]", 
-                                         {"exchange"});
-    args::ValueFlag<std::string> api_key(parser, "key", "Exchange API key (DEX: wallet address)", 
-                                        {"api-key"});
-    args::ValueFlag<std::string> api_secret(parser, "secret", "Exchange API secret (DEX: private key)", 
-                                           {"api-secret"});
-    args::Flag live_trade(parser, "live-trade", "Enable live trading (default: demo/testnet)", 
-                         {"live-trade"});
-    args::Flag demo_mode(parser, "demo", "Use demo/testnet mode (default)", 
-                        {"demo"});
-    
-    TradingEngineConfig config;
-    
-    try {
-        parser.ParseCLI(argc, argv);
-    } catch (const args::Completion& e) {
-        std::cout << e.what();
-        std::exit(0);
-    } catch (const args::Help&) {
-        std::cout << parser;
-        std::cout << "\nExamples:\n";
-        std::cout << "  # Demo trading (testnet)\n";
-        std::cout << "  " << argv[0] << " --exchange bybit --api-key YOUR_KEY --api-secret YOUR_SECRET\n\n";
-        std::cout << "  # Live trading\n";
-        std::cout << "  " << argv[0] << " --exchange bybit --api-key YOUR_KEY --api-secret YOUR_SECRET --live-trade\n\n";
-        std::exit(0);
-    } catch (const args::ParseError& e) {
-        std::cerr << e.what() << std::endl;
-        std::cerr << parser;
-        std::exit(1);
-    }
-    
-    // Extract values
-    if (exchange) config.exchange = args::get(exchange);
-    if (api_key) config.api_key = args::get(api_key);
-    if (api_secret) config.api_secret = args::get(api_secret);
-
-    // Note: env-based resolution is performed later during validation using the centralized resolver.
-    
-    // Handle trading mode flags
-    if (live_trade && demo_mode) {
-        std::cerr << "Error: Cannot specify both --live-trade and --demo\n";
-        std::exit(1);
-    }
-    
-    config.live_trade = live_trade ? true : false;
-    
-    return config;
-}
-
-/**
- * @brief Validate command line configuration
- * @param config Configuration to validate
- * @return true if valid, false otherwise
- */
-bool validate_config(const TradingEngineConfig& config) {
-    std::vector<std::string> errors;
-    
-    if (config.exchange.empty()) {
-        errors.push_back("--exchange is required");
-    }
-    
-    // Check for supported exchanges
-    std::vector<std::string> supported_exchanges = {"bybit", "binance", "hyperliquid"};
-    if (!config.exchange.empty() && 
-        std::find(supported_exchanges.begin(), supported_exchanges.end(), config.exchange) == supported_exchanges.end()) {
-        errors.push_back("Unsupported exchange '" + config.exchange + "'. Supported: bybit, binance, hyperliquid");
-    }
-
-    // Credential resolution (env allowed) using centralized resolver
-    if (errors.empty()) {
-        auto creds = auth::resolve_credentials(config.exchange, config.api_key, config.api_secret, config.live_trade);
-        if (creds.api_key.empty() || creds.api_secret.empty()) {
-            if (config.exchange == "hyperliquid") {
-                errors.push_back("Missing credentials: set --api-key/--api-secret (address/private key) or env LATENTSPEED_HYPERLIQUID_USER_ADDRESS / LATENTSPEED_HYPERLIQUID_PRIVATE_KEY");
-            } else {
-                const std::string upper = [] (std::string s){ for (auto& c : s) c = static_cast<char>(::toupper(c)); return s; }(config.exchange);
-                errors.push_back("Missing credentials: set --api-key/--api-secret or env LATENTSPEED_" + upper + "_API_KEY / LATENTSPEED_" + upper + "_API_SECRET");
-            }
-        }
-    }
-    
-    if (!errors.empty()) {
-        std::cerr << "Configuration errors:\n";
-        for (const auto& error : errors) {
-            std::cerr << "  - " << error << "\n";
-        }
-        return false;
-    }
-    
-    return true;
-}
-
-/**
- * @brief Signal handler for graceful shutdown
- * @param signal The signal number received (SIGINT, SIGTERM, etc.)
- * 
- * Handles system signals by:
- * 1. Logging the received signal
- * 2. Calling stop() on the trading engine instance
- * 3. Allowing the main loop to exit cleanly
- * 
- * This ensures that all worker threads are properly shut down,
- * pending orders are handled appropriately, and resources are cleaned up.
- */
-void signal_handler(int signal) {
-    spdlog::info("\n[Main] Received signal {}, shutting down...", signal);
-    if (g_trading_engine) {
-        g_trading_engine->stop();
-    }
+    return engine::serialize_fill(fill);
 }
 
 } // namespace latentspeed
-
-/**
- * @brief Main entry point for the trading engine service
- * @param argc Argument count
- * @param argv Argument vector containing command line arguments
- * @return Exit code: 0 for success, 1 for failure
- * 
- * Main function performs the complete service lifecycle:
- * 
- * **Initialization Phase:**
- * 1. Parses command line arguments (--exchange, --api-key, --api-secret, --live-trade)
- * 2. Validates configuration parameters
- * 3. Sets up signal handlers for graceful shutdown (SIGINT, SIGTERM)
- * 4. Creates TradingEngineService instance with configuration
- * 5. Initializes all components (ZeroMQ, exchange clients, market data feeds)
- * 
- * **Runtime Phase:**
- * 1. Starts all worker threads (order processing, market data, publishing)
- * 2. Enters main execution loop, monitoring service status
- * 3. Handles service lifecycle events and error conditions
- * 
- * **Shutdown Phase:**
- * 1. Responds to shutdown signals or service termination
- * 2. Ensures graceful shutdown of all worker threads
- * 3. Cleans up resources and exits
- * 
- * **Service Endpoints:**
- * - Orders: tcp://127.0.0.1:5601 (PULL socket for receiving ExecutionOrders)
- * - Reports: tcp://127.0.0.1:5602 (PUB socket for ExecutionReports and Fills)
- * - Market Data: tcp://127.0.0.1:5556/5557 (SUB sockets for preprocessed data)
- * 
- * **Error Handling:**
- * All exceptions are caught and logged with appropriate error messages.
- * The service returns non-zero exit codes on failure for proper system integration.
- */
-int main(int argc, char* argv[]) {
-    using namespace latentspeed;
-    
-    // Parse command line arguments
-    TradingEngineConfig config;
-    try {
-        config = parse_command_line_args(argc, argv);
-    } catch (const std::exception& e) {
-        std::cerr << "Error parsing command line arguments: " << e.what() << std::endl;
-        return 1;
-    }
-    
-    // Validate configuration
-    if (!validate_config(config)) {
-        std::cerr << "Use --help for usage information." << std::endl;
-        return 1;
-    }
-    
-    // Create logs directory if it doesn't exist
-    try {
-        std::filesystem::create_directories("logs");
-    } catch (const std::filesystem::filesystem_error& ex) {
-        std::cerr << "Failed to create logs directory: " << ex.what() << std::endl;
-        return 1;
-    }
-    
-    // Initialize spdlog with enhanced formatting including timestamp, thread ID, function name
-    try {
-        // Create console sink with colors
-        auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
-        console_sink->set_level(spdlog::level::debug);
-        
-        // Create rotating file sink for persistent logging
-        auto file_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
-            "logs/trading_engine.log", 1024*1024*5, 3);
-        file_sink->set_level(spdlog::level::trace);
-        
-        // Combine sinks
-        std::vector<spdlog::sink_ptr> sinks {console_sink, file_sink};
-        auto logger = std::make_shared<spdlog::logger>("multi_sink", sinks.begin(), sinks.end());
-        
-        // Enhanced pattern with timestamp, thread ID, process ID, source location, function name
-        logger->set_pattern("[%Y-%m-%d %H:%M:%S.%f] [PID:%P] [TID:%t] [%^%l%$] [%s:%#] [%!] %v");
-        logger->set_level(spdlog::level::info);
-        
-        spdlog::set_default_logger(logger);
-        spdlog::flush_every(std::chrono::seconds(1));
-        
-    } catch (const spdlog::spdlog_ex& ex) {
-        std::cerr << "Log initialization failed: " << ex.what() << std::endl;
-        return 1;
-    }
-    
-    spdlog::info("=== Latentspeed Trading Engine Service ===");
-    spdlog::info("Starting up...");
-
-    // Set up signal handling for graceful shutdown
-    signal(SIGINT, latentspeed::signal_handler);
-    signal(SIGTERM, latentspeed::signal_handler);
-
-    try {
-        // Display configuration summary
-        spdlog::info("[Main] Configuration Summary:");
-        spdlog::info("[Main]   Exchange: {}", config.exchange);
-        spdlog::info("[Main]   Trading Mode: {}", config.live_trade ? "LIVE" : "DEMO/TESTNET");
-        spdlog::info("[Main]   API Key: {}...{} (masked)", 
-                     config.api_key.substr(0, 4), 
-                     config.api_key.length() > 8 ? config.api_key.substr(config.api_key.length() - 4) : "");
-        
-        // Create and initialize trading engine with configuration
-        TradingEngineService trading_engine(config);
-        latentspeed::g_trading_engine = &trading_engine;
-
-        if (!trading_engine.initialize()) {
-            spdlog::error("[Main] Failed to initialize trading engine");
-            return 1;
-        }
-
-        // Start the service
-        trading_engine.start();
-
-        spdlog::info("[Main] Trading engine started successfully");
-        spdlog::info("[Main] Listening for orders on tcp://127.0.0.1:5601");
-        spdlog::info("[Main] Publishing reports on tcp://127.0.0.1:5602");
-        spdlog::info("[Main] Press Ctrl+C to stop");
-
-        // Main loop - keep the service running
-        while (trading_engine.is_running()) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-        }
-
-        spdlog::info("[Main] Trading engine stopped");
-
-    } catch (const std::exception& e) {
-        spdlog::error("[Main] Fatal error: {}", e.what());
-        return 1;
-    }
-
-    spdlog::info("[Main] Shutdown complete");
-    return 0;
-}

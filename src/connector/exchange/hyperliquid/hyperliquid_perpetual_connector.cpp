@@ -25,9 +25,20 @@ HyperliquidPerpetualConnector::HyperliquidPerpetualConnector(
       work_guard_(net::make_work_guard(io_context_)),
       running_(false) {
     
-    // Create data sources
-    orderbook_data_source_ = std::make_shared<HyperliquidOrderBookDataSource>();
-    user_stream_data_source_ = std::make_shared<HyperliquidUserStreamDataSource>(auth);
+    // Set URLs based on testnet flag
+    if (testnet_) {
+        rest_host_ = "api.hyperliquid-testnet.xyz";
+        rest_base_url_ = "https://api.hyperliquid-testnet.xyz";
+        ws_host_ = "api.hyperliquid-testnet.xyz";
+    } else {
+        rest_host_ = "api.hyperliquid.xyz";
+        rest_base_url_ = "https://api.hyperliquid.xyz";
+        ws_host_ = "api.hyperliquid.xyz";
+    }
+    
+    // Create data sources with appropriate URLs
+    orderbook_data_source_ = std::make_shared<HyperliquidOrderBookDataSource>(testnet_);
+    user_stream_data_source_ = std::make_shared<HyperliquidUserStreamDataSource>(auth, testnet_);
     
     // Set up user stream callback
     user_stream_data_source_->set_message_callback(
@@ -386,7 +397,7 @@ std::pair<std::string, uint64_t> HyperliquidPerpetualConnector::execute_place_or
     };
     
     // 6. Sign and send
-    auto order_result = api_post_with_auth(CREATE_ORDER_URL, action);
+    auto order_result = api_post_with_auth("/exchange", action);
     
     // 7. Parse response
     if (order_result["status"] == "err") {
@@ -395,15 +406,15 @@ std::pair<std::string, uint64_t> HyperliquidPerpetualConnector::execute_place_or
     
     const auto& status = order_result["response"]["data"]["statuses"][0];
     if (status.contains("error")) {
-        throw std::runtime_error(status["error"].get<std::string>());
+        throw std::runtime_error(status["error"].template get<std::string>());
     }
     
     // Extract exchange order ID
     std::string exchange_order_id;
     if (status.contains("resting")) {
-        exchange_order_id = std::to_string(status["resting"]["oid"].get<int64_t>());
+        exchange_order_id = std::to_string(status["resting"]["oid"].template get<int64_t>());
     } else if (status.contains("filled")) {
-        exchange_order_id = std::to_string(status["filled"]["oid"].get<int64_t>());
+        exchange_order_id = std::to_string(status["filled"]["oid"].template get<int64_t>());
     } else {
         throw std::runtime_error("Unexpected order status");
     }
@@ -459,7 +470,7 @@ bool HyperliquidPerpetualConnector::execute_cancel(
     };
     
     // Sign and send
-    auto result = api_post_with_auth(CANCEL_ORDER_URL, action);
+    auto result = api_post_with_auth("/exchange", action);
     
     // Process result
     if (result["status"] == "ok") {
@@ -499,7 +510,7 @@ bool HyperliquidPerpetualConnector::execute_cancel_order(const InFlightOrder& or
     };
     
     try {
-        auto result = api_post_with_auth(CANCEL_ORDER_URL, action);
+        auto result = api_post_with_auth("/exchange", action);
         
         // Check response status
         if (result["status"] == "err") {
@@ -700,14 +711,19 @@ nlohmann::json HyperliquidPerpetualConnector::rest_post(
     
     beast::ssl_stream<tcp::socket> stream(ioc, ctx);
     
+    // Set SNI hostname for proper SSL verification
+    if (!SSL_set_tlsext_host_name(stream.native_handle(), rest_host_.c_str())) {
+        throw std::runtime_error("Failed to set SNI hostname for REST request");
+    }
+    
     tcp::resolver resolver(ioc);
-    auto const results = resolver.resolve("api.hyperliquid.xyz", "443");
+    auto const results = resolver.resolve(rest_host_, "443");
     net::connect(stream.next_layer(), results);
     
     stream.handshake(ssl::stream_base::client);
     
     http::request<http::string_body> req{http::verb::post, endpoint, 11};
-    req.set(http::field::host, "api.hyperliquid.xyz");
+    req.set(http::field::host, rest_host_);
     req.set(http::field::content_type, "application/json");
     req.body() = data.dump();
     req.prepare_payload();
@@ -726,7 +742,7 @@ nlohmann::json HyperliquidPerpetualConnector::rest_post(
 
 void HyperliquidPerpetualConnector::fetch_trading_rules() {
     nlohmann::json request = {{"type", "meta"}};
-    auto response = rest_post(INFO_URL, request);
+    auto response = rest_post("/info", request);
     
     if (response.contains("universe")) {
         for (size_t i = 0; i < response["universe"].size(); ++i) {
@@ -736,7 +752,7 @@ void HyperliquidPerpetualConnector::fetch_trading_rules() {
             coin_to_asset_[name] = static_cast<int>(i);
             
             std::string trading_pair = name + "-USD";
-            int sz_decimals = std::stoi(asset.value("szDecimals", "3"));
+            int sz_decimals = asset.value("szDecimals", 3);
             
             // Extract price decimals from maxLeverage or default to 5 sig figs (Hyperliquid default)
             // Hyperliquid uses 5 significant figures for most assets

@@ -12,6 +12,8 @@
 BUILD_TYPE="Debug"
 PRESET_NAME="linux-debug"
 CLEAN=""
+TARGET_TRIPLET="x64-linux"
+HOST_TRIPLET="x64-linux"
 
 # ---- parse CLI flags ----
 while [[ $# -gt 0 ]]; do
@@ -19,11 +21,15 @@ while [[ $# -gt 0 ]]; do
         --debug)
             BUILD_TYPE="Debug"
             PRESET_NAME="linux-debug"
+            TARGET_TRIPLET="x64-linux"
+            HOST_TRIPLET="x64-linux"
             shift
             ;;
         --release)
             BUILD_TYPE="Release"
             PRESET_NAME="linux-release"
+            TARGET_TRIPLET="x64-linux"
+            HOST_TRIPLET="x64-linux"
             shift
             ;;
         --clean)
@@ -129,10 +135,14 @@ echo "All system dependencies found."
 
 # ---- Install vcpkg dependencies ----
 echo "Installing vcpkg dependencies..."
-VCPKG_TRIPLET="x64-linux"
+
+echo "Using vcpkg target triplet: $TARGET_TRIPLET"
+echo "Using vcpkg host triplet:   $HOST_TRIPLET"
 
 # Install dependencies from vcpkg.json
-"$VCPKG_DIR/vcpkg" install --triplet=$VCPKG_TRIPLET || exit 1
+"$VCPKG_DIR/vcpkg" install \
+    --triplet="$TARGET_TRIPLET" \
+    --host-triplet="$HOST_TRIPLET" || exit 1
 
 # ---- optional clean ----
 if [ -n "$CLEAN" ]; then
@@ -144,10 +154,14 @@ fi
 echo "Configuring with CMake preset: $PRESET_NAME..."
 cd "$SCRIPT_DIR"
 
+VCPKG_TARGET_TRIPLET="$TARGET_TRIPLET" \
+VCPKG_HOST_TRIPLET="$HOST_TRIPLET" \
 cmake --preset="$PRESET_NAME" || exit 1
 
 # ---- build with CMake preset ----
 echo "Building with CMake preset: $PRESET_NAME..."
+VCPKG_TARGET_TRIPLET="$TARGET_TRIPLET" \
+VCPKG_HOST_TRIPLET="$HOST_TRIPLET" \
 cmake --build --preset="$PRESET_NAME" || exit 1
 
 echo

@@ -1,0 +1,25 @@
+# Hyperliquid Marketstream Configuration
+# Streams real-time market data via ZMQ
+
+log:
+  level: info
+  filename: logs/marketstream_hyperliquid.log
+
+zmq:
+  enabled: true
+  host: 127.0.0.1
+  port: 5556  # Trades on 5556, Orderbooks on 5557
+  window_size: 20  # Rolling window for preprocessing
+
+feeds:
+  - exchange: hyperliquid
+    symbols:
+      - BTC    # Bitcoin
+      - ETH    # Ethereum
+      - SOL    # Solana
+      - ARB    # Arbitrum
+      - AVAX   # Avalanche
+    enable_trades: true
+    enable_orderbook: true
+    snapshots_only: false
+    snapshot_interval: 1  # seconds

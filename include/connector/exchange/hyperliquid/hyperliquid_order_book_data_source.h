@@ -33,12 +33,7 @@ namespace latentspeed::connector {
  */
 class HyperliquidOrderBookDataSource : public OrderBookTrackerDataSource {
 public:
-    static constexpr const char* WS_URL = "api.hyperliquid.xyz";
-    static constexpr const char* WS_PORT = "443";
-    static constexpr const char* WS_PATH = "/ws";
-    static constexpr const char* REST_URL = "https://api.hyperliquid.xyz/info";
-
-    HyperliquidOrderBookDataSource();
+    HyperliquidOrderBookDataSource(bool testnet = false);
 
     ~HyperliquidOrderBookDataSource() override;
 
@@ -100,6 +95,12 @@ private:
     // MEMBER VARIABLES
     // ========================================================================
 
+    bool testnet_;
+    
+    // Dynamic URLs based on testnet flag
+    std::string ws_host_;    // e.g., "api.hyperliquid.xyz" or "api.hyperliquid-testnet.xyz"
+    std::string rest_url_;   // e.g., "https://api.hyperliquid.xyz/info"
+    
     net::io_context io_context_;
     ssl::context ssl_context_;
     std::unique_ptr<websocket::stream<beast::ssl_stream<tcp::socket>>> ws_;

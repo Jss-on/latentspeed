@@ -1,0 +1,142 @@
+@startuml Async Order Updates
+!theme plain
+skinparam sequenceMessageAlign center
+
+title Async Order Updates & Fills (WebSocket User Stream)
+
+participant "WebSocket\nUser Stream" as WS
+participant "Connector" as Conn
+participant "Order Tracker" as Tracker
+participant "Adapter" as Adapter
+participant "Processor" as Proc
+participant "Memory Pool" as Pool
+participant "Serializer" as Serial
+participant "Publish Queue" as Queue
+
+== Order Update Flow ==
+
+WS -> WS: Receive WebSocket Message
+activate WS
+
+WS -> Conn: Parse order update
+activate Conn
+
+Conn -> Tracker: update_order_state()
+activate Tracker
+Tracker -> Tracker: Apply state transition\nPENDING → OPEN → FILLED
+Tracker --> Conn: Updated
+deactivate Tracker
+
+Conn -> Adapter: on_order_update callback
+activate Adapter
+Adapter -> Proc: on_order_update_hft()
+activate Proc
+
+alt Order Unknown (Lazy Rehydration)
+    note right of Proc
+      External fill or manual trade
+    end note
+    Proc -> Adapter: query_order()
+    Adapter -> Conn: REST query
+    Conn --> Adapter: Order details
+    Adapter --> Proc: OrderUpdate
+    Proc -> Proc: Insert to pending_orders_
+end
+
+Proc -> Proc: Normalize status
+Proc -> Proc: Map reason code
+Proc -> Proc: Add venue tag
+
+Proc -> Pool: Allocate HFTExecutionReport
+activate Pool
+Pool --> Proc: Report Object
+deactivate Pool
+
+Proc -> Serial: serialize_execution_report()
+activate Serial
+Serial --> Proc: JSON string
+deactivate Serial
+
+Proc -> Queue: Push PublishMessage
+activate Queue
+Queue --> Proc: Queued
+deactivate Queue
+
+alt Terminal Status
+    Proc -> Proc: Remove from pending_orders_
+else Partial Fill
+    Proc -> Proc: Keep in pending_orders_
+end
+
+Proc -> Proc: Update HFTStats
+Proc --> Adapter: Complete
+deactivate Proc
+Adapter --> Conn: Return
+deactivate Adapter
+Conn --> WS: Processed
+deactivate Conn
+deactivate WS
+
+== Fill Event Flow ==
+
+WS -> WS: Receive fill message
+activate WS
+
+WS -> Conn: Parse fill event
+activate Conn
+
+Conn -> Tracker: add_trade_update()
+activate Tracker
+Tracker -> Tracker: Append TradeUpdate
+Tracker -> Tracker: Update executed_amount
+Tracker --> Conn: Recorded
+deactivate Tracker
+
+Conn -> Adapter: on_fill callback
+activate Adapter
+Adapter -> Proc: on_fill_hft()
+activate Proc
+
+Proc -> Proc: Parse fill fields\n- price, size, fees
+Proc -> Proc: Copy tags from order
+Proc -> Proc: Normalize symbol
+Proc -> Proc: Tag execution_type
+
+Proc -> Pool: Allocate HFTFill
+activate Pool
+Pool --> Proc: Fill Object
+deactivate Pool
+
+Proc -> Serial: serialize_fill()
+activate Serial
+Serial --> Proc: JSON string
+deactivate Serial
+
+Proc -> Queue: Push PublishMessage
+activate Queue
+Queue --> Proc: Queued
+deactivate Queue
+
+Proc -> Proc: Update fills_published_count
+Proc --> Adapter: Complete
+deactivate Proc
+Adapter --> Conn: Return
+deactivate Adapter
+Conn --> WS: Processed
+deactivate Conn
+deactivate WS
+
+note over WS,Queue
+  **Async Callbacks**
+  
+  Callbacks triggered by:
+  - WebSocket order updates
+  - WebSocket fill events
+  - REST query responses
+  
+  Lazy rehydration handles:
+  - External/manual trades
+  - Orders placed outside engine
+end note
+
+@enduml

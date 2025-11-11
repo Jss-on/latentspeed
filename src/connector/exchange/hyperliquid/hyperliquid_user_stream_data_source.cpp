@@ -12,14 +12,18 @@ namespace latentspeed::connector {
 // CONSTRUCTOR / DESTRUCTOR
 // ============================================================================
 
-HyperliquidUserStreamDataSource::HyperliquidUserStreamDataSource(std::shared_ptr<HyperliquidAuth> auth)
+HyperliquidUserStreamDataSource::HyperliquidUserStreamDataSource(std::shared_ptr<HyperliquidAuth> auth, bool testnet)
     : auth_(auth),
+      testnet_(testnet),
       io_context_(),
       ssl_context_(ssl::context::tlsv12_client),
       ws_(nullptr),
       resolver_(io_context_),
       running_(false),
       connected_(false) {
+    
+    // Set WebSocket host based on testnet flag
+    ws_host_ = testnet_ ? "api.hyperliquid-testnet.xyz" : "api.hyperliquid.xyz";
     
     // Configure SSL context
     ssl_context_.set_default_verify_paths();
@@ -128,7 +132,7 @@ void HyperliquidUserStreamDataSource::run_websocket() {
 
 void HyperliquidUserStreamDataSource::connect_websocket() {
     // Resolve hostname
-    auto const results = resolver_.resolve(WS_URL, WS_PORT);
+    auto const results = resolver_.resolve(ws_host_, "443");
     
     // Create WebSocket stream with SSL
     ws_ = std::make_unique<websocket::stream<beast::ssl_stream<tcp::socket>>>(
@@ -136,21 +140,21 @@ void HyperliquidUserStreamDataSource::connect_websocket() {
     );
     
     // Set SNI hostname
-    if (!SSL_set_tlsext_host_name(ws_->next_layer().native_handle(), WS_URL)) {
+    if (!SSL_set_tlsext_host_name(ws_->next_layer().native_handle(), ws_host_.c_str())) {
         throw std::runtime_error("Failed to set SNI hostname");
     }
     
     // Connect
-    auto ep = net::connect(ws_->next_layer().next_layer(), results);
+    net::connect(ws_->next_layer().next_layer(), results);
     
     // SSL handshake
     ws_->next_layer().handshake(ssl::stream_base::client);
     
     // WebSocket handshake
-    ws_->handshake(WS_URL, WS_PATH);
+    ws_->handshake(ws_host_, "/ws");
     
     connected_ = true;
-    spdlog::info("Connected to Hyperliquid user stream WebSocket");
+    spdlog::info("Connected to Hyperliquid user stream WebSocket at {}", ws_host_);
 }
 
 void HyperliquidUserStreamDataSource::read_messages() {

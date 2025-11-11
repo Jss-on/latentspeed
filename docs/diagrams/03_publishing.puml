@@ -1,0 +1,145 @@
+@startuml Publishing Flow
+!theme plain
+skinparam sequenceMessageAlign center
+
+title Publishing Flow (Lock-Free Queue + ZMQ PUB)
+
+participant "Processor\n(Any Thread)" as Proc
+participant "Memory Pool" as Pool
+participant "Serializer\n(RapidJSON)" as Serial
+participant "Publish Queue\n(LockFreeSPSCQueue)" as Queue
+participant "Publisher Thread\n(Core 3, RT)" as PubThread
+participant "ZMQ PUB\n:5602" as ZMQ
+participant "Subscribers" as Sub
+
+== Report/Fill Creation (Producer) ==
+
+Proc -> Pool: Allocate Report/Fill
+activate Proc
+activate Pool
+Pool --> Proc: Object
+deactivate Pool
+
+Proc -> Proc: Fill object fields
+Proc -> Proc: Add tags
+
+Proc -> Serial: serialize()
+activate Serial
+Serial -> Serial: RapidJSON StringBuffer\nCompact JSON
+Serial --> Proc: JSON string
+deactivate Serial
+
+Proc -> Pool: Allocate PublishMessage
+activate Pool
+Pool --> Proc: Message wrapper
+deactivate Pool
+
+Proc -> Proc: Set topic\n- "exec.report"\n- "exec.fill"
+Proc -> Proc: Set payload (JSON)
+
+Proc -> Queue: Push (Non-blocking)
+activate Queue
+alt Queue Full
+    Queue --> Proc: false
+    Proc -> Proc: Log Warning\nIncrement queue_full_count
+    Proc -> Pool: Return objects
+else Queue Available
+    Queue --> Proc: true
+    note right of Queue
+      Lock-free SPSC queue
+      Single producer, single consumer
+      Capacity: 8192 messages
+    end note
+end
+deactivate Queue
+deactivate Proc
+
+== Publishing Loop (Consumer) ==
+
+loop Infinite Publisher Thread Loop
+    activate PubThread
+    PubThread -> Queue: try_pop() [Non-blocking]
+    activate Queue
+    
+    alt Message Available
+        Queue --> PubThread: PublishMessage*
+        deactivate Queue
+        
+        PubThread -> PubThread: Extract topic & payload
+        
+        PubThread -> ZMQ: zmq_send(topic, ZMQ_SNDMORE)
+        activate ZMQ
+        note right of ZMQ
+          Multi-frame ZMQ message:
+          Frame 1: Topic (for filtering)
+          Frame 2: Payload
+        end note
+        ZMQ --> PubThread: Topic sent
+        
+        PubThread -> ZMQ: zmq_send(payload, 0)
+        ZMQ -> Sub: Multicast to subscribers
+        activate Sub
+        Sub -> Sub: Filter by topic
+        Sub -> Sub: Process report/fill
+        deactivate Sub
+        ZMQ --> PubThread: Payload sent
+        deactivate ZMQ
+        
+        PubThread -> Pool: Return PublishMessage
+        activate Pool
+        Pool --> PubThread: Released
+        deactivate Pool
+        
+        PubThread -> PubThread: Increment published_count
+        
+    else No Message
+        Queue --> PubThread: nullptr
+        deactivate Queue
+        PubThread -> PubThread: Adaptive Sleep
+        note right of PubThread
+          CPU Mode-aware sleep:
+          - PERFORMANCE: 1-10 μs
+          - BALANCED: 50-100 μs  
+          - POWERSAVE: 500-1000 μs
+        end note
+    end
+    deactivate PubThread
+end
+
+== Subscriber Side ==
+
+Sub -> ZMQ: zmq_recv() [Blocking]
+activate Sub
+activate ZMQ
+ZMQ --> Sub: Topic frame
+Sub -> ZMQ: zmq_recv()
+ZMQ --> Sub: Payload frame (JSON)
+deactivate ZMQ
+
+Sub -> Sub: Parse JSON
+Sub -> Sub: Update strategy state
+Sub -> Sub: Log/Store execution
+deactivate Sub
+
+note over Proc,Sub
+  **Publishing Performance**
+  
+  Latency: ~1-5 μs (serialize + queue + send)
+  
+  Lock-free benefits:
+  - No mutex contention
+  - Predictable latency
+  - Cache-friendly
+  
+  Backpressure handling:
+  - Queue full: drop + log
+  - Pool exhausted: drop + log
+  - ZMQ send error: retry logic
+  
+  ZMQ multicast:
+  - N subscribers, 1 send
+  - Topic-based filtering
+  - No delivery guarantee
+end note
+
+@enduml

@@ -1,0 +1,6 @@
+@startuml Simple Test
+Client -> Engine: Send Order
+Engine -> Exchange: Place Order
+Exchange --> Engine: Order Accepted
+Engine --> Client: Execution Report
+@enduml

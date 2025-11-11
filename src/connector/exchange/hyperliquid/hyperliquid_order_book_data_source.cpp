@@ -19,13 +19,23 @@ namespace latentspeed::connector {
 // CONSTRUCTOR / DESTRUCTOR
 // ============================================================================
 
-HyperliquidOrderBookDataSource::HyperliquidOrderBookDataSource() 
-    : io_context_(),
+HyperliquidOrderBookDataSource::HyperliquidOrderBookDataSource(bool testnet) 
+    : testnet_(testnet),
+      io_context_(),
       ssl_context_(ssl::context::tlsv12_client),
       ws_(nullptr),
       resolver_(io_context_),
       running_(false),
       connected_(false) {
+    
+    // Set URLs based on testnet flag
+    if (testnet_) {
+        ws_host_ = "api.hyperliquid-testnet.xyz";
+        rest_url_ = "https://api.hyperliquid-testnet.xyz/info";
+    } else {
+        ws_host_ = "api.hyperliquid.xyz";
+        rest_url_ = "https://api.hyperliquid.xyz/info";
+    }
     
     // Configure SSL context
     ssl_context_.set_default_verify_paths();
@@ -187,7 +197,7 @@ void HyperliquidOrderBookDataSource::run_websocket() {
 
 void HyperliquidOrderBookDataSource::connect_websocket() {
     // Resolve hostname
-    auto const results = resolver_.resolve(WS_URL, WS_PORT);
+    auto const results = resolver_.resolve(ws_host_, "443");
     
     // Create WebSocket stream with SSL
     ws_ = std::make_unique<websocket::stream<beast::ssl_stream<tcp::socket>>>(
@@ -195,21 +205,21 @@ void HyperliquidOrderBookDataSource::connect_websocket() {
     );
     
     // Set SNI hostname
-    if (!SSL_set_tlsext_host_name(ws_->next_layer().native_handle(), WS_URL)) {
+    if (!SSL_set_tlsext_host_name(ws_->next_layer().native_handle(), ws_host_.c_str())) {
         throw std::runtime_error("Failed to set SNI hostname");
     }
     
     // Connect
-    auto ep = net::connect(ws_->next_layer().next_layer(), results);
+    net::connect(ws_->next_layer().next_layer(), results);
     
     // SSL handshake
     ws_->next_layer().handshake(ssl::stream_base::client);
     
     // WebSocket handshake
-    ws_->handshake(WS_URL, WS_PATH);
+    ws_->handshake(ws_host_, "/ws");
     
     connected_ = true;
-    spdlog::info("Connected to Hyperliquid WebSocket");
+    spdlog::info("Connected to Hyperliquid WebSocket at {}", ws_host_);
 }
 
 void HyperliquidOrderBookDataSource::read_messages() {
@@ -296,9 +306,14 @@ nlohmann::json HyperliquidOrderBookDataSource::rest_request(const nlohmann::json
     
     beast::ssl_stream<tcp::socket> stream(ioc, ctx);
     
+    // Set SNI hostname for proper SSL verification
+    if (!SSL_set_tlsext_host_name(stream.native_handle(), ws_host_.c_str())) {
+        throw std::runtime_error("Failed to set SNI hostname for REST request");
+    }
+    
     // Resolve and connect
     tcp::resolver resolver(ioc);
-    auto const results = resolver.resolve("api.hyperliquid.xyz", "443");
+    auto const results = resolver.resolve(ws_host_, "443");
     net::connect(stream.next_layer(), results);
     
     // SSL handshake
@@ -306,7 +321,7 @@ nlohmann::json HyperliquidOrderBookDataSource::rest_request(const nlohmann::json
     
     // Build POST request
     http::request<http::string_body> req{http::verb::post, "/info", 11};
-    req.set(http::field::host, "api.hyperliquid.xyz");
+    req.set(http::field::host, ws_host_);
     req.set(http::field::content_type, "application/json");
     req.body() = request.dump();
     req.prepare_payload();

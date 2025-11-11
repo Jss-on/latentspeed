@@ -1,0 +1,551 @@
+@startuml Trading Engine Sequence Diagram
+!theme plain
+skinparam sequenceMessageAlign center
+skinparam maxMessageSize 200
+skinparam backgroundColor #FEFEFE
+skinparam sequence {
+    ArrowColor #2C3E50
+    ActorBorderColor #2C3E50
+    LifeLineBorderColor #34495E
+    LifeLineBackgroundColor #ECF0F1
+    ParticipantBorderColor #2C3E50
+    ParticipantBackgroundColor #E8F4F8
+    ParticipantFontSize 11
+    ActorBackgroundColor #3498DB
+    ActorFontColor #FFFFFF
+}
+
+title Trading Engine Service - Order Processing Sequence Diagram
+
+actor "External Client\n(Strategy)" as Client
+participant "ZMQ PULL\n:5601" as ZMQ_Pull <<Socket>>
+participant "Order Receiver\nThread\n(Core 2, RT)" as RecvThread <<Thread>>
+participant "Order Parser\n(parse_execution\n_order_hft)" as Parser <<Component>>
+participant "Memory Pools\n(HFT Structures)" as Pool <<Pool>>
+participant "Order Processor\n(process_execution\n_order_hft)" as Processor <<Component>>
+participant "Action Dispatcher\n(FNV-1a Hash)" as Dispatcher <<Component>>
+participant "Venue Router\n(VenueRouter)" as Router <<Router>>
+participant "Exchange Adapter\n(IExchangeAdapter)" as Adapter <<Interface>>
+participant "Connector\n(Hyperliquid\nPerpetual)" as Connector <<Connector>>
+participant "Order Tracker\n(ClientOrder\nTracker)" as Tracker <<Tracker>>
+participant "REST API\n(Boost.Beast)" as RestAPI <<HTTP>>
+participant "Exchange API\n(Hyperliquid)" as Exchange <<External>>
+participant "WebSocket\nUser Stream" as WSStream <<WebSocket>>
+participant "JSON Serializer\n(RapidJSON)" as Serializer <<Component>>
+participant "Publish Queue\n(LockFreeSPSC\nQueue)" as PubQueue <<Queue>>
+participant "Publisher\nThread\n(Core 3, RT)" as PubThread <<Thread>>
+participant "ZMQ PUB\n:5602" as ZMQ_Pub <<Socket>>
+participant "Subscribers\n(Reports/Fills)" as Subscriber <<Client>>
+
+== ORDER PLACEMENT FLOW ==
+
+Client -> ZMQ_Pull: Send JSON Order Message\n{"action": "place", "cl_id": "ORDER-123", ...}
+activate Client
+activate ZMQ_Pull
+
+loop Non-blocking Receive Loop [DONTWAIT]
+    RecvThread -> ZMQ_Pull: zmq_recv(ZMQ_DONTWAIT)
+    activate RecvThread
+    alt Message Available
+        ZMQ_Pull --> RecvThread: JSON Message (string_view)
+    else EAGAIN
+        ZMQ_Pull --> RecvThread: EAGAIN
+        RecvThread -> RecvThread: Continue Loop
+    end
+end
+
+RecvThread -> Parser: parse_execution_order_hft(string_view)
+activate Parser
+note right of Parser
+  Zero-copy parsing
+  Uses string_view
+  RapidJSON SAX
+end note
+
+Parser -> Pool: Allocate HFTExecutionOrder
+activate Pool
+alt Pool Available
+    Pool --> Parser: HFTExecutionOrder* (cache-aligned)
+else Pool Exhausted
+    Pool --> Parser: nullptr
+    Parser --> RecvThread: nullptr
+    RecvThread -> RecvThread: Log Error\nIncrement pool_exhausted_count
+    RecvThread --> ZMQ_Pull: Continue Loop
+end
+
+Parser -> Parser: Parse JSON Fields\n- version, cl_id, action\n- venue_type, venue, product_type\n- details (symbol, side, price, size)
+Parser -> Parser: Copy to Fixed Strings\n- symbol (32 bytes)\n- cl_id (64 bytes)\n- order_type, time_in_force
+Parser -> Parser: Copy tags/params to FlatMap
+Parser --> RecvThread: HFTExecutionOrder*
+deactivate Parser
+
+RecvThread -> RecvThread: Record ingestion timestamp\nget_current_time_ns_hft() [TSC]
+
+RecvThread -> Processor: process_execution_order_hft(order)
+activate Processor
+
+Processor -> Dispatcher: decode_action(action_hash)
+activate Dispatcher
+note right of Dispatcher
+  FNV-1a compile-time hash
+  "place" -> 0xC662F1F1
+  "cancel" -> 0x9EFD76C7
+  "replace" -> 0x3E84C068
+end note
+Dispatcher --> Processor: ActionKind::Place
+deactivate Dispatcher
+
+alt Action: PLACE
+
+    Processor -> Processor: Check processed_orders_\n(Deduplication Map)
+    alt Already Processed AND Pending
+        note right of Processor: Duplicate detection
+        Processor -> Processor: Log: Ignoring duplicate order
+        Processor --> RecvThread: Return
+    else New or Retryable
+        Processor -> Processor: Validate Fields\n- symbol not empty\n- price > 0\n- size > 0\n- side valid (buy/sell)
+        
+        alt Validation Failed
+            Processor -> Pool: Allocate HFTExecutionReport
+            activate Pool
+            Pool --> Processor: Report Object
+            deactivate Pool
+            Processor -> Processor: Fill Rejection Report\n- status = "rejected"\n- reason_code = "invalid_params"
+            Processor -> Serializer: serialize_execution_report(report)
+            activate Serializer
+            Serializer -> Serializer: RapidJSON StringBuffer
+            Serializer --> Processor: JSON String
+            deactivate Serializer
+            Processor -> PubQueue: Push PublishMessage\n(topic="exec.report")
+            activate PubQueue
+            PubQueue --> Processor: Queued
+            deactivate PubQueue
+            Processor --> RecvThread: Return
+        else Validation Success
+            Processor -> Processor: Infer category\n(spot/linear/inverse)
+            Processor -> Processor: Normalize symbol\n(BTC-USDT-PERP)
+            
+            alt Stop Order Handling
+                Processor -> Processor: Map order_type:\n- stop → market\n- stop_limit → limit\nSet triggerPrice/Direction\norderFilter=StopOrder
+            end
+            
+            alt Reduce-only on Spot
+                Processor -> Processor: Reject: reduce_only\nnot allowed on spot
+                Processor -> Serializer: Serialize Rejection
+                Processor -> PubQueue: Push Report
+                Processor --> RecvThread: Return
+            end
+            
+            Processor -> Router: get_adapter(venue_key)
+            activate Router
+            Router -> Router: Normalize venue key\n(to_lower_ascii)
+            Router -> Router: Lookup in adapters_\n(std::unordered_map)
+            
+            alt Adapter Not Found
+                Router --> Processor: nullptr
+                deactivate Router
+                Processor -> Processor: Send Rejection\nreason: "venue_not_found"
+                Processor --> RecvThread: Return
+            else Adapter Found
+                Router --> Processor: IExchangeAdapter*
+                deactivate Router
+                
+                Processor -> Processor: Build OrderRequest\n- client_order_id\n- symbol, side, order_type\n- price, quantity\n- time_in_force\n- category, reduce_only\n- Copy tags, params
+                
+                Processor -> Adapter: place_order(OrderRequest)
+                activate Adapter
+                note right of Adapter
+                  IExchangeAdapter interface
+                  Implemented by:
+                  HyperliquidConnectorAdapter
+                end note
+                
+                Adapter -> Connector: buy(symbol, amount, order_type, price, params)
+                activate Connector
+                note right of Connector
+                  ConnectorBase pattern
+                  HyperliquidPerpetualConnector
+                  Async execution with io_context
+                end note
+                
+                Connector -> Tracker: Create InFlightOrder
+                activate Tracker
+                Tracker -> Tracker: Set OrderState::PENDING_CREATE
+                Tracker -> Tracker: Store order params
+                Tracker --> Connector: InFlightOrder created
+                deactivate Tracker
+                
+                Connector -> Connector: Build Hyperliquid request\n- action: "order"\n- grouping: "na"\n- orders: [...]
+                Connector -> Connector: Sign request\n(HyperliquidAuth::sign_l1_action)
+                
+                Connector -> RestAPI: POST /exchange
+                activate RestAPI
+                note right of RestAPI
+                  Boost.Beast HTTPS
+                  Connection pooling
+                  Keep-alive
+                end note
+                
+                RestAPI -> Exchange: HTTPS Request\nPOST /exchange\nBody: {"action": {...}, "signature": {...}}
+                activate Exchange
+                
+                alt Exchange Success
+                    Exchange --> RestAPI: HTTP 200\n{"status": "ok", "response": {"data": {"statuses": [{"resting": {...}}]}}}
+                    deactivate Exchange
+                    RestAPI --> Connector: Response Body
+                    deactivate RestAPI
+                    
+                    Connector -> Connector: Parse response\nExtract exchange_order_id (oid)
+                    Connector -> Tracker: Update InFlightOrder\n- exchange_order_id\n- OrderState::OPEN
+                    activate Tracker
+                    Tracker --> Connector: Updated
+                    deactivate Tracker
+                    
+                    Connector -> Connector: Emit order_filled event\n(for tracker listeners)
+                    Connector --> Adapter: OrderResponse\n- success = true\n- exchange_order_id\n- message = "Order placed"
+                    deactivate Connector
+                    Adapter --> Processor: OrderResponse
+                    deactivate Adapter
+                    
+                    Processor -> Processor: Cache in pending_orders_\nKey: (venue, cl_id)\nValue: {symbol, exchId, category, ...}
+                    Processor -> Processor: Mark in processed_orders_\nKey: cl_id
+                    
+                    Processor -> Pool: Allocate HFTExecutionReport
+                    activate Pool
+                    Pool --> Processor: Report Object
+                    deactivate Pool
+                    
+                    Processor -> Processor: Fill Acceptance Report\n- cl_id = "ORDER-123"\n- status = "accepted"\n- exchange_order_id = "0x12345..."\n- reason_code = "ok"\n- reason_text = "Order placed"\n- ts_ns = current_time
+                    Processor -> Processor: Add tags:\n- venue = "hyperliquid"\n- Copy user tags
+                    
+                    Processor -> Serializer: serialize_execution_report(report)
+                    activate Serializer
+                    Serializer --> Processor: JSON String
+                    deactivate Serializer
+                    
+                    Processor -> PubQueue: Push PublishMessage\n- topic = "exec.report"\n- payload = JSON
+                    activate PubQueue
+                    alt Queue Full
+                        PubQueue --> Processor: false
+                        Processor -> Processor: Log Warning\nIncrement queue_full_count
+                    else Queue Available
+                        PubQueue --> Processor: true
+                    end
+                    deactivate PubQueue
+                    
+                    Processor -> Processor: Calculate latency\n(current_time - ingestion_time)
+                    Processor -> Processor: Update HFTStats\n- orders_accepted_count++\n- total_latency_ns += latency\n- Update min/max latency
+                    
+                    Processor --> RecvThread: Return
+                    
+                else Exchange Error
+                    Exchange --> RestAPI: HTTP 400/500\n{"error": "Insufficient margin"}
+                    deactivate Exchange
+                    RestAPI --> Connector: Error Response
+                    deactivate RestAPI
+                    Connector -> Connector: Parse error message
+                    Connector --> Adapter: OrderResponse\n- success = false\n- message = "Insufficient margin"
+                    deactivate Connector
+                    Adapter --> Processor: OrderResponse (error)
+                    deactivate Adapter
+                    
+                    Processor -> Processor: Send Rejection Report\n- reason_code = "insufficient_balance"\n- reason_text = from exchange
+                    Processor -> Serializer: Serialize Rejection
+                    Processor -> PubQueue: Push Report
+                    Processor -> Processor: Update HFTStats\n- orders_rejected_count++
+                    Processor --> RecvThread: Return
+                end
+            end
+        end
+    end
+
+else Action: CANCEL
+
+    Processor -> Processor: Resolve cancel_cl_id_to_cancel\nfrom request.details.cancel\nor tags["cancel_cl_id"]
+    Processor -> Processor: Lookup in pending_orders_
+    
+    alt Order Not Found
+        Processor -> Processor: Send Rejection\nreason: "order_not_found"
+        Processor --> RecvThread: Return
+    else Order Found
+        Processor -> Processor: Get symbol, exchId\nfrom pending cache
+        Processor -> Router: get_adapter(venue_key)
+        activate Router
+        Router --> Processor: IExchangeAdapter*
+        deactivate Router
+        
+        Processor -> Processor: Build CancelRequest\n- client_order_id\n- exchange_order_id\n- symbol, category
+        
+        Processor -> Adapter: cancel_order(CancelRequest)
+        activate Adapter
+        Adapter -> Connector: cancel(client_order_id)
+        activate Connector
+        Connector -> RestAPI: POST /exchange\nAction: cancel
+        activate RestAPI
+        RestAPI -> Exchange: Cancel Request
+        activate Exchange
+        
+        alt Order Canceled
+            Exchange --> RestAPI: Success
+            deactivate Exchange
+            RestAPI --> Connector: Response
+            deactivate RestAPI
+            Connector --> Adapter: Success
+            deactivate Connector
+            Adapter --> Processor: OrderResponse (success)
+            deactivate Adapter
+            Processor -> Processor: Send Acceptance Report
+            
+        else Order Not Found (Idempotent)
+            Exchange --> RestAPI: "Order not found"
+            deactivate Exchange
+            RestAPI --> Connector: Not found
+            deactivate RestAPI
+            Connector --> Adapter: Not found (treat as success)
+            deactivate Connector
+            Adapter --> Processor: Success (idempotent)
+            deactivate Adapter
+            Processor -> Processor: Publish Synthetic\nCanceled Report\nfor original cl_id
+        end
+        
+        Processor -> Serializer: Serialize Report
+        Processor -> PubQueue: Push Report
+        Processor --> RecvThread: Return
+    end
+
+else Action: REPLACE
+
+    Processor -> Processor: Resolve replace_cl_id_to_replace
+    Processor -> Processor: Lookup in pending_orders_
+    Processor -> Processor: Infer new price/size\nfrom tags["new_price"]/["new_size"]\nor request fields
+    Processor -> Router: get_adapter(venue_key)
+    activate Router
+    Router --> Processor: IExchangeAdapter*
+    deactivate Router
+    Processor -> Adapter: modify_order(ModifyRequest)
+    activate Adapter
+    Adapter -> Connector: Modify via REST
+    Connector --> Adapter: Response
+    deactivate Adapter
+    Processor -> Processor: Send Acceptance/Rejection
+    Processor -> Serializer: Serialize Report
+    Processor -> PubQueue: Push Report
+    Processor --> RecvThread: Return
+
+end
+
+deactivate Processor
+deactivate RecvThread
+deactivate ZMQ_Pull
+deactivate Client
+
+== ASYNC ORDER UPDATE FLOW (WebSocket User Stream) ==
+
+WSStream -> WSStream: Receive WebSocket Message\n{"channel": "user", "data": {...}}
+activate WSStream
+
+WSStream -> Connector: Parse message\nOrder update event
+activate Connector
+note right of Connector
+  User stream handler
+  Processes fills, order updates
+  Async WebSocket read
+end note
+
+Connector -> Tracker: update_order_state(client_order_id, new_state)
+activate Tracker
+Tracker -> Tracker: Apply state transition\nPENDING_CREATE → OPEN\nOPEN → FILLED/CANCELED
+Tracker --> Connector: State updated
+deactivate Tracker
+
+Connector -> Adapter: Trigger on_order_update callback
+activate Adapter
+Adapter -> Processor: on_order_update_hft(OrderUpdate)
+activate Processor
+note right of Processor
+  Async callback from adapter
+  May arrive after initial acceptance
+end note
+
+Processor -> Processor: Check if order in pending_orders_
+
+alt Order Unknown (Lazy Rehydration)
+    note right of Processor
+      External fill or manual trade
+      Order not tracked locally
+    end note
+    Processor -> Adapter: query_order(symbol, client_order_id)
+    Adapter -> Connector: Query via REST API
+    activate Connector
+    Connector -> RestAPI: GET /info\nQuery order by oid
+    activate RestAPI
+    RestAPI -> Exchange: Query Request
+    activate Exchange
+    Exchange --> RestAPI: Order Details
+    deactivate Exchange
+    RestAPI --> Connector: Response
+    deactivate RestAPI
+    Connector --> Adapter: OrderUpdate (full details)
+    deactivate Connector
+    Adapter --> Processor: OrderUpdate
+    Processor -> Processor: Insert to pending_orders_\n(rehydrate from exchange)
+end
+
+Processor -> Processor: Normalize status\nutils::normalize_report_status()\n- "filled" → "filled"\n- "cancelled" → "canceled"\n- "open" → "accepted"
+
+Processor -> Processor: Map reason code\nDefaultReasonMapper::map_reason()\n- Raw: "balance insufficient"\n- Canonical: "insufficient_balance"
+
+Processor -> Processor: Ensure 'venue' tag\ntags["venue"] = "hyperliquid"
+
+Processor -> Pool: Allocate HFTExecutionReport
+activate Pool
+Pool --> Processor: Report Object
+deactivate Pool
+
+Processor -> Processor: Fill Report Fields\n- cl_id, exchange_order_id\n- status, reason_code, reason_text\n- filled_size, avg_fill_price\n- ts_ns
+
+Processor -> Serializer: serialize_execution_report(report)
+activate Serializer
+Serializer --> Processor: JSON String
+deactivate Serializer
+
+Processor -> PubQueue: Push PublishMessage\n(topic="exec.report")
+activate PubQueue
+PubQueue --> Processor: Queued
+deactivate PubQueue
+
+alt Terminal Status (filled/canceled/rejected)
+    Processor -> Processor: Remove from pending_orders_\nCleanup completed order
+else Non-Terminal (partial_fill)
+    Processor -> Processor: Keep in pending_orders_\nOrder still active
+end
+
+Processor -> Processor: Update HFTStats\n- reports_published_count++\n- Calculate callback latency
+
+Processor --> Adapter: Callback complete
+deactivate Processor
+Adapter --> Connector: Return
+deactivate Adapter
+Connector --> WSStream: Message processed
+deactivate Connector
+deactivate WSStream
+
+== FILL EVENT FLOW ==
+
+WSStream -> WSStream: Receive Fill Message\n{"channel": "user", "data": {"fills": [...]}}
+activate WSStream
+
+WSStream -> Connector: Parse fill event
+activate Connector
+
+Connector -> Tracker: add_trade_update(client_order_id, TradeUpdate)
+activate Tracker
+note right of Tracker
+  TradeUpdate includes:
+  - trade_id, price, amount
+  - fee, fee_currency
+  - timestamp
+end note
+Tracker -> Tracker: Append to InFlightOrder.trade_updates
+Tracker -> Tracker: Update executed_amount_base
+Tracker --> Connector: Trade recorded
+deactivate Tracker
+
+Connector -> Adapter: Trigger on_fill callback
+activate Adapter
+Adapter -> Processor: on_fill_hft(FillData)
+activate Processor
+
+Processor -> Processor: Parse Fill Fields\n- execution_id (trade_id)\n- symbol, side\n- price (string → double)\n- size (string → double)\n- fee_currency, fee_amount\n- liquidity (maker/taker)
+
+Processor -> Processor: Lookup order in pending_orders_\nGet client_order_id and tags
+
+Processor -> Processor: Copy tags from order\n- strategy, account_id, etc.
+
+Processor -> Processor: Normalize symbol\nISymbolMapper::to_hyphen_symbol()\n"BTCUSDT" → "BTC-USDT"
+
+Processor -> Processor: Tag execution_type\n- "live" if order tracked\n- "external" if manual/unknown
+
+Processor -> Pool: Allocate HFTFill
+activate Pool
+Pool --> Processor: Fill Object (cache-aligned)
+deactivate Pool
+
+Processor -> Processor: Fill HFTFill Fields\n- cl_id, exchange_order_id, exec_id\n- symbol_or_pair\n- price, size\n- fee_currency, fee_amount\n- liquidity, ts_ns\n- tags
+
+Processor -> Serializer: serialize_fill(fill)
+activate Serializer
+Serializer -> Serializer: RapidJSON StringBuffer\nCompact JSON
+Serializer --> Processor: JSON String
+deactivate Serializer
+
+Processor -> PubQueue: Push PublishMessage\n- topic = "exec.fill"\n- payload = JSON
+activate PubQueue
+PubQueue --> Processor: Queued
+deactivate PubQueue
+
+Processor -> Processor: Update HFTStats\n- fills_published_count++
+
+Processor --> Adapter: Callback complete
+deactivate Processor
+Adapter --> Connector: Return
+deactivate Adapter
+Connector --> WSStream: Fill processed
+deactivate Connector
+deactivate WSStream
+
+== PUBLISHING FLOW ==
+
+loop Publisher Thread Loop [Infinite]
+    activate PubThread
+    PubThread -> PubQueue: try_pop() [Non-blocking]
+    activate PubQueue
+    
+    alt Message Available
+        PubQueue --> PubThread: PublishMessage*
+        deactivate PubQueue
+        
+        PubThread -> PubThread: Extract topic and payload\n- topic: "exec.report" or "exec.fill"\n- payload: JSON string
+        
+        PubThread -> ZMQ_Pub: zmq_send(topic, ZMQ_SNDMORE)
+        activate ZMQ_Pub
+        note right of ZMQ_Pub
+          Multi-frame ZMQ message
+          Frame 1: Topic (for filtering)
+          Frame 2: Payload
+        end note
+        ZMQ_Pub --> PubThread: Topic frame sent
+        
+        PubThread -> ZMQ_Pub: zmq_send(payload, 0)
+        ZMQ_Pub -> Subscriber: Multicast to all subscribers
+        activate Subscriber
+        note right of Subscriber
+          Subscribers can filter by topic:
+          zmq_setsockopt(ZMQ_SUBSCRIBE, "exec.report")
+          zmq_setsockopt(ZMQ_SUBSCRIBE, "exec.fill")
+        end note
+        Subscriber -> Subscriber: Process report/fill\nUpdate strategy state
+        deactivate Subscriber
+        ZMQ_Pub --> PubThread: Payload frame sent
+        deactivate ZMQ_Pub
+        
+        PubThread -> Pool: Return PublishMessage to pool\npool.release(msg)
+        activate Pool
+        Pool --> PubThread: Released
+        deactivate Pool
+        
+        PubThread -> PubThread: Increment stats.published_count
+        
+    else No Message
+        PubQueue --> PubThread: nullptr
+        deactivate PubQueue
+        PubThread -> PubThread: Adaptive sleep\n- PERFORMANCE: 1-10 μs\n- BALANCED: 50-100 μs\n- POWERSAVE: 500-1000 μs
+        note right of PubThread
+          CPU mode-aware sleep
+          Balances latency vs power
+        end note
+    end
+    deactivate PubThread
+end
+
+@enduml
