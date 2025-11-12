@@ -20,10 +20,18 @@ feeds:
     symbols:
       # Hyperliquid perps use USDC as quote/collateral; normalize to BASE-USDC-PERP
       - BTC-USDC-PERP
+      # - ETH-USDC-PERP
       - ASTER-USDC-PERP
+      # - SOL-USDC-PERP
       - AVNT-USDC-PERP
+      # - STBL-USDC-PERP
+      # - DOGE-USDC-PERP
       - BNB-USDC-PERP
+      # - XRP-USDC-PERP
+      # - HYPE-USDC-PERP
+      # - TWT-USDC-PERP
       - WLFI-USDC-PERP
+      # - FARTCOIN-USDC-PERP
     enable_trades: true
     enable_orderbook: true
     # snapshots_only is ignored when zmq.deltas.enabled=true (delta/ckpt mode)
