@@ -47,6 +47,10 @@ public:
     // Resolve spot pair name by index (for WS coin like "@107"). Returns {base, quote} if available.
     std::optional<std::pair<std::string,std::string>> resolve_spot_pair_by_index(int index);
 
+    // Resolve perp coin name by asset index (inverse lookup of resolve_perp)
+    // Returns the coin string (e.g., "BTC") if known.
+    std::optional<std::string> resolve_perp_coin_by_index(int index);
+
     // Configure cache TTL
     void set_ttl(std::chrono::seconds ttl) { ttl_ = ttl; }
 

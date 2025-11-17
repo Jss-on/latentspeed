@@ -31,6 +31,13 @@ public:
                                               const std::optional<std::uint64_t>& expires_after,
                                               bool is_mainnet) override;
 
+    // Build a ready-to-post payload JSON string via Python SDK bridge
+    std::optional<std::string> build_action_payload(const std::string& private_key_hex_lower,
+                                                    const std::string& action_json,
+                                                    const std::optional<std::string>& vault_address_lower,
+                                                    std::uint64_t nonce,
+                                                    bool is_mainnet) override;
+
 private:
     bool ensure_started();
     void reader_loop();
@@ -48,6 +55,7 @@ private:
 
     struct Pending {
         std::optional<HlSignature> sig;
+        std::optional<std::string> resp;
         std::string error;
         bool ready{false};
         std::condition_variable cv;

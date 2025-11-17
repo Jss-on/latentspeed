@@ -65,7 +65,7 @@ WebSocket Streaming
   - `userFills` — snapshot + stream with `isSnapshot` marker.
 - Market data: `trades`, `l2Book`, `bbo`, `candle`, `allMids`.
 - Post over WS: wrap Info/Action payloads in `{ method: "post", id, request: { type, payload } }` and correlate by `id`.
-- Heartbeat: send `{ method: "ping" }` if quiet >60s; expect `{ channel: "pong" }`.
+- Heartbeat: send `{ method: "ping" }` if quiet >60s; expect `{ channel: "pong" }`. Keep the connection alive with periodic pings and allow a generous timeout before recycling; avoid trigger-happy reconnects that break streaming.
 
 Signing, API Wallets, Nonces
 - Use API (agent) wallets approved by the master account to sign; `vaultAddress` routes actions to subaccounts/vaults if needed.

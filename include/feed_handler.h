@@ -40,6 +40,11 @@ public:
         int zmq_books_port = 5557;            ///< ZMQ orderbook port
         int window_size = 20;                 ///< Rolling statistics window size
         int depth_levels = 10;                ///< Orderbook depth levels
+        // Output selection (snapshot vs delta/ckpt)
+        bool emit_snapshot = true;            ///< Emit legacy preprocessed_book snapshots
+        bool emit_delta = false;              ///< Emit preprocessed_book_delta messages
+        bool emit_ckpt = false;               ///< Emit preprocessed_book_ckpt messages
+        int ckpt_every_ms = 1000;             ///< Checkpoint cadence (ms)
     };
     
     // Default constructor

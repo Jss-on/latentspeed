@@ -7,6 +7,7 @@
 #include <rapidjson/writer.h>
 #include <rapidjson/stringbuffer.h>
 #include <unistd.h>
+#include <spdlog/spdlog.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <fcntl.h>
@@ -106,11 +107,29 @@ void PythonHyperliquidSigner::reader_loop() {
                 if (!p) continue;
                 if (d.HasMember("result") && d["result"].IsObject()) {
                     auto& r = d["result"];
-                    HlSignature sig;
-                    if (r.HasMember("r") && r["r"].IsString()) sig.r = r["r"].GetString();
-                    if (r.HasMember("s") && r["s"].IsString()) sig.s = r["s"].GetString();
-                    if (r.HasMember("v") && r["v"].IsInt()) sig.v = std::to_string(r["v"].GetInt());
-                    {
+                    if (r.HasMember("payload") && r["payload"].IsString()) {
+                        std::lock_guard<std::mutex> lk(corr_mutex_);
+                        p->resp = r["payload"].GetString(); p->ready = true; p->cv.notify_all();
+                        pending_.erase(id);
+                    } else {
+                        HlSignature sig;
+                        if (r.HasMember("r") && r["r"].IsString()) sig.r = r["r"].GetString();
+                        if (r.HasMember("s") && r["s"].IsString()) sig.s = r["s"].GetString();
+                        // Accept v as int or string; also accept yParity (0/1) mapping to 27/28
+                        if (r.HasMember("v")) {
+                            if (r["v"].IsInt()) sig.v = std::to_string(r["v"].GetInt());
+                            else if (r["v"].IsString()) sig.v = r["v"].GetString();
+                        } else if (r.HasMember("yParity") && r["yParity"].IsInt()) {
+                            int yp = r["yParity"].GetInt();
+                            int vv = (yp == 0) ? 27 : 28;
+                            sig.v = std::to_string(vv);
+                        }
+                        try {
+                            if (r.HasMember("address") && r["address"].IsString()) {
+                                std::string a = r["address"].GetString();
+                                spdlog::info("[HL-signer] derived_address={}", a);
+                            }
+                        } catch (...) {}
                         std::lock_guard<std::mutex> lk(corr_mutex_);
                         p->sig = sig; p->ready = true; p->cv.notify_all();
                         pending_.erase(id);
@@ -129,6 +148,54 @@ void PythonHyperliquidSigner::reader_loop() {
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
     }
+}
+
+std::optional<std::string> PythonHyperliquidSigner::build_action_payload(const std::string& private_key_hex_lower,
+                                                                         const std::string& action_json,
+                                                                         const std::optional<std::string>& vault_address_lower,
+                                                                         std::uint64_t nonce,
+                                                                         bool is_mainnet) {
+    if (!ensure_started()) return std::nullopt;
+    uint64_t id;
+    {
+        std::lock_guard<std::mutex> lk(corr_mutex_);
+        id = next_id_++;
+    }
+    rapidjson::Document params(rapidjson::kObjectType);
+    auto& alloc = params.GetAllocator();
+    params.AddMember("privateKey", rapidjson::Value(private_key_hex_lower.c_str(), alloc), alloc);
+    params.AddMember("action", rapidjson::Value(action_json.c_str(), alloc), alloc);
+    params.AddMember("nonce", rapidjson::Value(static_cast<uint64_t>(nonce)), alloc);
+    if (vault_address_lower.has_value())
+        params.AddMember("vaultAddress", rapidjson::Value(vault_address_lower->c_str(), alloc), alloc);
+    else
+        params.AddMember("vaultAddress", rapidjson::Value(rapidjson::kNullType), alloc);
+    params.AddMember("isMainnet", rapidjson::Value(is_mainnet), alloc);
+
+    rapidjson::Document msg(rapidjson::kObjectType);
+    msg.AddMember("id", rapidjson::Value(static_cast<uint64_t>(id)), msg.GetAllocator());
+    msg.AddMember("method", rapidjson::Value("build_payload", msg.GetAllocator()), msg.GetAllocator());
+    msg.AddMember("params", params, msg.GetAllocator());
+    rapidjson::StringBuffer sb; rapidjson::Writer<rapidjson::StringBuffer> wr(sb); msg.Accept(wr);
+    std::string line = sb.GetString(); line.push_back('\n');
+
+    auto pending = std::make_shared<Pending>();
+    {
+        std::lock_guard<std::mutex> lk(corr_mutex_);
+        pending_[id] = pending;
+    }
+    if (!send_line(line)) {
+        std::lock_guard<std::mutex> lk(corr_mutex_);
+        pending_.erase(id);
+        return std::nullopt;
+    }
+    std::unique_lock<std::mutex> lk(corr_mutex_);
+    if (!pending->cv.wait_for(lk, std::chrono::milliseconds(2000), [&]{ return pending->ready; })) {
+        pending_.erase(id);
+        return std::nullopt;
+    }
+    if (!pending->resp.has_value()) return std::nullopt;
+    return pending->resp;
 }
 
 bool PythonHyperliquidSigner::send_line(const std::string& line) {

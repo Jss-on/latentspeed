@@ -50,6 +50,24 @@ std::string HttpClient::request(const std::string& method,
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "LatentSpeed/1.0");
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+    // Harden network behavior: ensure we never block indefinitely
+    // - Avoid signals in multithreaded use
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    // - Aggressive but sane timeouts; configurable via env vars
+    long connect_timeout_ms = 1500;   // default 1.5s
+    long total_timeout_ms   = 2500;   // default 2.5s (IOC-friendly)
+    if (const char* v = std::getenv("LATENTSPEED_HTTP_CONNECT_TIMEOUT_MS")) {
+        char* endp = nullptr; long t = std::strtol(v, &endp, 10);
+        if (endp && *endp == '\0' && t >= 100) connect_timeout_ms = t;
+    }
+    if (const char* v = std::getenv("LATENTSPEED_HTTP_TIMEOUT_MS")) {
+        char* endp = nullptr; long t = std::strtol(v, &endp, 10);
+        if (endp && *endp == '\0' && t >= 200) total_timeout_ms = t;
+    }
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, connect_timeout_ms);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, total_timeout_ms);
+    // - DNS cache to reduce resolver chatter (seconds)
+    curl_easy_setopt(curl, CURLOPT_DNS_CACHE_TIMEOUT, 60L);
 
     if (method == "POST") {
         curl_easy_setopt(curl, CURLOPT_POST, 1L);

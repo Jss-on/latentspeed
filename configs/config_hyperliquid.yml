@@ -7,6 +7,9 @@ zmq:
   port: 5556        # trades on 5556, books on 5557
   window_size: 20
   depth_levels: 10
+  deltas:
+    enabled: true              # emit preprocessed_book_delta and preprocessed_book_ckpt (no snapshots)
+    checkpoint_every_ms: 1000  # checkpoint cadence (ms)
 
 log:
   level: info       # trace|debug|info|warn|error|critical
@@ -15,22 +18,24 @@ log:
 feeds:
   - exchange: hyperliquid
     symbols:
-      # - ETH-USDT-PERP
-      - BTC-USDT-PERP
-      - ASTER-USDT-PERP
-      # - SOL-USDT-PERP
-      - AVNT-USDT-PERP
-      # - STBL-USDT-PERP
-      # - DOGE-USDT-PERP
-      - BNB-USDT-PERP
-      # - XRP-USDT-PERP
-      # - HYPE-USDT-PERP
-      # - TWT-USDT-PERP
-      - WLFI-USDT-PERP
-      # - FARTCOIN-USDT-PERP
+      # Hyperliquid perps use USDC as quote/collateral; normalize to BASE-USDC-PERP
+      - BTC-USDC-PERP
+      # - ETH-USDC-PERP
+      - ASTER-USDC-PERP
+      # - SOL-USDC-PERP
+      - AVNT-USDC-PERP
+      # - STBL-USDC-PERP
+      # - DOGE-USDC-PERP
+      - BNB-USDC-PERP
+      # - XRP-USDC-PERP
+      # - HYPE-USDC-PERP
+      # - TWT-USDC-PERP
+      - WLFI-USDC-PERP
+      # - FARTCOIN-USDC-PERP
     enable_trades: true
     enable_orderbook: true
-    snapshots_only: true
-    snapshot_interval: 1   # seconds
+    # snapshots_only is ignored when zmq.deltas.enabled=true (delta/ckpt mode)
+    snapshots_only: false
+    snapshot_interval: 1   # seconds (legacy)
     reconnect_attempts: 10
     reconnect_delay_ms: 5000

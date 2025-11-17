@@ -12,6 +12,8 @@
 #include <iomanip>
 #include <sstream>
 #include <chrono>
+#include <set>
+#include <limits>
 
 #ifdef __linux__
 #include <pthread.h>
@@ -39,7 +41,22 @@ MarketDataProvider::MarketDataProvider(const std::string& exchange,
     orderbook_queue_ = std::make_unique<hft::LockFreeSPSCQueue<OrderBookSnapshot, 2048>>();
     // Initialize raw message queue from WebSocket (256KB buffer, 4096 depth = ~1GB total)
     message_queue_ = std::make_unique<hft::LockFreeSPSCQueue<MessageBuffer, 4096>>();
-    
+
+    // Build coin -> canonical symbol mapping for topic alignment with consumers
+    try {
+        for (const auto& s : symbols_) {
+            std::string canon = s; // as configured
+            std::string coin = _coin_from_canonical(canon);
+            if (!coin.empty()) {
+                std::string upper = coin;
+                std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
+                coin_to_canonical_[upper] = canon; // e.g., BTC -> BTC-USDT-PERP
+            }
+        }
+    } catch (const std::exception&) {
+        // best-effort; proceed without mapping
+    }
+
     spdlog::info("[MarketData] Memory pools and queues initialized");
 }
 
@@ -166,6 +183,16 @@ void MarketDataProvider::stop() {
 
 void MarketDataProvider::set_callbacks(std::shared_ptr<MarketDataCallbacks> callbacks) {
     callbacks_ = callbacks;
+}
+
+void MarketDataProvider::configure_outputs(bool emit_snapshot, bool emit_delta, bool emit_ckpt, int ckpt_every_ms, int depth_levels) {
+    emit_snapshot_ = emit_snapshot;
+    emit_delta_ = emit_delta;
+    emit_ckpt_ = emit_ckpt;
+    ckpt_every_ms_ = ckpt_every_ms;
+    depth_levels_cfg_ = depth_levels;
+    spdlog::info("[MarketData] Outputs configured: snapshot={}, delta={}, ckpt={}, ckpt_every_ms={}, depth_levels={}",
+                 emit_snapshot_, emit_delta_, emit_ckpt_, ckpt_every_ms_, depth_levels_cfg_);
 }
 
 void MarketDataProvider::websocket_thread() {
@@ -321,6 +348,14 @@ void MarketDataProvider::processing_thread() {
                                  static_cast<int>(msg_type), message_str.substr(0, 100));
                     
                     if (msg_type == ExchangeInterface::MessageType::TRADE) {
+                        // Canonicalize symbol if we have a mapping (e.g., BTC -> BTC-USDT-PERP)
+                        try {
+                            std::string s = std::string(tick.symbol.c_str());
+                            std::string cs = canonicalize_symbol(s);
+                            if (!cs.empty() && cs != s) {
+                                tick.symbol.assign(cs.c_str());
+                            }
+                        } catch (const std::exception&) {}
                         // Compute derived features
                         compute_trade_features(tick);
                         
@@ -336,6 +371,14 @@ void MarketDataProvider::processing_thread() {
                         stats_.trades_processed.fetch_add(1);
                     } 
                     else if (msg_type == ExchangeInterface::MessageType::BOOK) {
+                        // Canonicalize symbol
+                        try {
+                            std::string s = std::string(snapshot.symbol.c_str());
+                            std::string cs = canonicalize_symbol(s);
+                            if (!cs.empty() && cs != s) {
+                                snapshot.symbol.assign(cs.c_str());
+                            }
+                        } catch (const std::exception&) {}
                         // Compute derived features
                         compute_book_features(snapshot);
                         
@@ -398,9 +441,12 @@ void MarketDataProvider::publishing_thread() {
                 }
             }
             
-            // Process orderbook snapshots
+            // Process orderbook snapshots (emit delta/ckpt and optionally snapshot)
             if (orderbook_queue_->try_pop(snapshot)) {
-                publish_orderbook(snapshot);
+                emit_book_outputs(snapshot);
+                if (emit_snapshot_) {
+                    publish_orderbook(snapshot);
+                }
                 if (callbacks_) {
                     callbacks_->on_orderbook(snapshot);
                 }
@@ -840,9 +886,185 @@ std::string MarketDataProvider::serialize_orderbook(const OrderBookSnapshot& sna
     return buffer.GetString();
 }
 
+std::string MarketDataProvider::serialize_book_delta(
+    const std::string& symbol,
+    const std::string& exchange,
+    const std::vector<int>& side,
+    const std::vector<double>& px,
+    const std::vector<double>& sz,
+    uint64_t ts_ns,
+    uint64_t seq
+) {
+    rapidjson::StringBuffer buffer;
+    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+    writer.StartObject();
+    writer.Key("symbol"); writer.String(symbol.c_str());
+    writer.Key("exchange"); writer.String(exchange.c_str());
+    writer.Key("receipt_timestamp_ns"); writer.Uint64(ts_ns);
+    writer.Key("seq"); writer.Uint64(seq);
+    writer.Key("side"); writer.StartArray(); for (auto v: side) writer.Int(v); writer.EndArray();
+    writer.Key("px"); writer.StartArray(); for (auto v: px) writer.Double(v); writer.EndArray();
+    writer.Key("sz"); writer.StartArray(); for (auto v: sz) writer.Double(v); writer.EndArray();
+    writer.EndObject();
+    return buffer.GetString();
+}
+
+std::string MarketDataProvider::serialize_book_ckpt(
+    const std::string& symbol,
+    const std::string& exchange,
+    const std::vector<double>& bid_px,
+    const std::vector<double>& bid_sz,
+    const std::vector<double>& ask_px,
+    const std::vector<double>& ask_sz,
+    uint64_t ts_ns,
+    uint64_t seq
+) {
+    rapidjson::StringBuffer buffer;
+    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+    writer.StartObject();
+    writer.Key("symbol"); writer.String(symbol.c_str());
+    writer.Key("exchange"); writer.String(exchange.c_str());
+    writer.Key("receipt_timestamp_ns"); writer.Uint64(ts_ns);
+    writer.Key("seq"); writer.Uint64(seq);
+    writer.Key("bid_px"); writer.StartArray(); for (auto v: bid_px) writer.Double(v); writer.EndArray();
+    writer.Key("bid_sz"); writer.StartArray(); for (auto v: bid_sz) writer.Double(v); writer.EndArray();
+    writer.Key("ask_px"); writer.StartArray(); for (auto v: ask_px) writer.Double(v); writer.EndArray();
+    writer.Key("ask_sz"); writer.StartArray(); for (auto v: ask_sz) writer.Double(v); writer.EndArray();
+    writer.EndObject();
+    return buffer.GetString();
+}
+
+void MarketDataProvider::emit_book_outputs(const OrderBookSnapshot& snapshot) {
+    try {
+        std::string symbol(snapshot.symbol.c_str());
+        std::string exch(snapshot.exchange.c_str());
+        // Build current price->size maps up to configured depth
+        std::unordered_map<double,double> cur_b;
+        std::unordered_map<double,double> cur_a;
+        int depth = std::min(depth_levels_cfg_, 10);
+        for (int i = 0; i < depth; ++i) {
+            if (snapshot.bids[i].price > 0) cur_b[snapshot.bids[i].price] = snapshot.bids[i].quantity;
+            if (snapshot.asks[i].price > 0) cur_a[snapshot.asks[i].price] = snapshot.asks[i].quantity;
+        }
+
+        auto& lb = last_bids_[symbol];
+        auto& la = last_asks_[symbol];
+
+        // Compute sparse delta if enabled
+        if (emit_delta_) {
+            std::vector<int> side; side.reserve(cur_b.size() + cur_a.size());
+            std::vector<double> px; px.reserve(cur_b.size() + cur_a.size());
+            std::vector<double> sz; sz.reserve(cur_b.size() + cur_a.size());
+
+            // Merge keys and compare; deterministic price order
+            std::set<double, std::less<double>> prices_b;
+            for (auto& kv : lb) prices_b.insert(kv.first);
+            for (auto& kv : cur_b) prices_b.insert(kv.first);
+            for (double p : prices_b) {
+                auto it_prev = lb.find(p); auto it_cur = cur_b.find(p);
+                double prev = (it_prev != lb.end()) ? it_prev->second : std::numeric_limits<double>::quiet_NaN();
+                bool has_prev = (it_prev != lb.end());
+                bool has_cur = (it_cur != cur_b.end());
+                if (!has_prev && has_cur) { side.push_back(0); px.push_back(p); sz.push_back(it_cur->second); }
+                else if (has_prev && !has_cur) { side.push_back(0); px.push_back(p); sz.push_back(0.0); }
+                else if (has_prev && has_cur && it_cur->second != prev) { side.push_back(0); px.push_back(p); sz.push_back(it_cur->second); }
+            }
+            std::set<double, std::less<double>> prices_a;
+            for (auto& kv : la) prices_a.insert(kv.first);
+            for (auto& kv : cur_a) prices_a.insert(kv.first);
+            for (double p : prices_a) {
+                auto it_prev = la.find(p); auto it_cur = cur_a.find(p);
+                double prev = (it_prev != la.end()) ? it_prev->second : std::numeric_limits<double>::quiet_NaN();
+                bool has_prev = (it_prev != la.end());
+                bool has_cur = (it_cur != cur_a.end());
+                if (!has_prev && has_cur) { side.push_back(1); px.push_back(p); sz.push_back(it_cur->second); }
+                else if (has_prev && !has_cur) { side.push_back(1); px.push_back(p); sz.push_back(0.0); }
+                else if (has_prev && has_cur && it_cur->second != prev) { side.push_back(1); px.push_back(p); sz.push_back(it_cur->second); }
+            }
+
+            if (!side.empty()) {
+                // Allocate a unified book-stream sequence per symbol for delta/ckpt
+                std::string seq_key = exch + ":book_stream:" + symbol;
+                uint64_t seq = get_next_seq(seq_key);
+                std::string topic = exch + "-preprocessed_book_delta-" + symbol;
+                std::string payload = serialize_book_delta(symbol, exch, side, px, sz, snapshot.timestamp_ns, seq);
+                zmq::message_t topic_msg(topic.size()); std::memcpy(topic_msg.data(), topic.c_str(), topic.size());
+                zmq::message_t data_msg(payload.size()); std::memcpy(data_msg.data(), payload.c_str(), payload.size());
+                if (orderbook_publisher_->send(topic_msg, zmq::send_flags::sndmore | zmq::send_flags::dontwait) &&
+                    orderbook_publisher_->send(data_msg, zmq::send_flags::dontwait)) {
+                    stats_.messages_published.fetch_add(1);
+                }
+            }
+        }
+
+        // Emit checkpoint if cadence elapsed
+        if (emit_ckpt_) {
+            uint64_t last = last_ckpt_ns_[symbol];
+            bool due = (last == 0) || (snapshot.timestamp_ns >= last + static_cast<uint64_t>(ckpt_every_ms_) * 1000000ULL);
+            if (due) {
+                last_ckpt_ns_[symbol] = snapshot.timestamp_ns;
+                std::vector<double> bid_px; bid_px.reserve(depth_levels_cfg_);
+                std::vector<double> bid_sz; bid_sz.reserve(depth_levels_cfg_);
+                std::vector<double> ask_px; ask_px.reserve(depth_levels_cfg_);
+                std::vector<double> ask_sz; ask_sz.reserve(depth_levels_cfg_);
+                int depth = std::min(depth_levels_cfg_, 10);
+                for (int i = 0; i < depth; ++i) {
+                    if (snapshot.bids[i].price > 0 && snapshot.bids[i].quantity > 0) {
+                        bid_px.push_back(snapshot.bids[i].price);
+                        bid_sz.push_back(snapshot.bids[i].quantity);
+                    }
+                }
+                for (int i = 0; i < depth; ++i) {
+                    if (snapshot.asks[i].price > 0 && snapshot.asks[i].quantity > 0) {
+                        ask_px.push_back(snapshot.asks[i].price);
+                        ask_sz.push_back(snapshot.asks[i].quantity);
+                    }
+                }
+                std::string seq_key = exch + ":book_stream:" + symbol;
+                uint64_t seq = get_next_seq(seq_key);
+                std::string topic = exch + "-preprocessed_book_ckpt-" + symbol;
+                std::string payload = serialize_book_ckpt(symbol, exch, bid_px, bid_sz, ask_px, ask_sz, snapshot.timestamp_ns, seq);
+                zmq::message_t topic_msg(topic.size()); std::memcpy(topic_msg.data(), topic.c_str(), topic.size());
+                zmq::message_t data_msg(payload.size()); std::memcpy(data_msg.data(), payload.c_str(), payload.size());
+                if (orderbook_publisher_->send(topic_msg, zmq::send_flags::sndmore | zmq::send_flags::dontwait) &&
+                    orderbook_publisher_->send(data_msg, zmq::send_flags::dontwait)) {
+                    stats_.messages_published.fetch_add(1);
+                }
+            }
+        }
+
+        // Update last state
+        last_bids_[symbol] = std::move(cur_b);
+        last_asks_[symbol] = std::move(cur_a);
+
+    } catch (const std::exception& e) {
+        spdlog::warn("[MarketData] emit_book_outputs error: {}", e.what());
+    }
+}
+
+std::string MarketDataProvider::canonicalize_symbol(const std::string& sym) const {
+    std::string up = sym;
+    std::transform(up.begin(), up.end(), up.begin(), ::toupper);
+    auto it = coin_to_canonical_.find(up);
+    return (it != coin_to_canonical_.end()) ? it->second : sym;
+}
+
+std::string MarketDataProvider::_coin_from_canonical(const std::string& configured_symbol) {
+    // Extract coin ticker from a canonical symbol like BASE-QUOTE-PERP (e.g., BTC-USDT-PERP -> BTC)
+    // Fallback to the part before first '-' or the whole string uppercased if no '-'.
+    if (configured_symbol.empty()) return std::string();
+    // Take segment before first '-'
+    auto pos = configured_symbol.find('-');
+    std::string base = (pos == std::string::npos) ? configured_symbol : configured_symbol.substr(0, pos);
+    std::string out = base;
+    std::transform(out.begin(), out.end(), out.begin(), ::toupper);
+    return out;
+}
+
 uint64_t MarketDataProvider::get_timestamp_ns() {
+    // Use system_clock for epoch-aligned timestamps (ns)
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
-        std::chrono::high_resolution_clock::now().time_since_epoch()).count();
+        std::chrono::system_clock::now().time_since_epoch()).count();
 }
 
 std::string MarketDataProvider::build_subscription_message() {

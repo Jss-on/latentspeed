@@ -429,17 +429,18 @@ struct CACHE_ALIGNED HFTFill {
     OrderId exchange_order_id;
     OrderId exec_id;
     Symbol symbol_or_pair;
-    
+    FixedString<8> side;           // "buy", "sell" - REQUIRED for balance accounting
+
     double price{0.0};
     double size{0.0};
     double fee_amount{0.0};
     FixedString<8> fee_currency;
     FixedString<8> liquidity;      // "maker", "taker"
     std::atomic<uint64_t> ts_ns;
-    
+
     // Fast tag lookup
     FlatMap<FixedString<32>, FixedString<64>, 8> tags;
-    
+
     constexpr HFTFill() noexcept = default;
 };
 
