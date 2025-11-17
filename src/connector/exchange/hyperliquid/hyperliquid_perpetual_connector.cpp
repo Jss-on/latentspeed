@@ -5,6 +5,9 @@
 
 #include "connector/exchange/hyperliquid/hyperliquid_perpetual_connector.h"
 #include <spdlog/spdlog.h>
+#include <sstream>
+#include <iomanip>
+#include <functional>
 
 namespace beast = boost::beast;
 namespace http = beast::http;
@@ -13,6 +16,24 @@ namespace ssl = boost::asio::ssl;
 using tcp = boost::asio::ip::tcp;
 
 namespace latentspeed::connector {
+
+// Helper: Convert client_order_id to 128-bit hex string for Hyperliquid cloid
+// Format: 0x + 32 hex characters
+static std::string convert_to_hex_cloid(const std::string& client_order_id) {
+    // Use std::hash to generate a deterministic hash
+    std::hash<std::string> hasher;
+    size_t hash1 = hasher(client_order_id);
+    size_t hash2 = hasher(client_order_id + "_salt");
+    
+    // Convert to 128-bit hex (we'll use two 64-bit hashes)
+    std::ostringstream oss;
+    oss << "0x"
+        << std::hex << std::setfill('0') 
+        << std::setw(16) << hash1
+        << std::setw(16) << hash2;
+    
+    return oss.str();
+}
 
 // Constructor
 HyperliquidPerpetualConnector::HyperliquidPerpetualConnector(
@@ -373,11 +394,28 @@ std::pair<std::string, uint64_t> HyperliquidPerpetualConnector::execute_place_or
         price_decimals = rule_opt->price_decimals;
     }
     
-    std::string limit_px = HyperliquidWebUtils::float_to_wire(order.price, price_decimals);
+    // For market orders (IOC), use extreme price to guarantee immediate execution
+    double effective_price = order.price;
+    if (order.order_type == OrderType::MARKET) {
+        if (order.trade_type == TradeType::BUY) {
+            // Buy: use very high price to match any ask
+            effective_price = 1000000.0;
+        } else {
+            // Sell: use very low price to match any bid
+            effective_price = 0.01;
+        }
+        spdlog::debug("[HL] Market order: using price {} for {} order", 
+                     effective_price, order.trade_type == TradeType::BUY ? "BUY" : "SELL");
+    }
+    
+    std::string limit_px = HyperliquidWebUtils::float_to_wire(effective_price, price_decimals);
     std::string sz = HyperliquidWebUtils::float_to_wire(order.amount, size_decimals);
     
-    // 4. Get cloid (always use client_order_id)
-    std::string cloid = order.client_order_id;
+    // 4. Convert client_order_id to valid cloid format (128-bit hex string)
+    // Hyperliquid requires: 0x + 32 hex chars (128 bits)
+    // Use hash of client_order_id to generate deterministic hex string
+    std::string cloid = convert_to_hex_cloid(order.client_order_id);
+    spdlog::info("[HL] Converted cloid: {} -> {}", order.client_order_id, cloid);
     
     // 5. Build request
     nlohmann::json action = {
@@ -690,15 +728,13 @@ nlohmann::json HyperliquidPerpetualConnector::api_post_with_auth(
     const std::string& endpoint,
     const nlohmann::json& action) {
     
-    // Sign the action
-    auto signature = auth_->sign_l1_action(action, testnet_);
+    // Sign the action - this returns the complete request with action, nonce, and signature
+    auto signed_request = auth_->sign_l1_action(action, !testnet_);
     
-    nlohmann::json request = {
-        {"action", action},
-        {"signature", signature}
-    };
+    // Log the full request for debugging (use info level to ensure it shows)
+    spdlog::info("[HL-REST] Request to {}: {}", endpoint, signed_request.dump());
     
-    return rest_post(endpoint, request);
+    return rest_post(endpoint, signed_request);
 }
 
 nlohmann::json HyperliquidPerpetualConnector::rest_post(
@@ -737,7 +773,33 @@ nlohmann::json HyperliquidPerpetualConnector::rest_post(
     beast::error_code ec;
     stream.shutdown(ec);
     
-    return nlohmann::json::parse(res.body());
+    // Log response details (use info for status, error for failures)
+    spdlog::info("[HL-REST] Response status: {} {}", res.result_int(), res.reason());
+    
+    // Check HTTP status code
+    if (res.result() != http::status::ok) {
+        // Log full response body for debugging
+        spdlog::error("[HL-REST] Response body: {}", res.body());
+        
+        std::string error_msg = "HTTP " + std::to_string(res.result_int()) + 
+                               " " + std::string(res.reason()) + 
+                               ": " + res.body();
+        spdlog::error("[HL-REST] Request failed: {}", error_msg);
+        throw std::runtime_error(error_msg);
+    }
+    
+    // Log successful response body
+    spdlog::info("[HL-REST] Response body: {}", res.body().substr(0, std::min(size_t(1000), res.body().size())));
+    
+    // Try to parse JSON response
+    try {
+        return nlohmann::json::parse(res.body());
+    } catch (const nlohmann::json::parse_error& e) {
+        std::string error_msg = "Failed to parse JSON response: " + std::string(e.what()) + 
+                               "\nResponse body: " + res.body();
+        spdlog::error("[HL-REST] {}", error_msg);
+        throw std::runtime_error(error_msg);
+    }
 }
 
 void HyperliquidPerpetualConnector::fetch_trading_rules() {

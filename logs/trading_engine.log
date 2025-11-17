@@ -1,13 +1,552 @@
-[2025-11-10 22:32:14.640834] [PID:479764] [TID:479764] [info] [:] [] === Latentspeed Trading Engine Service ===
-[2025-11-10 22:32:14.640943] [PID:479764] [TID:479764] [info] [:] [] Starting up...
-[2025-11-10 22:32:14.640952] [PID:479764] [TID:479764] [info] [:] [] [Main] Configuration Summary:
-[2025-11-10 22:32:14.640961] [PID:479764] [TID:479764] [info] [:] [] [Main]   Exchange: hyperliquid
-[2025-11-10 22:32:14.640966] [PID:479764] [TID:479764] [info] [:] [] [Main]   Trading Mode: DEMO/TESTNET
-[2025-11-10 22:32:14.640970] [PID:479764] [TID:479764] [info] [:] [] [Main]   API Key: 0x44...69be (masked)
-[2025-11-10 22:32:14.675975] [PID:479764] [TID:479764] [info] [:] [] [HFT-Engine] Memory locked to prevent paging
-[2025-11-10 22:32:14.676058] [PID:479764] [TID:479764] [info] [:] [] [HFT-Engine] Ultra-low latency trading engine initialized
-[2025-11-10 22:32:14.676070] [PID:479764] [TID:479764] [info] [:] [] [HFT-Engine] Memory pools pre-warmed with 128 entries
-[2025-11-10 22:32:14.676074] [PID:479764] [TID:479764] [info] [:] [] [HFT-Engine] Lock-free queues ready
-[2025-11-10 22:32:14.676079] [PID:479764] [TID:479764] [info] [:] [] [HFT-Engine] Unix domain sockets: tcp://127.0.0.1:5601, tcp://127.0.0.1:5602
-[2025-11-10 22:32:14.676085] [PID:479764] [TID:479764] [info] [:] [] [HFT-Engine] Starting initialization...
-Resource temporarily unavailable (/home/tensor/latentspeed/external/vcpkg/buildtrees/zeromq/src/v4.3.5-37c87b6b8c.clean/src/thread.cpp:241)
+[2025-11-17 20:32:39.167352] [PID:1204893] [TID:1204893] [info] [:] [] === Latentspeed Trading Engine Service ===
+[2025-11-17 20:32:39.167441] [PID:1204893] [TID:1204893] [info] [:] [] Starting up...
+[2025-11-17 20:32:39.167449] [PID:1204893] [TID:1204893] [info] [:] [] [Main] Configuration Summary:
+[2025-11-17 20:32:39.167462] [PID:1204893] [TID:1204893] [info] [:] [] [Main]   Exchange: hyperliquid
+[2025-11-17 20:32:39.167465] [PID:1204893] [TID:1204893] [info] [:] [] [Main]   Trading Mode: DEMO/TESTNET
+[2025-11-17 20:32:39.167469] [PID:1204893] [TID:1204893] [info] [:] [] [Main]   API Key: 0x44...69be (masked)
+[2025-11-17 20:32:39.197926] [PID:1204893] [TID:1204893] [info] [:] [] [HFT-Engine] Memory locked to prevent paging
+[2025-11-17 20:32:39.197993] [PID:1204893] [TID:1204893] [info] [:] [] [HFT-Engine] Ultra-low latency trading engine initialized
+[2025-11-17 20:32:39.198001] [PID:1204893] [TID:1204893] [info] [:] [] [HFT-Engine] Memory pools pre-warmed with 128 entries
+[2025-11-17 20:32:39.198004] [PID:1204893] [TID:1204893] [info] [:] [] [HFT-Engine] Lock-free queues ready
+[2025-11-17 20:32:39.198008] [PID:1204893] [TID:1204893] [info] [:] [] [HFT-Engine] ZMQ endpoints: orders=tcp://127.0.0.1:5601, reports=tcp://127.0.0.1:5602
+[2025-11-17 20:32:39.198013] [PID:1204893] [TID:1204893] [info] [:] [] [HFT-Engine] Starting initialization...
+[2025-11-17 20:32:39.210635] [PID:1204893] [TID:1204893] [info] [:] [] [HFT-Engine] Initializing exchange adapters...
+[2025-11-17 20:32:39.210697] [PID:1204893] [TID:1204893] [info] [:] [] [HFT-Engine] Exchange: hyperliquid, Live trading: false, Testnet: true
+[2025-11-17 20:32:39.210705] [PID:1204893] [TID:1204893] [info] [:] [] [HyperliquidAdapter] Bridge adapter created
+[2025-11-17 20:32:39.210710] [PID:1204893] [TID:1204893] [info] [:] [] [HyperliquidAdapter] Initializing Hummingbot-pattern connector...
+[2025-11-17 20:32:39.210714] [PID:1204893] [TID:1204893] [info] [:] [] [HyperliquidAdapter] Testnet: true
+[2025-11-17 20:32:39.210719] [PID:1204893] [TID:1204893] [info] [:] [] [HyperliquidAdapter] Using Python signer: python3 tools/hl_signer_bridge.py
+[2025-11-17 20:32:39.210761] [PID:1204893] [TID:1204893] [info] [:] [] [HyperliquidAuth] Python exe: python3 (env_py=NULL)
+[2025-11-17 20:32:39.210769] [PID:1204893] [TID:1204893] [info] [:] [] [HyperliquidAuth] Script: tools/hl_signer_bridge.py
+[2025-11-17 20:32:39.210775] [PID:1204893] [TID:1204893] [info] [:] [] [HyperliquidAuth] Initialized for address: 0x44Fd91bEd5c87A4fFA222462798BB9d7Ef3669be with Python signer
+[2025-11-17 20:32:39.219604] [PID:1204893] [TID:1204893] [info] [:] [] [HyperliquidAdapter] Event forwarding configured
+[2025-11-17 20:32:39.526671] [PID:1204893] [TID:1204893] [info] [:] [] Fetched 199 trading pairs
+[2025-11-17 20:32:39.757533] [PID:1204893] [TID:1204893] [info] [:] [] [HL-REST] Response status: 200 OK
+[2025-11-17 20:32:39.757593] [PID:1204893] [TID:1204893] [info] [:] [] [HL-REST] Response body: {"universe":[{"szDecimals":2,"name":"SOL","maxLeverage":10,"marginTableId":10},{"szDecimals":2,"name":"APT","maxLeverage":3,"marginTableId":3},{"szDecimals":2,"name":"ATOM","maxLeverage":10,"marginTableId":55},{"szDecimals":5,"name":"BTC","maxLeverage":40,"marginTableId":54},{"szDecimals":4,"name":"ETH","maxLeverage":25,"marginTableId":53},{"szDecimals":1,"name":"MATIC","maxLeverage":50,"marginTableId":50,"isDelisted":true},{"szDecimals":3,"name":"BNB","maxLeverage":10,"marginTableId":10},{"szDecimals":2,"name":"AVAX","maxLeverage":10,"marginTableId":55},{"szDecimals":0,"name":"GMT","maxLeverage":2,"marginTableId":2},{"szDecimals":1,"name":"DYDX","maxLeverage":20,"marginTableId":20},{"szDecimals":1,"name":"APE","maxLeverage":5,"marginTableId":5},{"szDecimals":1,"name":"OP","maxLeverage":50,"marginTableId":50},{"szDecimals":0,"name":"kPEPE","maxLeverage":10,"marginTableId":10},{"szDecimals":1,"name":"ARB","maxLeverage":10,"marginTableId":55},{"szDecimals":0,"name":"RLB","maxLeverage":50
+[2025-11-17 20:32:39.758247] [PID:1204893] [TID:1204893] [info] [:] [] Fetched trading rules for 199 pairs
+[2025-11-17 20:32:39.758328] [PID:1204893] [TID:1204893] [info] [:] [] [HyperliquidAdapter] Initialization complete
+[2025-11-17 20:32:39.758379] [PID:1204893] [TID:1204893] [info] [:] [] [HyperliquidAdapter] Connecting to Hyperliquid...
+[2025-11-17 20:32:39.763773] [PID:1204893] [TID:1204893] [info] [:] [] HyperliquidOrderBookDataSource started
+[2025-11-17 20:32:39.770134] [PID:1204893] [TID:1204893] [info] [:] [] HyperliquidUserStreamDataSource started
+[2025-11-17 20:32:39.770184] [PID:1204893] [TID:1204893] [info] [:] [] HyperliquidPerpetualConnector started
+[2025-11-17 20:32:39.997034] [PID:1204893] [TID:1204902] [info] [:] [] Connected to Hyperliquid user stream WebSocket at api.hyperliquid-testnet.xyz
+[2025-11-17 20:32:39.997036] [PID:1204893] [TID:1204901] [info] [:] [] Connected to Hyperliquid WebSocket at api.hyperliquid-testnet.xyz
+[2025-11-17 20:32:40.020343] [PID:1204893] [TID:1204893] [info] [:] [] [HyperliquidAdapter] Connected successfully after 250 ms
+[2025-11-17 20:32:40.020415] [PID:1204893] [TID:1204893] [info] [:] [] [HFT-Engine] Hyperliquid connector connected successfully
+[2025-11-17 20:32:40.020423] [PID:1204893] [TID:1204893] [info] [:] [] [HFT-Engine] Exchange adapter initialized: hyperliquid (Hummingbot pattern)
+[2025-11-17 20:32:40.020432] [PID:1204893] [TID:1204893] [info] [:] [] [HyperliquidAdapter] Listed 0 open orders
+[2025-11-17 20:32:40.020437] [PID:1204893] [TID:1204893] [info] [:] [] [HyperliquidAdapter] Listed 0 open orders
+[2025-11-17 20:32:40.020475] [PID:1204893] [TID:1204893] [info] [:] [] [HyperliquidAdapter] Listed 0 open orders
+[2025-11-17 20:32:40.020482] [PID:1204893] [TID:1204893] [info] [:] [] [HyperliquidAdapter] Listed 0 open orders
+[2025-11-17 20:32:40.020486] [PID:1204893] [TID:1204893] [info] [:] [] [HFT-Engine] Rehydrated 0 open orders into local map after connect
+[2025-11-17 20:32:40.020492] [PID:1204893] [TID:1204893] [info] [:] [] [HFT-Engine] Initialization complete in 822478667 ns
+[2025-11-17 20:32:40.020498] [PID:1204893] [TID:1204893] [info] [:] [] [HFT-Engine] Order pool capacity: 1024
+[2025-11-17 20:32:40.020502] [PID:1204893] [TID:1204893] [info] [:] [] [HFT-Engine] Report pool capacity: 2048
+[2025-11-17 20:32:40.020510] [PID:1204893] [TID:1204893] [info] [:] [] [HFT-Engine] Fill pool capacity: 2048
+[2025-11-17 20:32:40.025156] [PID:1204893] [TID:1204904] [info] [:] [] [HFT-Engine] HFT order receiver thread started on dedicated core
+[2025-11-17 20:32:40.030729] [PID:1204893] [TID:1204905] [info] [:] [] [HFT-Engine] HFT publisher thread started
+[2025-11-17 20:32:40.035428] [PID:1204893] [TID:1204906] [info] [:] [] [HFT-Engine] Stats monitoring thread started
+[2025-11-17 20:32:40.035540] [PID:1204893] [TID:1204893] [info] [:] [] [HFT-Engine] Ultra-low latency service started (RT scheduling + CPU affinity)
+[2025-11-17 20:32:40.035592] [PID:1204893] [TID:1204893] [info] [:] [] [Main] Trading engine started successfully
+[2025-11-17 20:32:40.035599] [PID:1204893] [TID:1204893] [info] [:] [] [Main] Listening for orders on tcp://127.0.0.1:5601
+[2025-11-17 20:32:40.035635] [PID:1204893] [TID:1204893] [info] [:] [] [Main] Publishing reports on tcp://127.0.0.1:5602
+[2025-11-17 20:32:40.035641] [PID:1204893] [TID:1204893] [info] [:] [] [Main] Press Ctrl+C to stop
+[2025-11-17 20:32:40.125221] [PID:1204893] [TID:1204904] [info] [:] [] [HFT-Utils] TSC frequency calibrated: 2894591040 Hz
+[2025-11-17 20:32:50.035667] [PID:1204893] [TID:1204906] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 0, Rejected: 0, Avg latency: 0.00 ns, Min: 18446744073709551615 ns, Max: 0 ns, Queue usage: 0, Pool available: O:1024 R:2048 F:2048
+[2025-11-17 20:32:55.820658] [PID:1204893] [TID:1204904] [info] [:] [] [HyperliquidAdapter] Order placed: LS-1763382775820-0 (buy)
+[2025-11-17 20:32:55.820877] [PID:1204893] [TID:1204897] [info] [:] [] [OrderTracker] Order LS-1763382775820-0 state: PENDING_CREATE -> PENDING_SUBMIT
+[2025-11-17 20:32:55.820946] [PID:1204893] [TID:1204897] [info] [:] [] [HL] Converted cloid: LS-1763382775820-0 -> 0x72e66539daba0fe23a4175efb8217d51
+[2025-11-17 20:32:55.820968] [PID:1204893] [TID:1204897] [info] [:] [] [PythonHyperliquidSigner] Starting Python signer subprocess: python3 tools/hl_signer_bridge.py
+[2025-11-17 20:32:55.838353] [PID:1204893] [TID:1204897] [info] [:] [] [PythonHyperliquidSigner] Python user site-packages: /root/.local/lib/python3.10/site-packages
+[2025-11-17 20:32:55.850543] [PID:1204893] [TID:1204897] [info] [:] [] [PythonHyperliquidSigner] Subprocess started successfully (pid=1204974)
+[2025-11-17 20:32:56.419105] [PID:1204893] [TID:1204897] [info] [:] [] [HL-REST] Request to /exchange: {"action":{"grouping":"na","orders":[{"a":4,"b":true,"c":"0x72e66539daba0fe23a4175efb8217d51","p":"1000000.0","r":false,"s":"0.001","t":{"limit":{"tif":"Ioc"}}}],"type":"order"},"nonce":1763382775820,"signature":{"r":"0x6e4d94c2f74d17cbbab5c3c3e0656e8337936b57f6978d6ae29d19374b5d13eb","s":"0x6f374682a99f1df36206c791555c860e66b77bd19cc1836653682a78b61b2ad3","v":28}}
+[2025-11-17 20:32:56.687665] [PID:1204893] [TID:1204897] [info] [:] [] [HL-REST] Response status: 200 OK
+[2025-11-17 20:32:56.687725] [PID:1204893] [TID:1204897] [info] [:] [] [HL-REST] Response body: {"status":"err","response":"User or API Wallet 0xb9be8694f0d21f5eabb44f38114127ba582b1e30 does not exist."}
+[2025-11-17 20:32:56.687955] [PID:1204893] [TID:1204897] [info] [:] [] [OrderTracker] Order LS-1763382775820-0 state: PENDING_SUBMIT -> FAILED
+[2025-11-17 20:32:56.688003] [PID:1204893] [TID:1204897] [error] [:] [] Order LS-1763382775820-0 failed: "User or API Wallet 0xb9be8694f0d21f5eabb44f38114127ba582b1e30 does not exist."
+[2025-11-17 20:32:58.828243] [PID:1204893] [TID:1204904] [info] [:] [] [HyperliquidAdapter] Order placed: LS-1763382778828-1 (sell)
+[2025-11-17 20:32:58.828273] [PID:1204893] [TID:1204897] [info] [:] [] [OrderTracker] Order LS-1763382778828-1 state: PENDING_CREATE -> PENDING_SUBMIT
+[2025-11-17 20:32:58.828426] [PID:1204893] [TID:1204897] [info] [:] [] [HL] Converted cloid: LS-1763382778828-1 -> 0x82104872b686456f11708b2f2ac1d718
+[2025-11-17 20:32:58.840113] [PID:1204893] [TID:1204897] [info] [:] [] [HL-REST] Request to /exchange: {"action":{"grouping":"na","orders":[{"a":3,"b":false,"c":"0x82104872b686456f11708b2f2ac1d718","p":"100000.0","r":false,"s":"0.0001","t":{"limit":{"tif":"Gtc"}}}],"type":"order"},"nonce":1763382778828,"signature":{"r":"0x3c936d9aac14d9aae3c1776e045875a8aaa016c7664c65f27e366ddc736d7d50","s":"0xa9e19a59a5748f17fe4be5fdc70a14fb831312154412a61737ba20a9408262b","v":27}}
+[2025-11-17 20:32:59.071090] [PID:1204893] [TID:1204897] [info] [:] [] [HL-REST] Response status: 200 OK
+[2025-11-17 20:32:59.071153] [PID:1204893] [TID:1204897] [info] [:] [] [HL-REST] Response body: {"status":"err","response":"User or API Wallet 0xddaa9551d98d5f4c6cfdaf696b9d786bd66ee1ee does not exist."}
+[2025-11-17 20:32:59.071359] [PID:1204893] [TID:1204897] [info] [:] [] [OrderTracker] Order LS-1763382778828-1 state: PENDING_SUBMIT -> FAILED
+[2025-11-17 20:32:59.071405] [PID:1204893] [TID:1204897] [error] [:] [] Order LS-1763382778828-1 failed: "User or API Wallet 0xddaa9551d98d5f4c6cfdaf696b9d786bd66ee1ee does not exist."
+[2025-11-17 20:33:00.035964] [PID:1204893] [TID:1204906] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 2, Rejected: 0, Avg latency: 544099.50 ns, Min: 187630 ns, Max: 348800 ns, Queue usage: 0, Pool available: O:1020 R:2048 F:2048
+[2025-11-17 20:33:04.845016] [PID:1204893] [TID:1204904] [info] [:] [] [HyperliquidAdapter] Order placed: LS-1763382784844-2 (sell)
+[2025-11-17 20:33:04.845046] [PID:1204893] [TID:1204897] [info] [:] [] [OrderTracker] Order LS-1763382784844-2 state: PENDING_CREATE -> PENDING_SUBMIT
+[2025-11-17 20:33:04.845163] [PID:1204893] [TID:1204897] [info] [:] [] [HL] Converted cloid: LS-1763382784844-2 -> 0x562946111de810f27df6ee05912690c8
+[2025-11-17 20:33:04.856712] [PID:1204893] [TID:1204897] [info] [:] [] [HL-REST] Request to /exchange: {"action":{"grouping":"na","orders":[{"a":4,"b":false,"c":"0x562946111de810f27df6ee05912690c8","p":"0.01","r":false,"s":"0.001","t":{"limit":{"tif":"Ioc"}}}],"type":"order"},"nonce":1763382784845,"signature":{"r":"0x895a0cb4a0bf0bd55704a21f62c04815c6c41d7dc8c700e3186e6dce5768b6f9","s":"0x6731631b50716190fe4188b933c68f4f296965c8d5fcd835997e32a18fb426cf","v":27}}
+[2025-11-17 20:33:06.324988] [PID:1204893] [TID:1204897] [info] [:] [] [HL-REST] Response status: 200 OK
+[2025-11-17 20:33:06.325051] [PID:1204893] [TID:1204897] [info] [:] [] [HL-REST] Response body: {"status":"err","response":"User or API Wallet 0x69ebb4ded541efd5cc0b89cb25590b13781c91a3 does not exist."}
+[2025-11-17 20:33:06.325239] [PID:1204893] [TID:1204897] [info] [:] [] [OrderTracker] Order LS-1763382784844-2 state: PENDING_SUBMIT -> FAILED
+[2025-11-17 20:33:06.325279] [PID:1204893] [TID:1204897] [error] [:] [] Order LS-1763382784844-2 failed: "User or API Wallet 0x69ebb4ded541efd5cc0b89cb25590b13781c91a3 does not exist."
+[2025-11-17 20:33:10.036166] [PID:1204893] [TID:1204906] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 391122.00 ns, Min: 26119 ns, Max: 348800 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:33:15.052798] [PID:1204893] [TID:1204893] [info] [:] [] 
+[Main] Received signal 2, shutting down...
+[2025-11-17 20:33:15.052876] [PID:1204893] [TID:1204905] [info] [:] [] [HFT-Engine] HFT publisher thread stopped
+[2025-11-17 20:33:15.052908] [PID:1204893] [TID:1204904] [info] [:] [] [HFT-Engine] HFT order receiver thread stopped
+[2025-11-17 20:33:20.036448] [PID:1204893] [TID:1204906] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 391122.00 ns, Min: 26119 ns, Max: 348800 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:33:20.036565] [PID:1204893] [TID:1204906] [info] [:] [] [HFT-Engine] Stats monitoring thread stopped
+[2025-11-17 20:33:20.036708] [PID:1204893] [TID:1204893] [info] [:] [] [HFT-Engine] Final stats - Orders processed: 4, Avg latency: 391122.00 ns
+[2025-11-17 20:33:20.036781] [PID:1204893] [TID:1204893] [info] [:] [] [HFT-Engine] Ultra-low latency service stopped
+[2025-11-17 20:33:21.024047] [PID:1204893] [TID:1204893] [info] [:] [] [Main] Trading engine stopped
+[2025-11-17 20:33:21.025033] [PID:1204893] [TID:1204893] [info] [:] [] [HyperliquidAdapter] Disconnecting...
+[2025-11-17 20:33:21.102963] [PID:1204893] [TID:1204901] [error] [:] [] WebSocket error: Operation canceled [system:125 at /home/tensor/latentspeed/build/release/vcpkg_installed/x64-linux/include/boost/beast/websocket/impl/stream_impl.hpp:355:13 in function 'bool boost::beast::websocket::stream< <template-parameter-1-1>, <anonymous> >::impl_type::check_stop_now(boost::beast::error_code&)']
+[2025-11-17 20:33:21.103658] [PID:1204893] [TID:1204893] [info] [:] [] HyperliquidOrderBookDataSource stopped
+[2025-11-17 20:33:21.184223] [PID:1204893] [TID:1204902] [error] [:] [] User stream WebSocket error: Operation canceled [system:125 at /home/tensor/latentspeed/build/release/vcpkg_installed/x64-linux/include/boost/beast/websocket/impl/stream_impl.hpp:355:13 in function 'bool boost::beast::websocket::stream< <template-parameter-1-1>, <anonymous> >::impl_type::check_stop_now(boost::beast::error_code&)']
+[2025-11-17 20:33:21.184711] [PID:1204893] [TID:1204893] [info] [:] [] HyperliquidUserStreamDataSource stopped
+[2025-11-17 20:33:21.185288] [PID:1204893] [TID:1204893] [info] [:] [] HyperliquidPerpetualConnector stopped
+[2025-11-17 20:33:21.185324] [PID:1204893] [TID:1204893] [info] [:] [] [HyperliquidAdapter] Disconnected
+[2025-11-17 20:33:21.185329] [PID:1204893] [TID:1204893] [info] [:] [] [HyperliquidAdapter] Bridge adapter destroyed
+[2025-11-17 20:36:37.533946] [PID:1207141] [TID:1207141] [info] [:] [] === Latentspeed Trading Engine Service ===
+[2025-11-17 20:36:37.534065] [PID:1207141] [TID:1207141] [info] [:] [] Starting up...
+[2025-11-17 20:36:37.534097] [PID:1207141] [TID:1207141] [info] [:] [] [Main] Configuration Summary:
+[2025-11-17 20:36:37.534133] [PID:1207141] [TID:1207141] [info] [:] [] [Main]   Exchange: hyperliquid
+[2025-11-17 20:36:37.534160] [PID:1207141] [TID:1207141] [info] [:] [] [Main]   Trading Mode: DEMO/TESTNET
+[2025-11-17 20:36:37.534167] [PID:1207141] [TID:1207141] [info] [:] [] [Main]   API Key: 0x44...69be (masked)
+[2025-11-17 20:36:37.561831] [PID:1207141] [TID:1207141] [info] [:] [] [HFT-Engine] Memory locked to prevent paging
+[2025-11-17 20:36:37.561891] [PID:1207141] [TID:1207141] [info] [:] [] [HFT-Engine] Ultra-low latency trading engine initialized
+[2025-11-17 20:36:37.561897] [PID:1207141] [TID:1207141] [info] [:] [] [HFT-Engine] Memory pools pre-warmed with 128 entries
+[2025-11-17 20:36:37.561901] [PID:1207141] [TID:1207141] [info] [:] [] [HFT-Engine] Lock-free queues ready
+[2025-11-17 20:36:37.561905] [PID:1207141] [TID:1207141] [info] [:] [] [HFT-Engine] ZMQ endpoints: orders=tcp://127.0.0.1:5601, reports=tcp://127.0.0.1:5602
+[2025-11-17 20:36:37.561909] [PID:1207141] [TID:1207141] [info] [:] [] [HFT-Engine] Starting initialization...
+[2025-11-17 20:36:37.573154] [PID:1207141] [TID:1207141] [info] [:] [] [HFT-Engine] Initializing exchange adapters...
+[2025-11-17 20:36:37.573204] [PID:1207141] [TID:1207141] [info] [:] [] [HFT-Engine] Exchange: hyperliquid, Live trading: false, Testnet: true
+[2025-11-17 20:36:37.573210] [PID:1207141] [TID:1207141] [info] [:] [] [HyperliquidAdapter] Bridge adapter created
+[2025-11-17 20:36:37.573213] [PID:1207141] [TID:1207141] [info] [:] [] [HyperliquidAdapter] Initializing Hummingbot-pattern connector...
+[2025-11-17 20:36:37.573217] [PID:1207141] [TID:1207141] [info] [:] [] [HyperliquidAdapter] Testnet: true
+[2025-11-17 20:36:37.573221] [PID:1207141] [TID:1207141] [info] [:] [] [HyperliquidAdapter] Using Python signer: python3 tools/hl_signer_bridge.py
+[2025-11-17 20:36:37.573225] [PID:1207141] [TID:1207141] [info] [:] [] [HyperliquidAuth] Python exe: python3 (env_py=NULL)
+[2025-11-17 20:36:37.573255] [PID:1207141] [TID:1207141] [info] [:] [] [HyperliquidAuth] Script: tools/hl_signer_bridge.py
+[2025-11-17 20:36:37.573263] [PID:1207141] [TID:1207141] [info] [:] [] [HyperliquidAuth] Initialized for address: 0x44Fd91bEd5c87A4fFA222462798BB9d7Ef3669be with Python signer
+[2025-11-17 20:36:37.582736] [PID:1207141] [TID:1207141] [info] [:] [] [HyperliquidAdapter] Event forwarding configured
+[2025-11-17 20:36:39.062978] [PID:1207141] [TID:1207141] [info] [:] [] Fetched 199 trading pairs
+[2025-11-17 20:36:39.454323] [PID:1207141] [TID:1207141] [info] [:] [] [HL-REST] Response status: 200 OK
+[2025-11-17 20:36:39.454399] [PID:1207141] [TID:1207141] [info] [:] [] [HL-REST] Response body: {"universe":[{"szDecimals":2,"name":"SOL","maxLeverage":10,"marginTableId":10},{"szDecimals":2,"name":"APT","maxLeverage":3,"marginTableId":3},{"szDecimals":2,"name":"ATOM","maxLeverage":10,"marginTableId":55},{"szDecimals":5,"name":"BTC","maxLeverage":40,"marginTableId":54},{"szDecimals":4,"name":"ETH","maxLeverage":25,"marginTableId":53},{"szDecimals":1,"name":"MATIC","maxLeverage":50,"marginTableId":50,"isDelisted":true},{"szDecimals":3,"name":"BNB","maxLeverage":10,"marginTableId":10},{"szDecimals":2,"name":"AVAX","maxLeverage":10,"marginTableId":55},{"szDecimals":0,"name":"GMT","maxLeverage":2,"marginTableId":2},{"szDecimals":1,"name":"DYDX","maxLeverage":20,"marginTableId":20},{"szDecimals":1,"name":"APE","maxLeverage":5,"marginTableId":5},{"szDecimals":1,"name":"OP","maxLeverage":50,"marginTableId":50},{"szDecimals":0,"name":"kPEPE","maxLeverage":10,"marginTableId":10},{"szDecimals":1,"name":"ARB","maxLeverage":10,"marginTableId":55},{"szDecimals":0,"name":"RLB","maxLeverage":50
+[2025-11-17 20:36:39.455142] [PID:1207141] [TID:1207141] [info] [:] [] Fetched trading rules for 199 pairs
+[2025-11-17 20:36:39.455255] [PID:1207141] [TID:1207141] [info] [:] [] [HyperliquidAdapter] Initialization complete
+[2025-11-17 20:36:39.455267] [PID:1207141] [TID:1207141] [info] [:] [] [HyperliquidAdapter] Connecting to Hyperliquid...
+[2025-11-17 20:36:39.462368] [PID:1207141] [TID:1207141] [info] [:] [] HyperliquidOrderBookDataSource started
+[2025-11-17 20:36:39.471185] [PID:1207141] [TID:1207141] [info] [:] [] HyperliquidUserStreamDataSource started
+[2025-11-17 20:36:39.471245] [PID:1207141] [TID:1207141] [info] [:] [] HyperliquidPerpetualConnector started
+[2025-11-17 20:36:39.703121] [PID:1207141] [TID:1207153] [info] [:] [] Connected to Hyperliquid WebSocket at api.hyperliquid-testnet.xyz
+[2025-11-17 20:36:39.704122] [PID:1207141] [TID:1207154] [info] [:] [] Connected to Hyperliquid user stream WebSocket at api.hyperliquid-testnet.xyz
+[2025-11-17 20:36:39.721365] [PID:1207141] [TID:1207141] [info] [:] [] [HyperliquidAdapter] Connected successfully after 250 ms
+[2025-11-17 20:36:39.721426] [PID:1207141] [TID:1207141] [info] [:] [] [HFT-Engine] Hyperliquid connector connected successfully
+[2025-11-17 20:36:39.721435] [PID:1207141] [TID:1207141] [info] [:] [] [HFT-Engine] Exchange adapter initialized: hyperliquid (Hummingbot pattern)
+[2025-11-17 20:36:39.721444] [PID:1207141] [TID:1207141] [info] [:] [] [HyperliquidAdapter] Listed 0 open orders
+[2025-11-17 20:36:39.721449] [PID:1207141] [TID:1207141] [info] [:] [] [HyperliquidAdapter] Listed 0 open orders
+[2025-11-17 20:36:39.721453] [PID:1207141] [TID:1207141] [info] [:] [] [HyperliquidAdapter] Listed 0 open orders
+[2025-11-17 20:36:39.721456] [PID:1207141] [TID:1207141] [info] [:] [] [HyperliquidAdapter] Listed 0 open orders
+[2025-11-17 20:36:39.721492] [PID:1207141] [TID:1207141] [info] [:] [] [HFT-Engine] Rehydrated 0 open orders into local map after connect
+[2025-11-17 20:36:39.721526] [PID:1207141] [TID:1207141] [info] [:] [] [HFT-Engine] Initialization complete in 2159616331 ns
+[2025-11-17 20:36:39.721534] [PID:1207141] [TID:1207141] [info] [:] [] [HFT-Engine] Order pool capacity: 1024
+[2025-11-17 20:36:39.721539] [PID:1207141] [TID:1207141] [info] [:] [] [HFT-Engine] Report pool capacity: 2048
+[2025-11-17 20:36:39.721544] [PID:1207141] [TID:1207141] [info] [:] [] [HFT-Engine] Fill pool capacity: 2048
+[2025-11-17 20:36:39.728617] [PID:1207141] [TID:1207156] [info] [:] [] [HFT-Engine] HFT order receiver thread started on dedicated core
+[2025-11-17 20:36:39.734773] [PID:1207141] [TID:1207157] [info] [:] [] [HFT-Engine] HFT publisher thread started
+[2025-11-17 20:36:39.740708] [PID:1207141] [TID:1207158] [info] [:] [] [HFT-Engine] Stats monitoring thread started
+[2025-11-17 20:36:39.740880] [PID:1207141] [TID:1207141] [info] [:] [] [HFT-Engine] Ultra-low latency service started (RT scheduling + CPU affinity)
+[2025-11-17 20:36:39.740953] [PID:1207141] [TID:1207141] [info] [:] [] [Main] Trading engine started successfully
+[2025-11-17 20:36:39.740964] [PID:1207141] [TID:1207141] [info] [:] [] [Main] Listening for orders on tcp://127.0.0.1:5601
+[2025-11-17 20:36:39.741005] [PID:1207141] [TID:1207141] [info] [:] [] [Main] Publishing reports on tcp://127.0.0.1:5602
+[2025-11-17 20:36:39.741040] [PID:1207141] [TID:1207141] [info] [:] [] [Main] Press Ctrl+C to stop
+[2025-11-17 20:36:39.828701] [PID:1207141] [TID:1207156] [info] [:] [] [HFT-Utils] TSC frequency calibrated: 2894592261 Hz
+[2025-11-17 20:36:49.315318] [PID:1207141] [TID:1207156] [info] [:] [] [HyperliquidAdapter] Order placed: LS-1763383009315-0 (buy)
+[2025-11-17 20:36:49.317370] [PID:1207141] [TID:1207145] [info] [:] [] [OrderTracker] Order LS-1763383009315-0 state: PENDING_CREATE -> PENDING_SUBMIT
+[2025-11-17 20:36:49.317503] [PID:1207141] [TID:1207145] [info] [:] [] [HL] Converted cloid: LS-1763383009315-0 -> 0x085b13a7a4bfd4c8ed22a74c6d575f5d
+[2025-11-17 20:36:49.317562] [PID:1207141] [TID:1207145] [info] [:] [] [PythonHyperliquidSigner] Starting Python signer subprocess: python3 tools/hl_signer_bridge.py
+[2025-11-17 20:36:49.334543] [PID:1207141] [TID:1207145] [info] [:] [] [PythonHyperliquidSigner] Python user site-packages: /root/.local/lib/python3.10/site-packages
+[2025-11-17 20:36:49.347211] [PID:1207141] [TID:1207145] [info] [:] [] [PythonHyperliquidSigner] Subprocess started successfully (pid=1207202)
+[2025-11-17 20:36:49.740971] [PID:1207141] [TID:1207158] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 1, Rejected: 0, Avg latency: 4253028.00 ns, Min: 2108090 ns, Max: 2144938 ns, Queue usage: 0, Pool available: O:1022 R:2048 F:2048
+[2025-11-17 20:36:50.050572] [PID:1207141] [TID:1207145] [info] [:] [] [HL-REST] Request to /exchange: {"action":{"grouping":"na","orders":[{"a":4,"b":true,"c":"0x085b13a7a4bfd4c8ed22a74c6d575f5d","p":"1000000.0","r":false,"s":"0.001","t":{"limit":{"tif":"Ioc"}}}],"type":"order"},"nonce":1763383009317,"signature":{"r":"0x579644cfe504c1ebc4ead9c1e00061c57308cb3c2e18037957bbae13f92d5f5c","s":"0x7d55ae6f32a1f5dc628611c6ec404d09743b125895d78a61b083d7a6aaec396e","v":27}}
+[2025-11-17 20:36:50.334717] [PID:1207141] [TID:1207145] [info] [:] [] [HL-REST] Response status: 200 OK
+[2025-11-17 20:36:50.334777] [PID:1207141] [TID:1207145] [info] [:] [] [HL-REST] Response body: {"status":"err","response":"User or API Wallet 0xb8009aef2390609e361f777700f2e0beb4897b8c does not exist."}
+[2025-11-17 20:36:50.335033] [PID:1207141] [TID:1207145] [info] [:] [] [OrderTracker] Order LS-1763383009315-0 state: PENDING_SUBMIT -> FAILED
+[2025-11-17 20:36:50.335076] [PID:1207141] [TID:1207145] [error] [:] [] Order LS-1763383009315-0 failed: "User or API Wallet 0xb8009aef2390609e361f777700f2e0beb4897b8c does not exist."
+[2025-11-17 20:36:52.323413] [PID:1207141] [TID:1207156] [info] [:] [] [HyperliquidAdapter] Order placed: LS-1763383012323-1 (sell)
+[2025-11-17 20:36:52.323452] [PID:1207141] [TID:1207145] [info] [:] [] [OrderTracker] Order LS-1763383012323-1 state: PENDING_CREATE -> PENDING_SUBMIT
+[2025-11-17 20:36:52.323579] [PID:1207141] [TID:1207145] [info] [:] [] [HL] Converted cloid: LS-1763383012323-1 -> 0x885797babba32aa1748a9b045f43afd2
+[2025-11-17 20:36:52.334792] [PID:1207141] [TID:1207145] [info] [:] [] [HL-REST] Request to /exchange: {"action":{"grouping":"na","orders":[{"a":3,"b":false,"c":"0x885797babba32aa1748a9b045f43afd2","p":"100000.0","r":false,"s":"0.0001","t":{"limit":{"tif":"Gtc"}}}],"type":"order"},"nonce":1763383012323,"signature":{"r":"0x985cdff0f9bd391bc028d85f0c11963a2826b1cfd4745a0996d586c222b458df","s":"0x6dda7da1a7b1c7c62c2c2fdb2c3337f5ca20c413fc633ef7886fb73b21afe7b0","v":27}}
+[2025-11-17 20:36:52.565378] [PID:1207141] [TID:1207145] [info] [:] [] [HL-REST] Response status: 200 OK
+[2025-11-17 20:36:52.565430] [PID:1207141] [TID:1207145] [info] [:] [] [HL-REST] Response body: {"status":"err","response":"User or API Wallet 0x721c4526b9b2c63bc5fd0ec81f596b6763b4725e does not exist."}
+[2025-11-17 20:36:52.565693] [PID:1207141] [TID:1207145] [info] [:] [] [OrderTracker] Order LS-1763383012323-1 state: PENDING_SUBMIT -> FAILED
+[2025-11-17 20:36:52.565746] [PID:1207141] [TID:1207145] [error] [:] [] Order LS-1763383012323-1 failed: "User or API Wallet 0x721c4526b9b2c63bc5fd0ec81f596b6763b4725e does not exist."
+[2025-11-17 20:36:58.340161] [PID:1207141] [TID:1207156] [info] [:] [] [HyperliquidAdapter] Order placed: LS-1763383018340-2 (sell)
+[2025-11-17 20:36:58.340198] [PID:1207141] [TID:1207145] [info] [:] [] [OrderTracker] Order LS-1763383018340-2 state: PENDING_CREATE -> PENDING_SUBMIT
+[2025-11-17 20:36:58.340320] [PID:1207141] [TID:1207145] [info] [:] [] [HL] Converted cloid: LS-1763383018340-2 -> 0x40bf022ab3326b72132ebf6a68408020
+[2025-11-17 20:36:58.353716] [PID:1207141] [TID:1207145] [info] [:] [] [HL-REST] Request to /exchange: {"action":{"grouping":"na","orders":[{"a":4,"b":false,"c":"0x40bf022ab3326b72132ebf6a68408020","p":"0.01","r":false,"s":"0.001","t":{"limit":{"tif":"Ioc"}}}],"type":"order"},"nonce":1763383018340,"signature":{"r":"0xbfa9e47181619f75eeec1b09060237d9d890ec2fb637f35dfc97b9eab36aaf78","s":"0x6d45f2224c2de33d45ffe6a7cd87d9c24073711981e34de530776d8681e5ee34","v":28}}
+[2025-11-17 20:36:58.631921] [PID:1207141] [TID:1207145] [info] [:] [] [HL-REST] Response status: 200 OK
+[2025-11-17 20:36:58.631980] [PID:1207141] [TID:1207145] [info] [:] [] [HL-REST] Response body: {"status":"err","response":"User or API Wallet 0xc9454d3181f0c6963cbb9d971a2d8d80e2235f2e does not exist."}
+[2025-11-17 20:36:58.632173] [PID:1207141] [TID:1207145] [info] [:] [] [OrderTracker] Order LS-1763383018340-2 state: PENDING_SUBMIT -> FAILED
+[2025-11-17 20:36:58.632181] [PID:1207141] [TID:1207145] [error] [:] [] Order LS-1763383018340-2 failed: "User or API Wallet 0xc9454d3181f0c6963cbb9d971a2d8d80e2235f2e does not exist."
+[2025-11-17 20:36:59.741189] [PID:1207141] [TID:1207158] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 1331038.25 ns, Min: 19927 ns, Max: 2144938 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:37:09.741408] [PID:1207141] [TID:1207158] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 1331038.25 ns, Min: 19927 ns, Max: 2144938 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:37:19.741591] [PID:1207141] [TID:1207158] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 1331038.25 ns, Min: 19927 ns, Max: 2144938 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:37:27.906995] [PID:1207141] [TID:1207141] [info] [:] [] 
+[Main] Received signal 2, shutting down...
+[2025-11-17 20:37:27.907071] [PID:1207141] [TID:1207156] [info] [:] [] [HFT-Engine] HFT order receiver thread stopped
+[2025-11-17 20:37:27.907071] [PID:1207141] [TID:1207157] [info] [:] [] [HFT-Engine] HFT publisher thread stopped
+[2025-11-17 20:37:29.741800] [PID:1207141] [TID:1207158] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 1331038.25 ns, Min: 19927 ns, Max: 2144938 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:37:29.741872] [PID:1207141] [TID:1207158] [info] [:] [] [HFT-Engine] Stats monitoring thread stopped
+[2025-11-17 20:37:29.741989] [PID:1207141] [TID:1207141] [info] [:] [] [HFT-Engine] Final stats - Orders processed: 4, Avg latency: 1331038.25 ns
+[2025-11-17 20:37:29.742025] [PID:1207141] [TID:1207141] [info] [:] [] [HFT-Engine] Ultra-low latency service stopped
+[2025-11-17 20:37:30.582030] [PID:1207141] [TID:1207141] [info] [:] [] [Main] Trading engine stopped
+[2025-11-17 20:37:30.582909] [PID:1207141] [TID:1207141] [info] [:] [] [HyperliquidAdapter] Disconnecting...
+[2025-11-17 20:37:30.661089] [PID:1207141] [TID:1207153] [error] [:] [] WebSocket error: Operation canceled [system:125 at /home/tensor/latentspeed/build/release/vcpkg_installed/x64-linux/include/boost/beast/websocket/impl/stream_impl.hpp:355:13 in function 'bool boost::beast::websocket::stream< <template-parameter-1-1>, <anonymous> >::impl_type::check_stop_now(boost::beast::error_code&)']
+[2025-11-17 20:37:30.661706] [PID:1207141] [TID:1207141] [info] [:] [] HyperliquidOrderBookDataSource stopped
+[2025-11-17 20:37:30.737317] [PID:1207141] [TID:1207154] [error] [:] [] User stream WebSocket error: Operation canceled [system:125 at /home/tensor/latentspeed/build/release/vcpkg_installed/x64-linux/include/boost/beast/websocket/impl/stream_impl.hpp:355:13 in function 'bool boost::beast::websocket::stream< <template-parameter-1-1>, <anonymous> >::impl_type::check_stop_now(boost::beast::error_code&)']
+[2025-11-17 20:37:30.737938] [PID:1207141] [TID:1207141] [info] [:] [] HyperliquidUserStreamDataSource stopped
+[2025-11-17 20:37:30.738942] [PID:1207141] [TID:1207141] [info] [:] [] HyperliquidPerpetualConnector stopped
+[2025-11-17 20:37:30.739003] [PID:1207141] [TID:1207141] [info] [:] [] [HyperliquidAdapter] Disconnected
+[2025-11-17 20:37:30.739007] [PID:1207141] [TID:1207141] [info] [:] [] [HyperliquidAdapter] Bridge adapter destroyed
+[2025-11-17 20:37:49.622687] [PID:1223052] [TID:1223052] [info] [:] [] === Latentspeed Trading Engine Service ===
+[2025-11-17 20:37:49.622876] [PID:1223052] [TID:1223052] [info] [:] [] Starting up...
+[2025-11-17 20:37:49.622889] [PID:1223052] [TID:1223052] [info] [:] [] [Main] Configuration Summary:
+[2025-11-17 20:37:49.622912] [PID:1223052] [TID:1223052] [info] [:] [] [Main]   Exchange: hyperliquid
+[2025-11-17 20:37:49.622994] [PID:1223052] [TID:1223052] [info] [:] [] [Main]   Trading Mode: DEMO/TESTNET
+[2025-11-17 20:37:49.623016] [PID:1223052] [TID:1223052] [info] [:] [] [Main]   API Key: 0x44...69be (masked)
+[2025-11-17 20:37:49.698009] [PID:1223052] [TID:1223052] [info] [:] [] [HFT-Engine] Memory locked to prevent paging
+[2025-11-17 20:37:49.698118] [PID:1223052] [TID:1223052] [info] [:] [] [HFT-Engine] Ultra-low latency trading engine initialized
+[2025-11-17 20:37:49.698131] [PID:1223052] [TID:1223052] [info] [:] [] [HFT-Engine] Memory pools pre-warmed with 128 entries
+[2025-11-17 20:37:49.698139] [PID:1223052] [TID:1223052] [info] [:] [] [HFT-Engine] Lock-free queues ready
+[2025-11-17 20:37:49.698147] [PID:1223052] [TID:1223052] [info] [:] [] [HFT-Engine] ZMQ endpoints: orders=tcp://127.0.0.1:5601, reports=tcp://127.0.0.1:5602
+[2025-11-17 20:37:49.698156] [PID:1223052] [TID:1223052] [info] [:] [] [HFT-Engine] Starting initialization...
+[2025-11-17 20:37:49.726356] [PID:1223052] [TID:1223052] [info] [:] [] [HFT-Engine] Initializing exchange adapters...
+[2025-11-17 20:37:49.726483] [PID:1223052] [TID:1223052] [info] [:] [] [HFT-Engine] Exchange: hyperliquid, Live trading: false, Testnet: true
+[2025-11-17 20:37:49.726575] [PID:1223052] [TID:1223052] [info] [:] [] [HyperliquidAdapter] Bridge adapter created
+[2025-11-17 20:37:49.726656] [PID:1223052] [TID:1223052] [info] [:] [] [HyperliquidAdapter] Initializing Hummingbot-pattern connector...
+[2025-11-17 20:37:49.726732] [PID:1223052] [TID:1223052] [info] [:] [] [HyperliquidAdapter] Testnet: true
+[2025-11-17 20:37:49.726749] [PID:1223052] [TID:1223052] [info] [:] [] [HyperliquidAdapter] Using Python signer: python3 tools/hl_signer_bridge.py
+[2025-11-17 20:37:49.726832] [PID:1223052] [TID:1223052] [info] [:] [] [HyperliquidAuth] Python exe: python3 (env_py=NULL)
+[2025-11-17 20:37:49.726911] [PID:1223052] [TID:1223052] [info] [:] [] [HyperliquidAuth] Script: tools/hl_signer_bridge.py
+[2025-11-17 20:37:49.726925] [PID:1223052] [TID:1223052] [info] [:] [] [HyperliquidAuth] Initialized for address: 0x44Fd91bEd5c87A4fFA222462798BB9d7Ef3669be with Python signer
+[2025-11-17 20:37:49.753870] [PID:1223052] [TID:1223052] [info] [:] [] [HyperliquidAdapter] Event forwarding configured
+[2025-11-17 20:37:51.256129] [PID:1223052] [TID:1223052] [info] [:] [] Fetched 199 trading pairs
+[2025-11-17 20:37:51.706535] [PID:1223052] [TID:1223052] [info] [:] [] [HL-REST] Response status: 200 OK
+[2025-11-17 20:37:51.706669] [PID:1223052] [TID:1223052] [info] [:] [] [HL-REST] Response body: {"universe":[{"szDecimals":2,"name":"SOL","maxLeverage":10,"marginTableId":10},{"szDecimals":2,"name":"APT","maxLeverage":3,"marginTableId":3},{"szDecimals":2,"name":"ATOM","maxLeverage":10,"marginTableId":55},{"szDecimals":5,"name":"BTC","maxLeverage":40,"marginTableId":54},{"szDecimals":4,"name":"ETH","maxLeverage":25,"marginTableId":53},{"szDecimals":1,"name":"MATIC","maxLeverage":50,"marginTableId":50,"isDelisted":true},{"szDecimals":3,"name":"BNB","maxLeverage":10,"marginTableId":10},{"szDecimals":2,"name":"AVAX","maxLeverage":10,"marginTableId":55},{"szDecimals":0,"name":"GMT","maxLeverage":2,"marginTableId":2},{"szDecimals":1,"name":"DYDX","maxLeverage":20,"marginTableId":20},{"szDecimals":1,"name":"APE","maxLeverage":5,"marginTableId":5},{"szDecimals":1,"name":"OP","maxLeverage":50,"marginTableId":50},{"szDecimals":0,"name":"kPEPE","maxLeverage":10,"marginTableId":10},{"szDecimals":1,"name":"ARB","maxLeverage":10,"marginTableId":55},{"szDecimals":0,"name":"RLB","maxLeverage":50
+[2025-11-17 20:37:51.708254] [PID:1223052] [TID:1223052] [info] [:] [] Fetched trading rules for 199 pairs
+[2025-11-17 20:37:51.708534] [PID:1223052] [TID:1223052] [info] [:] [] [HyperliquidAdapter] Initialization complete
+[2025-11-17 20:37:51.708739] [PID:1223052] [TID:1223052] [info] [:] [] [HyperliquidAdapter] Connecting to Hyperliquid...
+[2025-11-17 20:37:51.722695] [PID:1223052] [TID:1223052] [info] [:] [] HyperliquidOrderBookDataSource started
+[2025-11-17 20:37:51.736531] [PID:1223052] [TID:1223052] [info] [:] [] HyperliquidUserStreamDataSource started
+[2025-11-17 20:37:51.736587] [PID:1223052] [TID:1223052] [info] [:] [] HyperliquidPerpetualConnector started
+[2025-11-17 20:37:51.957587] [PID:1223052] [TID:1225403] [info] [:] [] Connected to Hyperliquid WebSocket at api.hyperliquid-testnet.xyz
+[2025-11-17 20:37:52.109488] [PID:1223052] [TID:1225421] [info] [:] [] Connected to Hyperliquid user stream WebSocket at api.hyperliquid-testnet.xyz
+[2025-11-17 20:37:52.486934] [PID:1223052] [TID:1223052] [info] [:] [] [HyperliquidAdapter] Connected successfully after 750 ms
+[2025-11-17 20:37:52.487052] [PID:1223052] [TID:1223052] [info] [:] [] [HFT-Engine] Hyperliquid connector connected successfully
+[2025-11-17 20:37:52.487070] [PID:1223052] [TID:1223052] [info] [:] [] [HFT-Engine] Exchange adapter initialized: hyperliquid (Hummingbot pattern)
+[2025-11-17 20:37:52.487225] [PID:1223052] [TID:1223052] [info] [:] [] [HyperliquidAdapter] Listed 0 open orders
+[2025-11-17 20:37:52.487285] [PID:1223052] [TID:1223052] [info] [:] [] [HyperliquidAdapter] Listed 0 open orders
+[2025-11-17 20:37:52.487295] [PID:1223052] [TID:1223052] [info] [:] [] [HyperliquidAdapter] Listed 0 open orders
+[2025-11-17 20:37:52.487354] [PID:1223052] [TID:1223052] [info] [:] [] [HyperliquidAdapter] Listed 0 open orders
+[2025-11-17 20:37:52.487407] [PID:1223052] [TID:1223052] [info] [:] [] [HFT-Engine] Rehydrated 0 open orders into local map after connect
+[2025-11-17 20:37:52.487420] [PID:1223052] [TID:1223052] [info] [:] [] [HFT-Engine] Initialization complete in 2789263351 ns
+[2025-11-17 20:37:52.487483] [PID:1223052] [TID:1223052] [info] [:] [] [HFT-Engine] Order pool capacity: 1024
+[2025-11-17 20:37:52.487501] [PID:1223052] [TID:1223052] [info] [:] [] [HFT-Engine] Report pool capacity: 2048
+[2025-11-17 20:37:52.487521] [PID:1223052] [TID:1223052] [info] [:] [] [HFT-Engine] Fill pool capacity: 2048
+[2025-11-17 20:37:52.497381] [PID:1223052] [TID:1226347] [info] [:] [] [HFT-Engine] HFT order receiver thread started on dedicated core
+[2025-11-17 20:37:52.506629] [PID:1223052] [TID:1226367] [info] [:] [] [HFT-Engine] HFT publisher thread started
+[2025-11-17 20:37:52.518072] [PID:1223052] [TID:1226376] [info] [:] [] [HFT-Engine] Stats monitoring thread started
+[2025-11-17 20:37:52.518314] [PID:1223052] [TID:1223052] [info] [:] [] [HFT-Engine] Ultra-low latency service started (RT scheduling + CPU affinity)
+[2025-11-17 20:37:52.518462] [PID:1223052] [TID:1223052] [info] [:] [] [Main] Trading engine started successfully
+[2025-11-17 20:37:52.518539] [PID:1223052] [TID:1223052] [info] [:] [] [Main] Listening for orders on tcp://127.0.0.1:5601
+[2025-11-17 20:37:52.518604] [PID:1223052] [TID:1223052] [info] [:] [] [Main] Publishing reports on tcp://127.0.0.1:5602
+[2025-11-17 20:37:52.518615] [PID:1223052] [TID:1223052] [info] [:] [] [Main] Press Ctrl+C to stop
+[2025-11-17 20:37:52.597519] [PID:1223052] [TID:1226347] [info] [:] [] [HFT-Utils] TSC frequency calibrated: 2894600389 Hz
+[2025-11-17 20:37:59.219160] [PID:1223052] [TID:1226347] [info] [:] [] [HyperliquidAdapter] Order placed: LS-1763383079219-0 (buy)
+[2025-11-17 20:37:59.223000] [PID:1223052] [TID:1223179] [info] [:] [] [OrderTracker] Order LS-1763383079219-0 state: PENDING_CREATE -> PENDING_SUBMIT
+[2025-11-17 20:37:59.223177] [PID:1223052] [TID:1223179] [info] [:] [] [HL] Converted cloid: LS-1763383079219-0 -> 0x1cfc1f83f2758576baa842613c78de8f
+[2025-11-17 20:37:59.223241] [PID:1223052] [TID:1223179] [info] [:] [] [PythonHyperliquidSigner] Starting Python signer subprocess: python3 tools/hl_signer_bridge.py
+[2025-11-17 20:37:59.259178] [PID:1223052] [TID:1223179] [info] [:] [] [PythonHyperliquidSigner] Python user site-packages: /root/.local/lib/python3.10/site-packages
+[2025-11-17 20:37:59.286689] [PID:1223052] [TID:1223179] [info] [:] [] [PythonHyperliquidSigner] Subprocess started successfully (pid=1233385)
+[2025-11-17 20:38:00.844253] [PID:1223052] [TID:1223179] [info] [:] [] [HL-REST] Request to /exchange: {"action":{"grouping":"na","orders":[{"a":4,"b":true,"c":"0x1cfc1f83f2758576baa842613c78de8f","p":"1000000.0","r":false,"s":"0.001","t":{"limit":{"tif":"Ioc"}}}],"type":"order"},"nonce":1763383079223,"signature":{"r":"0x1f577fe565615cc039b18173201e5f93f79a372d95c781fda4c1b3f76d5e32dd","s":"0x2bbea8fe34102c0d030c60934678520c84c6226ca48d3efdcfc99b4358352d83","v":27}}
+[2025-11-17 20:38:01.127939] [PID:1223052] [TID:1223179] [info] [:] [] [HL-REST] Response status: 200 OK
+[2025-11-17 20:38:01.128083] [PID:1223052] [TID:1223179] [info] [:] [] [HL-REST] Response body: {"status":"err","response":"User or API Wallet 0x0ce3471c94f1bd79cbff8a3a5a284263e182e244 does not exist."}
+[2025-11-17 20:38:01.128535] [PID:1223052] [TID:1223179] [info] [:] [] [OrderTracker] Order LS-1763383079219-0 state: PENDING_SUBMIT -> FAILED
+[2025-11-17 20:38:01.128629] [PID:1223052] [TID:1223179] [error] [:] [] Order LS-1763383079219-0 failed: "User or API Wallet 0x0ce3471c94f1bd79cbff8a3a5a284263e182e244 does not exist."
+[2025-11-17 20:38:02.230401] [PID:1223052] [TID:1226347] [info] [:] [] [HyperliquidAdapter] Order placed: LS-1763383082230-1 (sell)
+[2025-11-17 20:38:02.230454] [PID:1223052] [TID:1223179] [info] [:] [] [OrderTracker] Order LS-1763383082230-1 state: PENDING_CREATE -> PENDING_SUBMIT
+[2025-11-17 20:38:02.230520] [PID:1223052] [TID:1223179] [info] [:] [] [HL] Converted cloid: LS-1763383082230-1 -> 0x5aeb7e8f76b4dce6ea558b76a895d7fa
+[2025-11-17 20:38:02.269651] [PID:1223052] [TID:1223179] [info] [:] [] [HL-REST] Request to /exchange: {"action":{"grouping":"na","orders":[{"a":3,"b":false,"c":"0x5aeb7e8f76b4dce6ea558b76a895d7fa","p":"100000.0","r":false,"s":"0.0001","t":{"limit":{"tif":"Gtc"}}}],"type":"order"},"nonce":1763383082230,"signature":{"r":"0xff515f10439aff64b711b7c34c7fbcad65412d418a0cf1f22c0cd4c457a88f80","s":"0x6390a15d7d6b510d8ec1bffd21be1b7f263643993f99fcf6ddb66f0c3cc9d23e","v":27}}
+[2025-11-17 20:38:02.503908] [PID:1223052] [TID:1223179] [info] [:] [] [HL-REST] Response status: 200 OK
+[2025-11-17 20:38:02.504031] [PID:1223052] [TID:1223179] [info] [:] [] [HL-REST] Response body: {"status":"err","response":"User or API Wallet 0x499d6bc8f02e305b87c01859bc8a123402af0b30 does not exist."}
+[2025-11-17 20:38:02.504613] [PID:1223052] [TID:1223179] [info] [:] [] [OrderTracker] Order LS-1763383082230-1 state: PENDING_SUBMIT -> FAILED
+[2025-11-17 20:38:02.504742] [PID:1223052] [TID:1223179] [error] [:] [] Order LS-1763383082230-1 failed: "User or API Wallet 0x499d6bc8f02e305b87c01859bc8a123402af0b30 does not exist."
+[2025-11-17 20:38:02.518389] [PID:1223052] [TID:1226376] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 2, Rejected: 0, Avg latency: 4192566.50 ns, Min: 280091 ns, Max: 3907536 ns, Queue usage: 0, Pool available: O:1020 R:2048 F:2048
+[2025-11-17 20:38:08.254630] [PID:1223052] [TID:1226347] [info] [:] [] [HyperliquidAdapter] Order placed: LS-1763383088254-2 (sell)
+[2025-11-17 20:38:08.254775] [PID:1223052] [TID:1223179] [info] [:] [] [OrderTracker] Order LS-1763383088254-2 state: PENDING_CREATE -> PENDING_SUBMIT
+[2025-11-17 20:38:08.254953] [PID:1223052] [TID:1223179] [info] [:] [] [HL] Converted cloid: LS-1763383088254-2 -> 0x7830ea5297539fa2158dd7a1e02d9e81
+[2025-11-17 20:38:08.278863] [PID:1223052] [TID:1223179] [info] [:] [] [HL-REST] Request to /exchange: {"action":{"grouping":"na","orders":[{"a":4,"b":false,"c":"0x7830ea5297539fa2158dd7a1e02d9e81","p":"0.01","r":false,"s":"0.001","t":{"limit":{"tif":"Ioc"}}}],"type":"order"},"nonce":1763383088254,"signature":{"r":"0x705d4173ccd1e78bdb999e46a0a579c9978ed0ee35cdbd0b5b503f5a74148ef8","s":"0x246943e0cb188f38425a2a268ceb3a9629a97aa751509de5f66313d3d8d0812d","v":28}}
+[2025-11-17 20:38:08.584688] [PID:1223052] [TID:1223179] [info] [:] [] [HL-REST] Response status: 200 OK
+[2025-11-17 20:38:08.584783] [PID:1223052] [TID:1223179] [info] [:] [] [HL-REST] Response body: {"status":"err","response":"User or API Wallet 0xfc74892bb98b5fb32337ff7d4c19bc945a4b39e8 does not exist."}
+[2025-11-17 20:38:08.585205] [PID:1223052] [TID:1223179] [info] [:] [] [OrderTracker] Order LS-1763383088254-2 state: PENDING_SUBMIT -> FAILED
+[2025-11-17 20:38:08.585300] [PID:1223052] [TID:1223179] [error] [:] [] Order LS-1763383088254-2 failed: "User or API Wallet 0xfc74892bb98b5fb32337ff7d4c19bc945a4b39e8 does not exist."
+[2025-11-17 20:38:12.519663] [PID:1223052] [TID:1226376] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 2336027.00 ns, Min: 33662 ns, Max: 3907536 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:38:22.519979] [PID:1223052] [TID:1226376] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 2336027.00 ns, Min: 33662 ns, Max: 3907536 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:38:32.520326] [PID:1223052] [TID:1226376] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 2336027.00 ns, Min: 33662 ns, Max: 3907536 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:38:42.520687] [PID:1223052] [TID:1226376] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 2336027.00 ns, Min: 33662 ns, Max: 3907536 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:38:51.956240] [PID:1223052] [TID:1225403] [error] [:] [] WebSocket error: End of file [asio.misc:2]
+[2025-11-17 20:38:51.956394] [PID:1223052] [TID:1225403] [info] [:] [] Reconnecting in 5 seconds...
+[2025-11-17 20:38:52.109603] [PID:1223052] [TID:1225421] [error] [:] [] User stream WebSocket error: End of file [asio.misc:2]
+[2025-11-17 20:38:52.109737] [PID:1223052] [TID:1225421] [info] [:] [] Reconnecting user stream in 5 seconds...
+[2025-11-17 20:38:52.521055] [PID:1223052] [TID:1226376] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 2336027.00 ns, Min: 33662 ns, Max: 3907536 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:38:58.329745] [PID:1223052] [TID:1225421] [info] [:] [] Connected to Hyperliquid user stream WebSocket at api.hyperliquid-testnet.xyz
+[2025-11-17 20:38:58.346310] [PID:1223052] [TID:1225403] [info] [:] [] Connected to Hyperliquid WebSocket at api.hyperliquid-testnet.xyz
+[2025-11-17 20:39:02.521306] [PID:1223052] [TID:1226376] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 2336027.00 ns, Min: 33662 ns, Max: 3907536 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:39:12.521516] [PID:1223052] [TID:1226376] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 2336027.00 ns, Min: 33662 ns, Max: 3907536 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:39:22.521722] [PID:1223052] [TID:1226376] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 2336027.00 ns, Min: 33662 ns, Max: 3907536 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:39:32.521941] [PID:1223052] [TID:1226376] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 2336027.00 ns, Min: 33662 ns, Max: 3907536 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:39:42.522129] [PID:1223052] [TID:1226376] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 2336027.00 ns, Min: 33662 ns, Max: 3907536 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:39:52.522324] [PID:1223052] [TID:1226376] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 2336027.00 ns, Min: 33662 ns, Max: 3907536 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:39:58.329072] [PID:1223052] [TID:1225421] [error] [:] [] User stream WebSocket error: End of file [asio.misc:2]
+[2025-11-17 20:39:58.329160] [PID:1223052] [TID:1225421] [info] [:] [] Reconnecting user stream in 5 seconds...
+[2025-11-17 20:39:58.345380] [PID:1223052] [TID:1225403] [error] [:] [] WebSocket error: End of file [asio.misc:2]
+[2025-11-17 20:39:58.345453] [PID:1223052] [TID:1225403] [info] [:] [] Reconnecting in 5 seconds...
+[2025-11-17 20:40:02.522559] [PID:1223052] [TID:1226376] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 2336027.00 ns, Min: 33662 ns, Max: 3907536 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:40:04.702484] [PID:1223052] [TID:1225403] [info] [:] [] Connected to Hyperliquid WebSocket at api.hyperliquid-testnet.xyz
+[2025-11-17 20:40:04.719678] [PID:1223052] [TID:1225421] [info] [:] [] Connected to Hyperliquid user stream WebSocket at api.hyperliquid-testnet.xyz
+[2025-11-17 20:40:12.522752] [PID:1223052] [TID:1226376] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 2336027.00 ns, Min: 33662 ns, Max: 3907536 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:40:22.522988] [PID:1223052] [TID:1226376] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 2336027.00 ns, Min: 33662 ns, Max: 3907536 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:40:32.523189] [PID:1223052] [TID:1226376] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 2336027.00 ns, Min: 33662 ns, Max: 3907536 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:40:42.523372] [PID:1223052] [TID:1226376] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 2336027.00 ns, Min: 33662 ns, Max: 3907536 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:40:52.523607] [PID:1223052] [TID:1226376] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 2336027.00 ns, Min: 33662 ns, Max: 3907536 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:41:02.523911] [PID:1223052] [TID:1226376] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 2336027.00 ns, Min: 33662 ns, Max: 3907536 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:41:04.701781] [PID:1223052] [TID:1225403] [error] [:] [] WebSocket error: End of file [asio.misc:2]
+[2025-11-17 20:41:04.701881] [PID:1223052] [TID:1225403] [info] [:] [] Reconnecting in 5 seconds...
+[2025-11-17 20:41:04.719033] [PID:1223052] [TID:1225421] [error] [:] [] User stream WebSocket error: End of file [asio.misc:2]
+[2025-11-17 20:41:04.719142] [PID:1223052] [TID:1225421] [info] [:] [] Reconnecting user stream in 5 seconds...
+[2025-11-17 20:41:11.127487] [PID:1223052] [TID:1225421] [info] [:] [] Connected to Hyperliquid user stream WebSocket at api.hyperliquid-testnet.xyz
+[2025-11-17 20:41:11.136013] [PID:1223052] [TID:1225403] [info] [:] [] Connected to Hyperliquid WebSocket at api.hyperliquid-testnet.xyz
+[2025-11-17 20:41:12.524335] [PID:1223052] [TID:1226376] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 2336027.00 ns, Min: 33662 ns, Max: 3907536 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:41:22.524676] [PID:1223052] [TID:1226376] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 2336027.00 ns, Min: 33662 ns, Max: 3907536 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:41:32.525013] [PID:1223052] [TID:1226376] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 2336027.00 ns, Min: 33662 ns, Max: 3907536 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:41:42.525296] [PID:1223052] [TID:1226376] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 2336027.00 ns, Min: 33662 ns, Max: 3907536 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:41:52.525598] [PID:1223052] [TID:1226376] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 2336027.00 ns, Min: 33662 ns, Max: 3907536 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:42:02.525910] [PID:1223052] [TID:1226376] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 2336027.00 ns, Min: 33662 ns, Max: 3907536 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:42:11.125892] [PID:1223052] [TID:1225421] [error] [:] [] User stream WebSocket error: End of file [asio.misc:2]
+[2025-11-17 20:42:11.126030] [PID:1223052] [TID:1225421] [info] [:] [] Reconnecting user stream in 5 seconds...
+[2025-11-17 20:42:11.134549] [PID:1223052] [TID:1225403] [error] [:] [] WebSocket error: End of file [asio.misc:2]
+[2025-11-17 20:42:11.134684] [PID:1223052] [TID:1225403] [info] [:] [] Reconnecting in 5 seconds...
+[2025-11-17 20:42:12.526261] [PID:1223052] [TID:1226376] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 2336027.00 ns, Min: 33662 ns, Max: 3907536 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:42:16.531613] [PID:1223052] [TID:1225421] [info] [:] [] Connected to Hyperliquid user stream WebSocket at api.hyperliquid-testnet.xyz
+[2025-11-17 20:42:16.531613] [PID:1223052] [TID:1225403] [info] [:] [] Connected to Hyperliquid WebSocket at api.hyperliquid-testnet.xyz
+[2025-11-17 20:42:22.526698] [PID:1223052] [TID:1226376] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 2336027.00 ns, Min: 33662 ns, Max: 3907536 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:42:32.527000] [PID:1223052] [TID:1226376] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 2336027.00 ns, Min: 33662 ns, Max: 3907536 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:42:42.527412] [PID:1223052] [TID:1226376] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 2336027.00 ns, Min: 33662 ns, Max: 3907536 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:42:52.527780] [PID:1223052] [TID:1226376] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 2336027.00 ns, Min: 33662 ns, Max: 3907536 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:43:02.528075] [PID:1223052] [TID:1226376] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 2336027.00 ns, Min: 33662 ns, Max: 3907536 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:43:12.528343] [PID:1223052] [TID:1226376] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 2336027.00 ns, Min: 33662 ns, Max: 3907536 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:43:16.535787] [PID:1223052] [TID:1225403] [error] [:] [] WebSocket error: End of file [asio.misc:2]
+[2025-11-17 20:43:16.535990] [PID:1223052] [TID:1225403] [info] [:] [] Reconnecting in 5 seconds...
+[2025-11-17 20:43:16.535787] [PID:1223052] [TID:1225421] [error] [:] [] User stream WebSocket error: End of file [asio.misc:2]
+[2025-11-17 20:43:16.536148] [PID:1223052] [TID:1225421] [info] [:] [] Reconnecting user stream in 5 seconds...
+[2025-11-17 20:43:22.528619] [PID:1223052] [TID:1226376] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 2336027.00 ns, Min: 33662 ns, Max: 3907536 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:43:22.960396] [PID:1223052] [TID:1225421] [info] [:] [] Connected to Hyperliquid user stream WebSocket at api.hyperliquid-testnet.xyz
+[2025-11-17 20:43:22.970832] [PID:1223052] [TID:1225403] [info] [:] [] Connected to Hyperliquid WebSocket at api.hyperliquid-testnet.xyz
+[2025-11-17 20:43:32.528923] [PID:1223052] [TID:1226376] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 2336027.00 ns, Min: 33662 ns, Max: 3907536 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:43:42.529235] [PID:1223052] [TID:1226376] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 2336027.00 ns, Min: 33662 ns, Max: 3907536 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:43:49.012855] [PID:1223052] [TID:1223052] [info] [:] [] 
+[Main] Received signal 2, shutting down...
+[2025-11-17 20:43:49.012931] [PID:1223052] [TID:1226367] [info] [:] [] [HFT-Engine] HFT publisher thread stopped
+[2025-11-17 20:43:49.016309] [PID:1223052] [TID:1226347] [info] [:] [] [HFT-Engine] HFT order receiver thread stopped
+[2025-11-17 20:43:52.529535] [PID:1223052] [TID:1226376] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 2336027.00 ns, Min: 33662 ns, Max: 3907536 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:43:52.529681] [PID:1223052] [TID:1226376] [info] [:] [] [HFT-Engine] Stats monitoring thread stopped
+[2025-11-17 20:43:52.529848] [PID:1223052] [TID:1223052] [info] [:] [] [HFT-Engine] Final stats - Orders processed: 4, Avg latency: 2336027.00 ns
+[2025-11-17 20:43:52.529942] [PID:1223052] [TID:1223052] [info] [:] [] [HFT-Engine] Ultra-low latency service stopped
+[2025-11-17 20:43:53.091370] [PID:1223052] [TID:1223052] [info] [:] [] [Main] Trading engine stopped
+[2025-11-17 20:43:53.093981] [PID:1223052] [TID:1223052] [info] [:] [] [HyperliquidAdapter] Disconnecting...
+[2025-11-17 20:43:53.171243] [PID:1223052] [TID:1225403] [error] [:] [] WebSocket error: End of file [asio.misc:2]
+[2025-11-17 20:43:53.173534] [PID:1223052] [TID:1223052] [info] [:] [] HyperliquidOrderBookDataSource stopped
+[2025-11-17 20:43:53.252027] [PID:1223052] [TID:1225421] [error] [:] [] User stream WebSocket error: Operation canceled [system:125 at /home/tensor/latentspeed/build/release/vcpkg_installed/x64-linux/include/boost/beast/websocket/impl/stream_impl.hpp:355:13 in function 'bool boost::beast::websocket::stream< <template-parameter-1-1>, <anonymous> >::impl_type::check_stop_now(boost::beast::error_code&)']
+[2025-11-17 20:43:53.253976] [PID:1223052] [TID:1223052] [info] [:] [] HyperliquidUserStreamDataSource stopped
+[2025-11-17 20:43:53.255994] [PID:1223052] [TID:1223052] [info] [:] [] HyperliquidPerpetualConnector stopped
+[2025-11-17 20:43:53.256152] [PID:1223052] [TID:1223052] [info] [:] [] [HyperliquidAdapter] Disconnected
+[2025-11-17 20:43:53.256225] [PID:1223052] [TID:1223052] [info] [:] [] [HyperliquidAdapter] Bridge adapter destroyed
+[2025-11-17 20:44:07.848189] [PID:1583107] [TID:1583107] [info] [:] [] === Latentspeed Trading Engine Service ===
+[2025-11-17 20:44:07.848425] [PID:1583107] [TID:1583107] [info] [:] [] Starting up...
+[2025-11-17 20:44:07.848494] [PID:1583107] [TID:1583107] [info] [:] [] [Main] Configuration Summary:
+[2025-11-17 20:44:07.848600] [PID:1583107] [TID:1583107] [info] [:] [] [Main]   Exchange: hyperliquid
+[2025-11-17 20:44:07.848691] [PID:1583107] [TID:1583107] [info] [:] [] [Main]   Trading Mode: DEMO/TESTNET
+[2025-11-17 20:44:07.848706] [PID:1583107] [TID:1583107] [info] [:] [] [Main]   API Key: 0x44...69be (masked)
+[2025-11-17 20:44:07.945102] [PID:1583107] [TID:1583107] [info] [:] [] [HFT-Engine] Memory locked to prevent paging
+[2025-11-17 20:44:07.945239] [PID:1583107] [TID:1583107] [info] [:] [] [HFT-Engine] Ultra-low latency trading engine initialized
+[2025-11-17 20:44:07.945378] [PID:1583107] [TID:1583107] [info] [:] [] [HFT-Engine] Memory pools pre-warmed with 128 entries
+[2025-11-17 20:44:07.945447] [PID:1583107] [TID:1583107] [info] [:] [] [HFT-Engine] Lock-free queues ready
+[2025-11-17 20:44:07.945458] [PID:1583107] [TID:1583107] [info] [:] [] [HFT-Engine] ZMQ endpoints: orders=tcp://127.0.0.1:5601, reports=tcp://127.0.0.1:5602
+[2025-11-17 20:44:07.945474] [PID:1583107] [TID:1583107] [info] [:] [] [HFT-Engine] Starting initialization...
+[2025-11-17 20:44:07.974175] [PID:1583107] [TID:1583107] [info] [:] [] [HFT-Engine] Initializing exchange adapters...
+[2025-11-17 20:44:07.974722] [PID:1583107] [TID:1583107] [info] [:] [] [HFT-Engine] Exchange: hyperliquid, Live trading: false, Testnet: true
+[2025-11-17 20:44:07.976391] [PID:1583107] [TID:1583107] [info] [:] [] [HyperliquidAdapter] Bridge adapter created
+[2025-11-17 20:44:07.976480] [PID:1583107] [TID:1583107] [info] [:] [] [HyperliquidAdapter] Initializing Hummingbot-pattern connector...
+[2025-11-17 20:44:07.976498] [PID:1583107] [TID:1583107] [info] [:] [] [HyperliquidAdapter] Testnet: true
+[2025-11-17 20:44:07.976518] [PID:1583107] [TID:1583107] [info] [:] [] [HyperliquidAdapter] Using Python signer: python3 tools/hl_signer_bridge.py
+[2025-11-17 20:44:07.976608] [PID:1583107] [TID:1583107] [info] [:] [] [HyperliquidAuth] Python exe: python3 (env_py=NULL)
+[2025-11-17 20:44:07.976634] [PID:1583107] [TID:1583107] [info] [:] [] [HyperliquidAuth] Script: tools/hl_signer_bridge.py
+[2025-11-17 20:44:07.976651] [PID:1583107] [TID:1583107] [info] [:] [] [HyperliquidAuth] Initialized for address: 0x44Fd91bEd5c87A4fFA222462798BB9d7Ef3669be with Python signer
+[2025-11-17 20:44:08.006244] [PID:1583107] [TID:1583107] [info] [:] [] [HyperliquidAdapter] Event forwarding configured
+[2025-11-17 20:44:09.526282] [PID:1583107] [TID:1583107] [info] [:] [] Fetched 199 trading pairs
+[2025-11-17 20:44:09.982385] [PID:1583107] [TID:1583107] [info] [:] [] [HL-REST] Response status: 200 OK
+[2025-11-17 20:44:09.982511] [PID:1583107] [TID:1583107] [info] [:] [] [HL-REST] Response body: {"universe":[{"szDecimals":2,"name":"SOL","maxLeverage":10,"marginTableId":10},{"szDecimals":2,"name":"APT","maxLeverage":3,"marginTableId":3},{"szDecimals":2,"name":"ATOM","maxLeverage":10,"marginTableId":55},{"szDecimals":5,"name":"BTC","maxLeverage":40,"marginTableId":54},{"szDecimals":4,"name":"ETH","maxLeverage":25,"marginTableId":53},{"szDecimals":1,"name":"MATIC","maxLeverage":50,"marginTableId":50,"isDelisted":true},{"szDecimals":3,"name":"BNB","maxLeverage":10,"marginTableId":10},{"szDecimals":2,"name":"AVAX","maxLeverage":10,"marginTableId":55},{"szDecimals":0,"name":"GMT","maxLeverage":2,"marginTableId":2},{"szDecimals":1,"name":"DYDX","maxLeverage":20,"marginTableId":20},{"szDecimals":1,"name":"APE","maxLeverage":5,"marginTableId":5},{"szDecimals":1,"name":"OP","maxLeverage":50,"marginTableId":50},{"szDecimals":0,"name":"kPEPE","maxLeverage":10,"marginTableId":10},{"szDecimals":1,"name":"ARB","maxLeverage":10,"marginTableId":55},{"szDecimals":0,"name":"RLB","maxLeverage":50
+[2025-11-17 20:44:09.984008] [PID:1583107] [TID:1583107] [info] [:] [] Fetched trading rules for 199 pairs
+[2025-11-17 20:44:09.984289] [PID:1583107] [TID:1583107] [info] [:] [] [HyperliquidAdapter] Initialization complete
+[2025-11-17 20:44:09.984377] [PID:1583107] [TID:1583107] [info] [:] [] [HyperliquidAdapter] Connecting to Hyperliquid...
+[2025-11-17 20:44:09.998561] [PID:1583107] [TID:1583107] [info] [:] [] HyperliquidOrderBookDataSource started
+[2025-11-17 20:44:10.034629] [PID:1583107] [TID:1583107] [info] [:] [] HyperliquidUserStreamDataSource started
+[2025-11-17 20:44:10.034764] [PID:1583107] [TID:1583107] [info] [:] [] HyperliquidPerpetualConnector started
+[2025-11-17 20:44:10.250725] [PID:1583107] [TID:1586064] [info] [:] [] Connected to Hyperliquid WebSocket at api.hyperliquid-testnet.xyz
+[2025-11-17 20:44:10.286615] [PID:1583107] [TID:1586104] [info] [:] [] Connected to Hyperliquid user stream WebSocket at api.hyperliquid-testnet.xyz
+[2025-11-17 20:44:10.785206] [PID:1583107] [TID:1583107] [info] [:] [] [HyperliquidAdapter] Connected successfully after 750 ms
+[2025-11-17 20:44:10.785329] [PID:1583107] [TID:1583107] [info] [:] [] [HFT-Engine] Hyperliquid connector connected successfully
+[2025-11-17 20:44:10.785348] [PID:1583107] [TID:1583107] [info] [:] [] [HFT-Engine] Exchange adapter initialized: hyperliquid (Hummingbot pattern)
+[2025-11-17 20:44:10.785376] [PID:1583107] [TID:1583107] [info] [:] [] [HyperliquidAdapter] Listed 0 open orders
+[2025-11-17 20:44:10.785387] [PID:1583107] [TID:1583107] [info] [:] [] [HyperliquidAdapter] Listed 0 open orders
+[2025-11-17 20:44:10.785395] [PID:1583107] [TID:1583107] [info] [:] [] [HyperliquidAdapter] Listed 0 open orders
+[2025-11-17 20:44:10.785406] [PID:1583107] [TID:1583107] [info] [:] [] [HyperliquidAdapter] Listed 0 open orders
+[2025-11-17 20:44:10.785416] [PID:1583107] [TID:1583107] [info] [:] [] [HFT-Engine] Rehydrated 0 open orders into local map after connect
+[2025-11-17 20:44:10.785517] [PID:1583107] [TID:1583107] [info] [:] [] [HFT-Engine] Initialization complete in 2840041245 ns
+[2025-11-17 20:44:10.785608] [PID:1583107] [TID:1583107] [info] [:] [] [HFT-Engine] Order pool capacity: 1024
+[2025-11-17 20:44:10.785690] [PID:1583107] [TID:1583107] [info] [:] [] [HFT-Engine] Report pool capacity: 2048
+[2025-11-17 20:44:10.785712] [PID:1583107] [TID:1583107] [info] [:] [] [HFT-Engine] Fill pool capacity: 2048
+[2025-11-17 20:44:10.828113] [PID:1583107] [TID:1587114] [info] [:] [] [HFT-Engine] HFT order receiver thread started on dedicated core
+[2025-11-17 20:44:10.852867] [PID:1583107] [TID:1587134] [info] [:] [] [HFT-Engine] HFT publisher thread started
+[2025-11-17 20:44:10.873615] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Engine] Stats monitoring thread started
+[2025-11-17 20:44:10.874142] [PID:1583107] [TID:1583107] [info] [:] [] [HFT-Engine] Ultra-low latency service started (RT scheduling + CPU affinity)
+[2025-11-17 20:44:10.874269] [PID:1583107] [TID:1583107] [info] [:] [] [Main] Trading engine started successfully
+[2025-11-17 20:44:10.874283] [PID:1583107] [TID:1583107] [info] [:] [] [Main] Listening for orders on tcp://127.0.0.1:5601
+[2025-11-17 20:44:10.874308] [PID:1583107] [TID:1583107] [info] [:] [] [Main] Publishing reports on tcp://127.0.0.1:5602
+[2025-11-17 20:44:10.874317] [PID:1583107] [TID:1583107] [info] [:] [] [Main] Press Ctrl+C to stop
+[2025-11-17 20:44:10.928325] [PID:1583107] [TID:1587114] [info] [:] [] [HFT-Utils] TSC frequency calibrated: 2894602694 Hz
+[2025-11-17 20:44:20.873912] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 0, Rejected: 0, Avg latency: 0.00 ns, Min: 18446744073709551615 ns, Max: 0 ns, Queue usage: 0, Pool available: O:1024 R:2048 F:2048
+[2025-11-17 20:44:30.876065] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 0, Rejected: 0, Avg latency: 0.00 ns, Min: 18446744073709551615 ns, Max: 0 ns, Queue usage: 0, Pool available: O:1024 R:2048 F:2048
+[2025-11-17 20:44:40.876434] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 0, Rejected: 0, Avg latency: 0.00 ns, Min: 18446744073709551615 ns, Max: 0 ns, Queue usage: 0, Pool available: O:1024 R:2048 F:2048
+[2025-11-17 20:44:41.109477] [PID:1583107] [TID:1587114] [info] [:] [] [HyperliquidAdapter] Order placed: LS-1763383481109-0 (buy)
+[2025-11-17 20:44:41.109719] [PID:1583107] [TID:1583304] [info] [:] [] [OrderTracker] Order LS-1763383481109-0 state: PENDING_CREATE -> PENDING_SUBMIT
+[2025-11-17 20:44:41.109957] [PID:1583107] [TID:1583304] [info] [:] [] [HL] Converted cloid: LS-1763383481109-0 -> 0x129ba422bcf7dfe5a1803dbd7d4fe3d7
+[2025-11-17 20:44:41.110048] [PID:1583107] [TID:1583304] [info] [:] [] [PythonHyperliquidSigner] Starting Python signer subprocess: python3 tools/hl_signer_bridge.py
+[2025-11-17 20:44:41.178449] [PID:1583107] [TID:1583304] [info] [:] [] [PythonHyperliquidSigner] Python user site-packages: /root/.local/lib/python3.10/site-packages
+[2025-11-17 20:44:41.218518] [PID:1583107] [TID:1583304] [info] [:] [] [PythonHyperliquidSigner] Subprocess started successfully (pid=1621679)
+[2025-11-17 20:44:43.220408] [PID:1583107] [TID:1583304] [error] [:] [] [PythonHyperliquidSigner] Timeout waiting for signature response (id=1)
+[2025-11-17 20:44:43.220746] [PID:1583107] [TID:1583304] [info] [:] [] [OrderTracker] Order LS-1763383481109-0 state: PENDING_SUBMIT -> FAILED
+[2025-11-17 20:44:43.220837] [PID:1583107] [TID:1583304] [error] [:] [] Order LS-1763383481109-0 failed: HyperliquidAuth: Failed to sign L1 action: HyperliquidAuth: Python signer returned no signature
+[2025-11-17 20:44:44.119525] [PID:1583107] [TID:1587114] [info] [:] [] [HyperliquidAdapter] Order placed: LS-1763383484119-1 (sell)
+[2025-11-17 20:44:44.119575] [PID:1583107] [TID:1583304] [info] [:] [] [OrderTracker] Order LS-1763383484119-1 state: PENDING_CREATE -> PENDING_SUBMIT
+[2025-11-17 20:44:44.119848] [PID:1583107] [TID:1583304] [info] [:] [] [HL] Converted cloid: LS-1763383484119-1 -> 0xab0dca711d97b87487a3ad78f6e5f982
+[2025-11-17 20:44:44.160112] [PID:1583107] [TID:1583304] [info] [:] [] [HL-REST] Request to /exchange: {"action":{"grouping":"na","orders":[{"a":3,"b":false,"c":"0xab0dca711d97b87487a3ad78f6e5f982","p":"100000.0","r":false,"s":"0.0001","t":{"limit":{"tif":"Gtc"}}}],"type":"order"},"nonce":1763383484119,"signature":{"r":"0xca66fd04f3b9e383a6853b2753f8c73b137b6343d6bcd3890b62e54e62a9d81b","s":"0x778d351c261a56f46ce683cbcc2737a57d6e207d1dc39db8b2d94f6b4b8f2748","v":28}}
+[2025-11-17 20:44:44.556054] [PID:1583107] [TID:1583304] [info] [:] [] [HL-REST] Response status: 200 OK
+[2025-11-17 20:44:44.556176] [PID:1583107] [TID:1583304] [info] [:] [] [HL-REST] Response body: {"status":"err","response":"User or API Wallet 0x76ba5d85922ba952e36e9792c66be9b5f4fc1940 does not exist."}
+[2025-11-17 20:44:44.556629] [PID:1583107] [TID:1583304] [info] [:] [] [OrderTracker] Order LS-1763383484119-1 state: PENDING_SUBMIT -> FAILED
+[2025-11-17 20:44:44.556772] [PID:1583107] [TID:1583304] [error] [:] [] Order LS-1763383484119-1 failed: "User or API Wallet 0x76ba5d85922ba952e36e9792c66be9b5f4fc1940 does not exist."
+[2025-11-17 20:44:50.146427] [PID:1583107] [TID:1587114] [info] [:] [] [HyperliquidAdapter] Order placed: LS-1763383490146-2 (sell)
+[2025-11-17 20:44:50.146478] [PID:1583107] [TID:1583304] [info] [:] [] [OrderTracker] Order LS-1763383490146-2 state: PENDING_CREATE -> PENDING_SUBMIT
+[2025-11-17 20:44:50.146923] [PID:1583107] [TID:1583304] [info] [:] [] [HL] Converted cloid: LS-1763383490146-2 -> 0x6fdd7f5b02b14c0c29a67a13a252fc86
+[2025-11-17 20:44:50.174470] [PID:1583107] [TID:1583304] [info] [:] [] [HL-REST] Request to /exchange: {"action":{"grouping":"na","orders":[{"a":4,"b":false,"c":"0x6fdd7f5b02b14c0c29a67a13a252fc86","p":"0.01","r":false,"s":"0.001","t":{"limit":{"tif":"Ioc"}}}],"type":"order"},"nonce":1763383490147,"signature":{"r":"0x202018d8a0b2d36268655c7413c881aedad1dd10f7971469974339acc95b95b0","s":"0xa0b88f9cd7851466fd3a0ab1a88c72b15a7aa4eacf63f88d53023f9e8b802b7","v":28}}
+[2025-11-17 20:44:50.876801] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 708901.75 ns, Min: 40134 ns, Max: 577956 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:44:51.633558] [PID:1583107] [TID:1583304] [info] [:] [] [HL-REST] Response status: 200 OK
+[2025-11-17 20:44:51.633698] [PID:1583107] [TID:1583304] [info] [:] [] [HL-REST] Response body: {"status":"err","response":"User or API Wallet 0xcd6b52d00e5da5c96e35291d9c8c53e9cfac3ba7 does not exist."}
+[2025-11-17 20:44:51.634505] [PID:1583107] [TID:1583304] [info] [:] [] [OrderTracker] Order LS-1763383490146-2 state: PENDING_SUBMIT -> FAILED
+[2025-11-17 20:44:51.634590] [PID:1583107] [TID:1583304] [error] [:] [] Order LS-1763383490146-2 failed: "User or API Wallet 0xcd6b52d00e5da5c96e35291d9c8c53e9cfac3ba7 does not exist."
+[2025-11-17 20:45:00.877116] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 708901.75 ns, Min: 40134 ns, Max: 577956 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:45:10.249377] [PID:1583107] [TID:1586064] [error] [:] [] WebSocket error: End of file [asio.misc:2]
+[2025-11-17 20:45:10.249508] [PID:1583107] [TID:1586064] [info] [:] [] Reconnecting in 5 seconds...
+[2025-11-17 20:45:10.285209] [PID:1583107] [TID:1586104] [error] [:] [] User stream WebSocket error: End of file [asio.misc:2]
+[2025-11-17 20:45:10.285335] [PID:1583107] [TID:1586104] [info] [:] [] Reconnecting user stream in 5 seconds...
+[2025-11-17 20:45:10.878590] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 708901.75 ns, Min: 40134 ns, Max: 577956 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:45:16.690241] [PID:1583107] [TID:1586104] [info] [:] [] Connected to Hyperliquid user stream WebSocket at api.hyperliquid-testnet.xyz
+[2025-11-17 20:45:16.706873] [PID:1583107] [TID:1586064] [info] [:] [] Connected to Hyperliquid WebSocket at api.hyperliquid-testnet.xyz
+[2025-11-17 20:45:20.878890] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 708901.75 ns, Min: 40134 ns, Max: 577956 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:45:30.879260] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 708901.75 ns, Min: 40134 ns, Max: 577956 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:45:40.879562] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 708901.75 ns, Min: 40134 ns, Max: 577956 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:45:50.879859] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 708901.75 ns, Min: 40134 ns, Max: 577956 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:46:00.880151] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 708901.75 ns, Min: 40134 ns, Max: 577956 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:46:10.880430] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 708901.75 ns, Min: 40134 ns, Max: 577956 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:46:16.687276] [PID:1583107] [TID:1586104] [error] [:] [] User stream WebSocket error: End of file [asio.misc:2]
+[2025-11-17 20:46:16.687448] [PID:1583107] [TID:1586104] [info] [:] [] Reconnecting user stream in 5 seconds...
+[2025-11-17 20:46:16.709019] [PID:1583107] [TID:1586064] [error] [:] [] WebSocket error: End of file [asio.misc:2]
+[2025-11-17 20:46:16.709132] [PID:1583107] [TID:1586064] [info] [:] [] Reconnecting in 5 seconds...
+[2025-11-17 20:46:20.880738] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 708901.75 ns, Min: 40134 ns, Max: 577956 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:46:23.142585] [PID:1583107] [TID:1586104] [info] [:] [] Connected to Hyperliquid user stream WebSocket at api.hyperliquid-testnet.xyz
+[2025-11-17 20:46:23.148301] [PID:1583107] [TID:1586064] [info] [:] [] Connected to Hyperliquid WebSocket at api.hyperliquid-testnet.xyz
+[2025-11-17 20:46:30.881013] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 708901.75 ns, Min: 40134 ns, Max: 577956 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:46:40.881248] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 708901.75 ns, Min: 40134 ns, Max: 577956 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:46:50.881494] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 708901.75 ns, Min: 40134 ns, Max: 577956 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:47:00.881696] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 708901.75 ns, Min: 40134 ns, Max: 577956 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:47:10.881903] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 708901.75 ns, Min: 40134 ns, Max: 577956 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:47:20.882074] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 708901.75 ns, Min: 40134 ns, Max: 577956 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:47:23.141380] [PID:1583107] [TID:1586104] [error] [:] [] User stream WebSocket error: End of file [asio.misc:2]
+[2025-11-17 20:47:23.141510] [PID:1583107] [TID:1586104] [info] [:] [] Reconnecting user stream in 5 seconds...
+[2025-11-17 20:47:23.146308] [PID:1583107] [TID:1586064] [error] [:] [] WebSocket error: End of file [asio.misc:2]
+[2025-11-17 20:47:23.146412] [PID:1583107] [TID:1586064] [info] [:] [] Reconnecting in 5 seconds...
+[2025-11-17 20:47:28.533080] [PID:1583107] [TID:1586104] [info] [:] [] Connected to Hyperliquid user stream WebSocket at api.hyperliquid-testnet.xyz
+[2025-11-17 20:47:28.557071] [PID:1583107] [TID:1586064] [info] [:] [] Connected to Hyperliquid WebSocket at api.hyperliquid-testnet.xyz
+[2025-11-17 20:47:30.882272] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 708901.75 ns, Min: 40134 ns, Max: 577956 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:47:40.882444] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 708901.75 ns, Min: 40134 ns, Max: 577956 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:47:50.882670] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 708901.75 ns, Min: 40134 ns, Max: 577956 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:48:00.882901] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 708901.75 ns, Min: 40134 ns, Max: 577956 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:48:10.883110] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 708901.75 ns, Min: 40134 ns, Max: 577956 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:48:20.883308] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 708901.75 ns, Min: 40134 ns, Max: 577956 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:48:28.531747] [PID:1583107] [TID:1586104] [error] [:] [] User stream WebSocket error: End of file [asio.misc:2]
+[2025-11-17 20:48:28.531824] [PID:1583107] [TID:1586104] [info] [:] [] Reconnecting user stream in 5 seconds...
+[2025-11-17 20:48:28.554360] [PID:1583107] [TID:1586064] [error] [:] [] WebSocket error: End of file [asio.misc:2]
+[2025-11-17 20:48:28.554427] [PID:1583107] [TID:1586064] [info] [:] [] Reconnecting in 5 seconds...
+[2025-11-17 20:48:30.883497] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 708901.75 ns, Min: 40134 ns, Max: 577956 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:48:34.971238] [PID:1583107] [TID:1586064] [info] [:] [] Connected to Hyperliquid WebSocket at api.hyperliquid-testnet.xyz
+[2025-11-17 20:48:35.002127] [PID:1583107] [TID:1586104] [info] [:] [] Connected to Hyperliquid user stream WebSocket at api.hyperliquid-testnet.xyz
+[2025-11-17 20:48:40.883694] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 708901.75 ns, Min: 40134 ns, Max: 577956 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:48:50.883877] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 708901.75 ns, Min: 40134 ns, Max: 577956 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:49:00.884075] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 708901.75 ns, Min: 40134 ns, Max: 577956 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:49:10.884278] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 708901.75 ns, Min: 40134 ns, Max: 577956 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:49:20.884480] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 708901.75 ns, Min: 40134 ns, Max: 577956 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:49:30.884704] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 708901.75 ns, Min: 40134 ns, Max: 577956 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:49:34.969507] [PID:1583107] [TID:1586064] [error] [:] [] WebSocket error: End of file [asio.misc:2]
+[2025-11-17 20:49:34.969606] [PID:1583107] [TID:1586064] [info] [:] [] Reconnecting in 5 seconds...
+[2025-11-17 20:49:34.996292] [PID:1583107] [TID:1586104] [error] [:] [] User stream WebSocket error: End of file [asio.misc:2]
+[2025-11-17 20:49:34.996352] [PID:1583107] [TID:1586104] [info] [:] [] Reconnecting user stream in 5 seconds...
+[2025-11-17 20:49:40.357215] [PID:1583107] [TID:1586064] [info] [:] [] Connected to Hyperliquid WebSocket at api.hyperliquid-testnet.xyz
+[2025-11-17 20:49:40.357215] [PID:1583107] [TID:1586104] [info] [:] [] Connected to Hyperliquid user stream WebSocket at api.hyperliquid-testnet.xyz
+[2025-11-17 20:49:40.884905] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 708901.75 ns, Min: 40134 ns, Max: 577956 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:49:50.885132] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 708901.75 ns, Min: 40134 ns, Max: 577956 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:50:00.885355] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 708901.75 ns, Min: 40134 ns, Max: 577956 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:50:10.885562] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 708901.75 ns, Min: 40134 ns, Max: 577956 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:50:20.885745] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 708901.75 ns, Min: 40134 ns, Max: 577956 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:50:30.885955] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 708901.75 ns, Min: 40134 ns, Max: 577956 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:50:40.355941] [PID:1583107] [TID:1586104] [error] [:] [] User stream WebSocket error: End of file [asio.misc:2]
+[2025-11-17 20:50:40.356049] [PID:1583107] [TID:1586104] [info] [:] [] Reconnecting user stream in 5 seconds...
+[2025-11-17 20:50:40.355941] [PID:1583107] [TID:1586064] [error] [:] [] WebSocket error: End of file [asio.misc:2]
+[2025-11-17 20:50:40.356166] [PID:1583107] [TID:1586064] [info] [:] [] Reconnecting in 5 seconds...
+[2025-11-17 20:50:40.886195] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 708901.75 ns, Min: 40134 ns, Max: 577956 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:50:46.751780] [PID:1583107] [TID:1586104] [info] [:] [] Connected to Hyperliquid user stream WebSocket at api.hyperliquid-testnet.xyz
+[2025-11-17 20:50:46.772946] [PID:1583107] [TID:1586064] [info] [:] [] Connected to Hyperliquid WebSocket at api.hyperliquid-testnet.xyz
+[2025-11-17 20:50:50.886375] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 708901.75 ns, Min: 40134 ns, Max: 577956 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:51:00.886576] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 708901.75 ns, Min: 40134 ns, Max: 577956 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:51:10.886783] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 708901.75 ns, Min: 40134 ns, Max: 577956 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:51:20.886982] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 708901.75 ns, Min: 40134 ns, Max: 577956 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:51:30.887172] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 708901.75 ns, Min: 40134 ns, Max: 577956 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:51:40.887352] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 708901.75 ns, Min: 40134 ns, Max: 577956 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:51:46.749797] [PID:1583107] [TID:1586104] [error] [:] [] User stream WebSocket error: End of file [asio.misc:2]
+[2025-11-17 20:51:46.749869] [PID:1583107] [TID:1586104] [info] [:] [] Reconnecting user stream in 5 seconds...
+[2025-11-17 20:51:46.772971] [PID:1583107] [TID:1586064] [error] [:] [] WebSocket error: End of file [asio.misc:2]
+[2025-11-17 20:51:46.773042] [PID:1583107] [TID:1586064] [info] [:] [] Reconnecting in 5 seconds...
+[2025-11-17 20:51:50.887555] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 708901.75 ns, Min: 40134 ns, Max: 577956 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:51:53.179249] [PID:1583107] [TID:1586064] [info] [:] [] Connected to Hyperliquid WebSocket at api.hyperliquid-testnet.xyz
+[2025-11-17 20:51:53.184437] [PID:1583107] [TID:1586104] [info] [:] [] Connected to Hyperliquid user stream WebSocket at api.hyperliquid-testnet.xyz
+[2025-11-17 20:52:00.887794] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 708901.75 ns, Min: 40134 ns, Max: 577956 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:52:10.888122] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 708901.75 ns, Min: 40134 ns, Max: 577956 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:52:14.783557] [PID:1583107] [TID:1583107] [info] [:] [] 
+[Main] Received signal 2, shutting down...
+[2025-11-17 20:52:14.783717] [PID:1583107] [TID:1587134] [info] [:] [] [HFT-Engine] HFT publisher thread stopped
+[2025-11-17 20:52:14.783993] [PID:1583107] [TID:1587114] [info] [:] [] [HFT-Engine] HFT order receiver thread stopped
+[2025-11-17 20:52:20.888577] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Stats] Orders/sec: 0, Total: 4, Rejected: 0, Avg latency: 708901.75 ns, Min: 40134 ns, Max: 577956 ns, Queue usage: 0, Pool available: O:1017 R:2048 F:2048
+[2025-11-17 20:52:20.888780] [PID:1583107] [TID:1587151] [info] [:] [] [HFT-Engine] Stats monitoring thread stopped
+[2025-11-17 20:52:20.889045] [PID:1583107] [TID:1583107] [info] [:] [] [HFT-Engine] Final stats - Orders processed: 4, Avg latency: 708901.75 ns
+[2025-11-17 20:52:20.889072] [PID:1583107] [TID:1583107] [info] [:] [] [HFT-Engine] Ultra-low latency service stopped
+[2025-11-17 20:52:21.063252] [PID:1583107] [TID:1583107] [info] [:] [] [Main] Trading engine stopped
+[2025-11-17 20:52:21.066528] [PID:1583107] [TID:1583107] [info] [:] [] [HyperliquidAdapter] Disconnecting...
+[2025-11-17 20:52:21.153312] [PID:1583107] [TID:1586064] [error] [:] [] WebSocket error: Operation canceled [system:125 at /home/tensor/latentspeed/build/release/vcpkg_installed/x64-linux/include/boost/beast/websocket/impl/stream_impl.hpp:355:13 in function 'bool boost::beast::websocket::stream< <template-parameter-1-1>, <anonymous> >::impl_type::check_stop_now(boost::beast::error_code&)']
+[2025-11-17 20:52:21.154958] [PID:1583107] [TID:1583107] [info] [:] [] HyperliquidOrderBookDataSource stopped
+[2025-11-17 20:52:21.235018] [PID:1583107] [TID:1586104] [error] [:] [] User stream WebSocket error: Operation canceled [system:125 at /home/tensor/latentspeed/build/release/vcpkg_installed/x64-linux/include/boost/beast/websocket/impl/stream_impl.hpp:355:13 in function 'bool boost::beast::websocket::stream< <template-parameter-1-1>, <anonymous> >::impl_type::check_stop_now(boost::beast::error_code&)']
+[2025-11-17 20:52:21.236568] [PID:1583107] [TID:1583107] [info] [:] [] HyperliquidUserStreamDataSource stopped
+[2025-11-17 20:52:21.240263] [PID:1583107] [TID:1583107] [info] [:] [] HyperliquidPerpetualConnector stopped
+[2025-11-17 20:52:21.240422] [PID:1583107] [TID:1583107] [info] [:] [] [HyperliquidAdapter] Disconnected
+[2025-11-17 20:52:21.240435] [PID:1583107] [TID:1583107] [info] [:] [] [HyperliquidAdapter] Bridge adapter destroyed

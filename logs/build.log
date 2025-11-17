@@ -1,0 +1,9 @@
+
+****  Building LatentSpeed Trading System (Release)  ****
+
+Checking system dependencies...
+All system dependencies found.
+Installing vcpkg dependencies...
+Using vcpkg target triplet: x64-linux
+Using vcpkg host triplet:   x64-linux
+Detecting compiler hash for triplet x64-linux...

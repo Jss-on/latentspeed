@@ -96,7 +96,7 @@ bool HyperliquidAdapter::initialize(const std::string& api_key,
     const char* env_py = std::getenv("LATENTSPEED_HL_SIGNER_PYTHON");
     const char* env_script = std::getenv("LATENTSPEED_HL_SIGNER_SCRIPT");
     std::string py = env_py && *env_py ? std::string(env_py) : std::string("python3");
-    std::string script = env_script && *env_script ? std::string(env_script) : std::string("latentspeed/tools/hl_signer_bridge.py");
+    std::string script = env_script && *env_script ? std::string(env_script) : std::string("tools/hl_signer_bridge.py");
     signer_ = std::make_unique<PythonHyperliquidSigner>(py, script);
     // M1 scaffold: do not attempt network/auth yet. Consider keys present as initialized.
     return true;

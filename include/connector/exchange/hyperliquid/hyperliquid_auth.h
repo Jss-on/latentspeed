@@ -11,7 +11,9 @@
 #include <vector>
 #include <optional>
 #include <cstdint>
+#include <memory>
 #include <nlohmann/json.hpp>
+#include "adapters/python_hl_signer.h"
 
 namespace latentspeed::connector::hyperliquid {
 
@@ -77,6 +79,17 @@ public:
     );
     
     /**
+     * @brief Sign an order action with auto-generated nonce
+     * @param action Order action JSON
+     * @param is_mainnet True for mainnet, false for testnet
+     * @return Signed action with signature
+     */
+    nlohmann::json sign_l1_action(
+        const nlohmann::json& action,
+        bool is_mainnet = true
+    );
+    
+    /**
      * @brief Sign a cancel action
      * @param cancel_action Cancel action JSON
      * @param nonce Nonce
@@ -100,9 +113,10 @@ public:
     bool is_vault() const { return use_vault_; }
 
 private:
-    std::string api_key_;      // Wallet address or vault address
-    std::string api_secret_;   // Private key (hex)
-    bool use_vault_;
+    std::string api_key_;       ///< Wallet/vault address
+    std::string api_secret_;    ///< Private key (hex)
+    bool use_vault_;            ///< Whether using vault
+    std::unique_ptr<PythonHyperliquidSigner> signer_;  ///< Python-backed signer
     
     // ========================================================================
     // EIP-712 SIGNING HELPERS

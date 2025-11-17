@@ -46,11 +46,20 @@ else()
 endif()
 
 # ============================================================================
+# Adapter Sources (required by Hyperliquid connector)
+# ============================================================================
+# Python signer bridge - required by HyperliquidAuth
+set(ADAPTER_SOURCES
+    ${CMAKE_SOURCE_DIR}/src/adapters/python_hl_signer.cpp
+)
+
+# ============================================================================
 # Combined Connector Library
 # ============================================================================
 add_library(connector_framework STATIC
     ${CONNECTOR_CORE_SOURCES}
     ${HYPERLIQUID_CONNECTOR_SOURCES}
+    ${ADAPTER_SOURCES}
 )
 
 # Alternative: Use GLOB for automatic discovery (useful for development)
@@ -67,6 +76,7 @@ target_include_directories(connector_framework
 # ============================================================================
 find_package(Threads REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
+find_package(RapidJSON CONFIG REQUIRED)  # Required by python_hl_signer
 # Boost: Only need header-only components (asio, beast)
 # We use std::thread (C++20) instead of boost::thread
 find_package(Boost REQUIRED COMPONENTS system)
@@ -78,6 +88,7 @@ target_link_libraries(connector_framework
     PUBLIC
         spdlog::spdlog
         nlohmann_json::nlohmann_json
+        rapidjson
         Boost::boost
         Boost::system
         OpenSSL::SSL

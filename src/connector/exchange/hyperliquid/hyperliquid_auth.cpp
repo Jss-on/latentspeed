@@ -6,6 +6,7 @@
 #include "connector/exchange/hyperliquid/hyperliquid_auth.h"
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <chrono>
 #include <iomanip>
 #include <sstream>
 
@@ -25,7 +26,17 @@ HyperliquidAuth::HyperliquidAuth(
         throw HyperliquidAuthException("Invalid address length");
     }
     
-    spdlog::info("[HyperliquidAuth] Initialized for address: {}", api_key_);
+    // Initialize Python signer for actual signing
+    const char* env_py = std::getenv("LATENTSPEED_HL_SIGNER_PYTHON");
+    const char* env_script = std::getenv("LATENTSPEED_HL_SIGNER_SCRIPT");
+    std::string py = env_py && *env_py ? std::string(env_py) : std::string("python3");
+    std::string script = env_script && *env_script ? std::string(env_script) : std::string("tools/hl_signer_bridge.py");
+    
+    spdlog::info("[HyperliquidAuth] Python exe: {} (env_py={})", py, env_py ? env_py : "NULL");
+    spdlog::info("[HyperliquidAuth] Script: {}", script);
+    
+    signer_ = std::make_unique<PythonHyperliquidSigner>(py, script);
+    spdlog::info("[HyperliquidAuth] Initialized for address: {} with Python signer", api_key_);
 }
 
 nlohmann::json HyperliquidAuth::sign_l1_action(
@@ -35,52 +46,40 @@ nlohmann::json HyperliquidAuth::sign_l1_action(
 ) {
     spdlog::debug("[HyperliquidAuth] Signing L1 action with nonce: {}", nonce);
     
+    if (!signer_) {
+        throw HyperliquidAuthException("Python signer not initialized");
+    }
+    
     try {
-        // Step 1: Compute action hash
+        // Use Python signer for actual signing
         std::optional<std::string> vault_addr;
         if (use_vault_) {
             vault_addr = api_key_;
         }
         
-        auto hash = action_hash(action, vault_addr, nonce);
+        std::string action_str = action.dump();
+        auto sig = signer_->sign_l1_action(
+            api_secret_,      // private key
+            action_str,       // action JSON
+            vault_addr,       // vault address (optional)
+            nonce,            // nonce
+            std::nullopt,     // expires_after (optional)
+            is_mainnet        // mainnet flag
+        );
         
-        // Step 2: Construct phantom agent
-        auto phantom = construct_phantom_agent(hash, is_mainnet);
+        if (!sig) {
+            throw HyperliquidAuthException("Python signer returned no signature");
+        }
         
-        // Step 3: Build EIP-712 typed data
-        nlohmann::json typed_data = {
-            {"domain", {
-                {"name", "Exchange"},
-                {"version", "1"},
-                {"chainId", is_mainnet ? 42161 : 421614},  // Arbitrum One / Sepolia
-                {"verifyingContract", is_mainnet ? 
-                    "0x0000000000000000000000000000000000000000" :
-                    "0x0000000000000000000000000000000000000000"}
-            }},
-            {"types", {
-                {"Agent", {
-                    {{"name", "source"}, {"type", "string"}},
-                    {{"name", "connectionId"}, {"type", "bytes32"}}
-                }},
-                {"EIP712Domain", {
-                    {{"name", "name"}, {"type", "string"}},
-                    {{"name", "version"}, {"type", "string"}},
-                    {{"name", "chainId"}, {"type", "uint256"}},
-                    {{"name", "verifyingContract"}, {"type", "address"}}
-                }}
-            }},
-            {"primaryType", "Agent"},
-            {"message", phantom}
-        };
-        
-        // Step 4: Sign
-        auto signature = sign_inner(typed_data);
-        
-        // Step 5: Build signed action
+        // Build signed action with signature from Python signer
         nlohmann::json signed_action = {
             {"action", action},
             {"nonce", nonce},
-            {"signature", signature}
+            {"signature", {
+                {"r", sig->r},
+                {"s", sig->s},
+                {"v", std::stoi(sig->v)}
+            }}
         };
         
         if (use_vault_) {
@@ -94,6 +93,20 @@ nlohmann::json HyperliquidAuth::sign_l1_action(
             std::string("Failed to sign L1 action: ") + e.what()
         );
     }
+}
+
+nlohmann::json HyperliquidAuth::sign_l1_action(
+    const nlohmann::json& action,
+    bool is_mainnet
+) {
+    // Auto-generate nonce using timestamp in milliseconds
+    uint64_t nonce = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()
+    ).count();
+    
+    spdlog::debug("[HyperliquidAuth] Auto-generated nonce: {}", nonce);
+    
+    return sign_l1_action(action, nonce, is_mainnet);
 }
 
 nlohmann::json HyperliquidAuth::sign_cancel_action(

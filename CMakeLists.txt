@@ -51,7 +51,7 @@ set(LS_ENGINE_SOURCES
   src/adapters/hyperliquid_adapter.cpp
   src/adapters/hyperliquid/hyperliquid_connector_adapter.cpp
   src/adapters/hyperliquid_asset_resolver.cpp
-  src/adapters/python_hl_signer.cpp
+  # Note: python_hl_signer.cpp now compiled in connector_framework library
   src/core/symbol/symbol_mapper.cpp
   src/core/reasons/reason_mapper.cpp
   src/engine/exec_dto.cpp

@@ -115,24 +115,38 @@ class MomentumStrategy:
         if not self.should_trade():
             return False
         
+        cl_id = f"momentum_{int(time.time() * 1000)}"
+        
         order = {
-            "action": side.lower(),  # "buy" or "sell"
-            "symbol": f"{self.symbol}-USD",
-            "quantity": quantity,
-            "price": price,
-            "order_type": "limit",
-            "client_order_id": f"momentum_{int(time.time() * 1000)}"
+            "version": 1,
+            "cl_id": cl_id,
+            "action": "place",
+            "venue_type": "cex",
+            "venue": "hyperliquid",
+            "product_type": "perpetual",
+            "details": {
+                "symbol": self.symbol,
+                "side": side.lower(),
+                "order_type": "limit",
+                "price": str(price),
+                "size": str(quantity),
+                "reduce_only": "false"
+            },
+            "ts_ns": int(time.time() * 1_000_000_000),
+            "tags": {
+                "strategy": "momentum"
+            }
         }
         
         try:
             # PUSH socket - fire and forget, no response expected
-            self.order_client.send_json(order, flags=zmq.NOBLOCK)
+            self.order_client.send_string(json.dumps(order))
             
             self.orders_sent += 1
             self.last_order_time = time.time()
             
             logger.info(f"Order sent: {side.upper()} {quantity} {self.symbol} @ ${price:.2f}")
-            logger.debug(f"Order ID: {order['client_order_id']} - Waiting for confirmation...")
+            logger.debug(f"Order ID: {cl_id} - Waiting for confirmation...")
             return True
             
         except zmq.error.Again:
@@ -191,56 +205,58 @@ class MomentumStrategy:
             # Log complete raw report data first
             logger.debug(f"Raw report data: {json.dumps(report_data, indent=2)}")
             
-            event_type = report_data.get("event_type", "")
-            client_order_id = report_data.get("client_order_id", "")
-            exchange_order_id = report_data.get("exchange_order_id", "N/A")
-            symbol = report_data.get("symbol", "")
-            side = report_data.get("side", "")
+            # Handle new engine format (status-based)
+            status = report_data.get("status", "")
+            cl_id = report_data.get("cl_id", "")
+            reason_code = report_data.get("reason_code", "")
+            reason_text = report_data.get("reason_text", "")
             
-            # Log all report types with full details
-            if event_type == "CREATED":
-                price = report_data.get("price", 0)
-                quantity = report_data.get("quantity", 0)
-                logger.info(f"✅ ORDER CREATED - {side.upper()} {quantity} {symbol} @ ${price:.2f}")
-                logger.info(f"   Client ID: {client_order_id} | Exchange ID: {exchange_order_id}")
+            # Extract details if present
+            details = report_data.get("details", {})
+            symbol = details.get("symbol", "")
+            side = details.get("side", "")
+            price = details.get("price", "")
+            size = details.get("size", "")
+            
+            # Handle different status types
+            if status == "accepted":
+                logger.info(f"✅ ORDER ACCEPTED - {side.upper()} {size} {symbol} @ ${price}")
+                logger.info(f"   Client ID: {cl_id}")
                 logger.debug(f"   Full data: {report_data}")
                 
-            elif event_type == "FILLED":
-                filled_qty = report_data.get("filled_quantity", 0)
-                avg_price = report_data.get("avg_price", 0)
-                logger.info(f"💰 ORDER FILLED - {side.upper()} {filled_qty} {symbol} @ ${avg_price:.2f}")
-                logger.info(f"   Client ID: {client_order_id} | Exchange ID: {exchange_order_id}")
+            elif status == "filled":
+                filled_qty = details.get("filled_size", size)
+                avg_price = details.get("avg_price", price)
+                logger.info(f"💰 ORDER FILLED - {side.upper()} {filled_qty} {symbol} @ ${avg_price}")
+                logger.info(f"   Client ID: {cl_id}")
                 logger.debug(f"   Full data: {report_data}")
                 
-            elif event_type == "PARTIALLY_FILLED":
-                filled_qty = report_data.get("filled_quantity", 0)
-                remaining = report_data.get("remaining_quantity", 0)
-                avg_price = report_data.get("avg_price", 0)
-                logger.info(f"📊 PARTIAL FILL - Filled: {filled_qty}, Remaining: {remaining} @ ${avg_price:.2f}")
-                logger.info(f"   Client ID: {client_order_id}")
+            elif status == "partial":
+                filled_qty = details.get("filled_size", 0)
+                remaining = details.get("remaining_size", 0)
+                avg_price = details.get("avg_price", price)
+                logger.info(f"📊 PARTIAL FILL - Filled: {filled_qty}, Remaining: {remaining} @ ${avg_price}")
+                logger.info(f"   Client ID: {cl_id}")
                 logger.debug(f"   Full data: {report_data}")
                 
-            elif event_type == "CANCELLED":
-                logger.warning(f"❌ ORDER CANCELLED - {client_order_id}")
-                logger.info(f"   Exchange ID: {exchange_order_id}")
+            elif status == "cancelled":
+                logger.warning(f"❌ ORDER CANCELLED - {cl_id}")
                 logger.debug(f"   Full data: {report_data}")
                 
-            elif event_type == "REJECTED":
-                reason = report_data.get("reason", "unknown")
-                logger.warning(f"⚠️  ORDER REJECTED - {client_order_id}")
-                logger.warning(f"   Reason: {reason}")
+            elif status == "rejected":
+                logger.warning(f"⚠️  ORDER REJECTED - {cl_id}")
+                logger.warning(f"   Reason: {reason_code} - {reason_text}")
                 logger.debug(f"   Full data: {report_data}")
                 
-            elif event_type == "FAILED":
-                reason = report_data.get("reason", "unknown")
-                logger.error(f"❌ ORDER FAILED - {client_order_id}")
-                logger.error(f"   Reason: {reason}")
+            elif status == "failed":
+                logger.error(f"❌ ORDER FAILED - {cl_id}")
+                logger.error(f"   Reason: {reason_code} - {reason_text}")
                 logger.debug(f"   Full data: {report_data}")
                 
             else:
-                # Log unknown event types with full data
-                logger.warning(f"Unknown event type: {event_type}")
-                logger.info(f"   Client ID: {client_order_id}")
+                # Log unknown status types with full data
+                logger.warning(f"Unknown order status: {status}")
+                logger.info(f"   Client ID: {cl_id}")
                 logger.info(f"   Full data: {json.dumps(report_data, indent=2)}")
                 
         except Exception as e:
@@ -271,10 +287,16 @@ class MomentumStrategy:
                 
                 # Check for order reports
                 try:
-                    report = self.report_sub.recv_json()
+                    # Try to receive as single-part JSON first
+                    report = self.report_sub.recv_json(flags=zmq.NOBLOCK)
                     self.process_report(report)
                 except zmq.error.Again:
                     pass
+                except json.JSONDecodeError as e:
+                    # Might be empty frame or multipart - log and skip
+                    logger.debug(f"Invalid JSON in order report (might be empty frame): {e}")
+                except Exception as e:
+                    logger.error(f"Error processing order report: {e}")
                 
                 # Print periodic stats
                 current_time = time.time()

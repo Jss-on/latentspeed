@@ -6,6 +6,7 @@
 #include <rapidjson/document.h>
 #include <rapidjson/writer.h>
 #include <rapidjson/stringbuffer.h>
+#include <spdlog/spdlog.h>
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -40,23 +41,64 @@ PythonHyperliquidSigner::~PythonHyperliquidSigner() {
 
 bool PythonHyperliquidSigner::ensure_started() {
     if (child_pid_ > 0) return true;
+    
+    spdlog::info("[PythonHyperliquidSigner] Starting Python signer subprocess: {} {}", python_exe_, script_path_);
+    
+    // Get Python user site-packages path BEFORE fork (safe to call popen here)
+    std::string user_site_path;
+    const char* home = getenv("HOME");
+    if (home) {
+        std::string cmd = std::string(python_exe_) + " -c \"import site; print(site.getusersitepackages())\" 2>/dev/null";
+        FILE* pipe = popen(cmd.c_str(), "r");
+        if (pipe) {
+            char buf[512] = {0};
+            if (fgets(buf, sizeof(buf), pipe)) {
+                // Remove trailing newline
+                size_t len = strlen(buf);
+                if (len > 0 && buf[len-1] == '\n') buf[len-1] = '\0';
+                user_site_path = buf;
+                spdlog::info("[PythonHyperliquidSigner] Python user site-packages: {}", user_site_path);
+            }
+            pclose(pipe);
+        }
+    }
+    
     int inpipe[2];
     int outpipe[2];
-    if (pipe(inpipe) != 0) return false;
-    if (pipe(outpipe) != 0) { close(inpipe[0]); close(inpipe[1]); return false; }
+    if (pipe(inpipe) != 0) {
+        spdlog::error("[PythonHyperliquidSigner] Failed to create input pipe");
+        return false;
+    }
+    if (pipe(outpipe) != 0) {
+        spdlog::error("[PythonHyperliquidSigner] Failed to create output pipe");
+        close(inpipe[0]); close(inpipe[1]);
+        return false;
+    }
 
     pid_t pid = fork();
     if (pid < 0) {
+        spdlog::error("[PythonHyperliquidSigner] Failed to fork process");
         close(inpipe[0]); close(inpipe[1]); close(outpipe[0]); close(outpipe[1]);
         return false;
     }
     if (pid == 0) {
-        // Child
+        // Child process
         dup2(inpipe[0], STDIN_FILENO);
         dup2(outpipe[1], STDOUT_FILENO);
         // Close FDs
         close(inpipe[0]); close(inpipe[1]);
         close(outpipe[0]); close(outpipe[1]);
+        
+        // Set PYTHONPATH to include user site-packages if we found it
+        if (!user_site_path.empty()) {
+            const char* existing_path = getenv("PYTHONPATH");
+            std::string new_path = user_site_path;
+            if (existing_path && *existing_path) {
+                new_path = user_site_path + ":" + existing_path;
+            }
+            setenv("PYTHONPATH", new_path.c_str(), 1);
+        }
+        
         // Unbuffered Python
         execlp(python_exe_.c_str(), python_exe_.c_str(), "-u", script_path_.c_str(), (char*)nullptr);
         _exit(127);
@@ -70,6 +112,8 @@ bool PythonHyperliquidSigner::ensure_started() {
     set_nonblock(fd_stdout_);
     running_.store(true, std::memory_order_release);
     reader_thread_ = std::make_unique<std::thread>(&PythonHyperliquidSigner::reader_loop, this);
+    
+    spdlog::info("[PythonHyperliquidSigner] Subprocess started successfully (pid={})", child_pid_);
     return true;
 }
 
@@ -119,6 +163,7 @@ void PythonHyperliquidSigner::reader_loop() {
                     std::string msg;
                     auto& e = d["error"];
                     if (e.HasMember("message") && e["message"].IsString()) msg = e["message"].GetString();
+                    spdlog::error("[PythonHyperliquidSigner] Error from Python signer (id={}): {}", id, msg);
                     std::lock_guard<std::mutex> lk(corr_mutex_);
                     p->error = msg; p->ready = true; p->cv.notify_all();
                     pending_.erase(id);
@@ -149,7 +194,10 @@ std::optional<HlSignature> PythonHyperliquidSigner::sign_l1_action(const std::st
                                                                    std::uint64_t nonce,
                                                                    const std::optional<std::uint64_t>& expires_after,
                                                                    bool is_mainnet) {
-    if (!ensure_started()) return std::nullopt;
+    if (!ensure_started()) {
+        spdlog::error("[PythonHyperliquidSigner] Failed to start Python subprocess: {} {}", python_exe_, script_path_);
+        return std::nullopt;
+    }
     uint64_t id;
     {
         std::lock_guard<std::mutex> lk(corr_mutex_);
@@ -192,10 +240,15 @@ std::optional<HlSignature> PythonHyperliquidSigner::sign_l1_action(const std::st
 
     std::unique_lock<std::mutex> lk(corr_mutex_);
     if (!pending->cv.wait_for(lk, std::chrono::milliseconds(2000), [&]{ return pending->ready; })) {
+        spdlog::error("[PythonHyperliquidSigner] Timeout waiting for signature response (id={})", id);
         pending_.erase(id);
         return std::nullopt;
     }
-    if (!pending->sig.has_value()) return std::nullopt;
+    if (!pending->sig.has_value()) {
+        spdlog::error("[PythonHyperliquidSigner] No signature in response (id={}), error: {}", id, pending->error);
+        return std::nullopt;
+    }
+    spdlog::debug("[PythonHyperliquidSigner] Signature generated successfully (id={})", id);
     return pending->sig;
 }
 
