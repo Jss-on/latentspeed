@@ -204,24 +204,22 @@ TEST(HyperliquidAuth, SignL1ActionStructure) {
         false
     );
     
-    // Create a sample order action
-    nlohmann::json action = {
-        {"type", "order"},
-        {"orders", nlohmann::json::array({
-            {
-                {"a", 0},
-                {"b", true},
-                {"p", "50000"},
-                {"s", "0.01"},
-                {"r", false},
-                {"t", {{"limit", {{"tif", "Gtc"}}}}}
-            }
-        })},
-        {"grouping", "na"}
-    };
+    // Create a sample order action (use ordered_json to match production code)
+    nlohmann::ordered_json action;
+    action["type"] = "order";
+    nlohmann::ordered_json order_obj;
+    order_obj["a"] = 0;
+    order_obj["b"] = true;
+    order_obj["p"] = "50000";
+    order_obj["s"] = "0.01";
+    order_obj["r"] = false;
+    order_obj["t"] = nlohmann::ordered_json{{"limit", nlohmann::ordered_json{{"tif", "Gtc"}}}};
+    action["orders"] = nlohmann::ordered_json::array({order_obj});
+    action["grouping"] = "na";
     
-    // Sign the action (will use placeholder crypto)
-    auto signed_action = auth.sign_l1_action(action, 12345, true);
+    // Sign the action (returns a JSON payload string)
+    std::string signed_action_str = auth.sign_l1_action(action, 12345, true);
+    auto signed_action = nlohmann::json::parse(signed_action_str);
     
     // Check structure
     EXPECT_TRUE(signed_action.contains("action"));
@@ -244,14 +242,15 @@ TEST(HyperliquidAuth, SignCancelActionStructure) {
         false
     );
     
-    nlohmann::json cancel_action = {
-        {"type", "cancel"},
-        {"cancels", nlohmann::json::array({
-            {{"a", 0}, {"o", 123456}}
-        })}
-    };
+    nlohmann::ordered_json cancel_action;
+    cancel_action["type"] = "cancel";
+    nlohmann::ordered_json cancel_obj;
+    cancel_obj["a"] = 0;
+    cancel_obj["o"] = 123456;
+    cancel_action["cancels"] = nlohmann::ordered_json::array({cancel_obj});
     
-    auto signed_cancel = auth.sign_cancel_action(cancel_action, 12346, true);
+    std::string signed_cancel_str = auth.sign_cancel_action(cancel_action, 12346, true);
+    auto signed_cancel = nlohmann::json::parse(signed_cancel_str);
     
     EXPECT_TRUE(signed_cancel.contains("action"));
     EXPECT_TRUE(signed_cancel.contains("nonce"));

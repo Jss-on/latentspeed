@@ -72,8 +72,8 @@ public:
      *   "grouping": "na"
      * }
      */
-    nlohmann::json sign_l1_action(
-        const nlohmann::json& action,
+    std::string sign_l1_action(
+        const nlohmann::ordered_json& action,
         uint64_t nonce,
         bool is_mainnet = true
     );
@@ -84,8 +84,8 @@ public:
      * @param is_mainnet True for mainnet, false for testnet
      * @return Signed action with signature
      */
-    nlohmann::json sign_l1_action(
-        const nlohmann::json& action,
+    std::string sign_l1_action(
+        const nlohmann::ordered_json& action,
         bool is_mainnet = true
     );
     
@@ -96,8 +96,8 @@ public:
      * @param is_mainnet True for mainnet
      * @return Signed cancel with signature
      */
-    nlohmann::json sign_cancel_action(
-        const nlohmann::json& cancel_action,
+    std::string sign_cancel_action(
+        const nlohmann::ordered_json& cancel_action,
         uint64_t nonce,
         bool is_mainnet = true
     );

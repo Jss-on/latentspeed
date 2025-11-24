@@ -9,6 +9,29 @@ import json
 import uuid
 import time
 import sys
+import requests
+
+
+def get_hyperliquid_mark_price(symbol, testnet=True):
+    base_url = "https://api.hyperliquid-testnet.xyz" if testnet else "https://api.hyperliquid.xyz"
+    try:
+        resp = requests.post(f"{base_url}/info", json={"type": "metaAndAssetCtxs"}, timeout=3)
+        resp.raise_for_status()
+        data = resp.json()
+        universe = data.get("universe", [])
+        asset_ctxs = data.get("assetCtxs", [])
+        for idx, asset in enumerate(universe):
+            if asset.get("name") == symbol:
+                if idx >= len(asset_ctxs):
+                    return None
+                ctx = asset_ctxs[idx]
+                mark_str = ctx.get("markPx") or ctx.get("midPx") or ctx.get("oraclePx")
+                if mark_str is None:
+                    return None
+                return float(mark_str)
+    except Exception:
+        return None
+    return None
 
 
 class TradingEngineTester:
@@ -130,16 +153,23 @@ def main():
     
     tester = TradingEngineTester()
     
-    # Test 1: Market buy order
-    print("Test 1: Market Buy Order")
+    eth_mark = get_hyperliquid_mark_price("ETH") or 3500.0
+    btc_mark = get_hyperliquid_mark_price("BTC") or 60000.0
+
+    eth_buy_price = round(eth_mark * 1.01, 2)
+    btc_sell_price = round(btc_mark * 0.99, 2)
+    eth_sell_price = round(eth_mark * 0.99, 2)
+    
+    # Test 1: Limit buy order (use a reasonable placeholder price)
+    print("Test 1: Limit Buy Order")
     print("-" * 40)
-    cl_id1 = tester.send_order("ETH", "buy", 0.001, "market")
+    cl_id1 = tester.send_order("ETH", "buy", 0.001, "limit", price=eth_buy_price)
     tester.listen_reports(3)
     
     # Test 2: Limit sell order
     print("Test 2: Limit Sell Order")
     print("-" * 40)
-    cl_id2 = tester.send_order("BTC", "sell", 0.0001, "limit", price=100000)
+    cl_id2 = tester.send_order("BTC", "sell", 0.0001, "limit", price=btc_sell_price)
     tester.listen_reports(3)
     
     # Test 3: Cancel the limit order
@@ -148,10 +178,10 @@ def main():
     tester.cancel_order(cl_id2)
     tester.listen_reports(3)
     
-    # Test 4: Another market order
-    print("Test 4: Small Market Sell")
+    # Test 4: Another small limit order
+    print("Test 4: Small Limit Sell")
     print("-" * 40)
-    cl_id3 = tester.send_order("ETH", "sell", 0.001, "market")
+    cl_id3 = tester.send_order("ETH", "sell", 0.001, "limit", price=eth_sell_price)
     tester.listen_reports(3)
     
     print("="*70)

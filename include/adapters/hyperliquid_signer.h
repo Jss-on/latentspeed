@@ -29,6 +29,14 @@ public:
                                                       std::uint64_t nonce,
                                                       const std::optional<std::uint64_t>& expires_after,
                                                       bool is_mainnet) = 0;
+
+    // Build complete action payload (CRITICAL for avoiding signing/posting divergence)
+    // Returns the full JSON ready to POST to /exchange endpoint
+    virtual std::optional<std::string> build_action_payload(const std::string& private_key_hex_lower,
+                                                            const std::string& action_json,
+                                                            const std::optional<std::string>& vault_address_lower,
+                                                            std::uint64_t nonce,
+                                                            bool is_mainnet) = 0;
 };
 
 // Stub signer to allow compilation until Python/C++ signer is integrated.
@@ -39,6 +47,13 @@ public:
                                               uint64_t,
                                               const std::optional<uint64_t>&,
                                               bool) override {
+        return std::nullopt;
+    }
+    
+    std::optional<std::string> build_action_payload(const std::string&, const std::string&,
+                                                    const std::optional<std::string>&,
+                                                    uint64_t,
+                                                    bool) override {
         return std::nullopt;
     }
 };

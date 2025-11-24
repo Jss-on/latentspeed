@@ -417,22 +417,21 @@ std::pair<std::string, uint64_t> HyperliquidPerpetualConnector::execute_place_or
     std::string cloid = convert_to_hex_cloid(order.client_order_id);
     spdlog::info("[HL] Converted cloid: {} -> {}", order.client_order_id, cloid);
     
-    // 5. Build request
-    nlohmann::json action = {
-        {"type", "order"},
-        {"grouping", "na"},
-        {"orders", nlohmann::json::array({
-            {
-                {"a", asset_index},
-                {"b", order.trade_type == TradeType::BUY},
-                {"p", limit_px},
-                {"s", sz},
-                {"r", order.position_action == PositionAction::CLOSE},
-                {"t", param_order_type},
-                {"c", cloid}
-            }
-        })}
-    };
+    // 5. Build request (use ordered_json to preserve key order for msgpack hashing)
+    // Canonical Hyperliquid order action layout from Python SDK:
+    // { "type": "order", "orders": [...], "grouping": "na" }
+    nlohmann::ordered_json action;
+    action["type"] = "order";  // first
+    nlohmann::ordered_json order_obj;
+    order_obj["a"] = asset_index;
+    order_obj["b"] = (order.trade_type == TradeType::BUY);
+    order_obj["p"] = limit_px;
+    order_obj["s"] = sz;
+    order_obj["r"] = (order.position_action == PositionAction::CLOSE);
+    order_obj["t"] = param_order_type;
+    order_obj["c"] = cloid;
+    action["orders"] = nlohmann::ordered_json::array({order_obj});  // second
+    action["grouping"] = "na";                                     // third
     
     // 6. Sign and send
     auto order_result = api_post_with_auth("/exchange", action);
@@ -496,16 +495,13 @@ bool HyperliquidPerpetualConnector::execute_cancel(
     std::string coin = extract_coin_from_pair(trading_pair);
     int asset_index = coin_to_asset_[coin];
     
-    // Build cancel request
-    nlohmann::json action = {
-        {"type", "cancel"},
-        {"cancels", nlohmann::json::array({
-            {
-                {"a", asset_index},
-                {"o", std::stoll(*order.exchange_order_id)}
-            }
-        })}
-    };
+    // Build cancel request (use ordered_json to preserve key order)
+    nlohmann::ordered_json action;
+    action["type"] = "cancel";
+    nlohmann::ordered_json cancel_obj;
+    cancel_obj["a"] = asset_index;
+    cancel_obj["o"] = std::stoll(*order.exchange_order_id);
+    action["cancels"] = nlohmann::ordered_json::array({cancel_obj});
     
     // Sign and send
     auto result = api_post_with_auth("/exchange", action);
@@ -537,15 +533,13 @@ bool HyperliquidPerpetualConnector::execute_cancel_order(const InFlightOrder& or
     }
     int asset_index = coin_to_asset_[coin];
     
-    nlohmann::json action = {
-        {"type", "cancel"},
-        {"cancels", nlohmann::json::array({
-            {
-                {"a", asset_index},
-                {"o", std::stoll(*order.exchange_order_id)}
-            }
-        })}
-    };
+    // Use ordered_json to preserve key order
+    nlohmann::ordered_json action;
+    action["type"] = "cancel";
+    nlohmann::ordered_json cancel_obj;
+    cancel_obj["a"] = asset_index;
+    cancel_obj["o"] = std::stoll(*order.exchange_order_id);
+    action["cancels"] = nlohmann::ordered_json::array({cancel_obj});
     
     try {
         auto result = api_post_with_auth("/exchange", action);
@@ -726,21 +720,22 @@ void HyperliquidPerpetualConnector::process_order_update(const UserStreamMessage
 
 nlohmann::json HyperliquidPerpetualConnector::api_post_with_auth(
     const std::string& endpoint,
-    const nlohmann::json& action) {
-    
-    // Sign the action - this returns the complete request with action, nonce, and signature
-    auto signed_request = auth_->sign_l1_action(action, !testnet_);
-    
-    // Log the full request for debugging (use info level to ensure it shows)
-    spdlog::info("[HL-REST] Request to {}: {}", endpoint, signed_request.dump());
-    
-    return rest_post(endpoint, signed_request);
+    const nlohmann::ordered_json& action) {
+
+    // Sign the action - this returns the complete request JSON string
+    std::string payload = auth_->sign_l1_action(action, !testnet_);
+
+    // Log the full request for debugging (truncate to avoid huge logs)
+    spdlog::info("[HL-REST] Request to {}: {}", endpoint,
+                 payload.substr(0, std::min<size_t>(1000, payload.size())));
+
+    return rest_post(endpoint, payload);
 }
 
 nlohmann::json HyperliquidPerpetualConnector::rest_post(
     const std::string& endpoint,
-    const nlohmann::json& data) {
-    
+    const std::string& body) {
+
     net::io_context ioc;
     ssl::context ctx(ssl::context::tlsv12_client);
     ctx.set_default_verify_paths();
@@ -761,7 +756,7 @@ nlohmann::json HyperliquidPerpetualConnector::rest_post(
     http::request<http::string_body> req{http::verb::post, endpoint, 11};
     req.set(http::field::host, rest_host_);
     req.set(http::field::content_type, "application/json");
-    req.body() = data.dump();
+    req.body() = body;
     req.prepare_payload();
     
     http::write(stream, req);
@@ -804,7 +799,7 @@ nlohmann::json HyperliquidPerpetualConnector::rest_post(
 
 void HyperliquidPerpetualConnector::fetch_trading_rules() {
     nlohmann::json request = {{"type", "meta"}};
-    auto response = rest_post("/info", request);
+    auto response = rest_post("/info", request.dump());
     
     if (response.contains("universe")) {
         for (size_t i = 0; i < response["universe"].size(); ++i) {

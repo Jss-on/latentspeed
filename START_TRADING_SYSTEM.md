@@ -57,8 +57,8 @@ cd /home/tensor/latentspeed
 
 ./build/release/trading_engine_service \
   --exchange hyperliquid \
-  --api-key 0x44Fd91bEd5c87A4fFA222462798BB9d7Ef3669be \
-  --api-secret 0x2e5aacf85446088b3121eec4eab06beda234decc4d16ffe3cb0d2a5ec25ea60b \
+  --api-key 0x85c9cF5AEdd0B1C642Ac0023F780Fbb06B94A754 \
+  --api-secret 0x2e5aacf85446088b3121eec4eab06beda234decc4d16ffe3cb0d2a5ec25ea60b
 ```
 
 Expected output:
@@ -231,7 +231,7 @@ netstat -an | grep 5557
 **Check 1**: Verify credentials
 ```bash
 echo $HYPERLIQUID_USER_ADDRESS
-# Should show: 0x44Fd91bEd5c87A4fFA222462798BB9d7Ef3669be
+# Should show: 0x85c9cF5AEdd0B1C642Ac0023F780Fbb06B94A754
 ```
 
 **Check 2**: Check Hyperliquid API

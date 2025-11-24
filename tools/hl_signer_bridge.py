@@ -55,8 +55,113 @@ def _handle_sign_l1(req_id: int, params: dict):
             return {"id": req_id, "error": {"message": "invalid isMainnet"}}
 
         wallet = Account.from_key(priv)
+        
+        # Debug: Log wallet address
+        sys.stderr.write(f"[HL-SIGNER] Wallet: {wallet.address}, is_mainnet={is_mainnet}\n")
+        sys.stderr.flush()
+        
         sig = sign_l1_action(wallet, action, vault_address, nonce, expires_after, is_mainnet)
+        
+        # Debug: Log signature before padding
+        sys.stderr.write(f"[HL-SIGNER] Raw sig r={sig.get('r', 'N/A')}, s={sig.get('s', 'N/A')}, v={sig.get('v', 'N/A')}\n")
+        sys.stderr.flush()
+        
+        # Ensure r and s are properly zero-padded to 32 bytes (64 hex chars)
+        if "r" in sig:
+            r_val = sig["r"]
+            if r_val.startswith("0x"):
+                r_val = r_val[2:]
+            sig["r"] = "0x" + r_val.zfill(64)
+        
+        if "s" in sig:
+            s_val = sig["s"]
+            if s_val.startswith("0x"):
+                s_val = s_val[2:]
+            sig["s"] = "0x" + s_val.zfill(64)
+        
+        # Debug: Log signature after padding
+        sys.stderr.write(f"[HL-SIGNER] Padded sig r={sig['r']}, s={sig['s']}, v={sig['v']}\n")
+        sys.stderr.flush()
+        
         return {"id": req_id, "result": sig}
+    except Exception as e:
+        return {"id": req_id, "error": {"message": f"{type(e).__name__}: {e}"}}
+
+
+def _handle_build_payload(req_id: int, params: dict):
+    """Build complete action payload (ensures zero divergence between signing and posting)"""
+    if _import_error is not None or Account is None or sign_l1_action is None:
+        return {"id": req_id, "error": {"message": f"ImportError: {_import_error}"}}
+    try:
+        priv = params.get("privateKey")
+        if not isinstance(priv, str) or len(priv) == 0:
+            return {"id": req_id, "error": {"message": "invalid privateKey"}}
+        if not (priv.startswith("0x") or priv.startswith("0X")):
+            priv = "0x" + priv
+
+        action = params.get("action")
+        if isinstance(action, str):
+            action = json.loads(action)
+        if not isinstance(action, dict):
+            return {"id": req_id, "error": {"message": "invalid action"}}
+
+        nonce = params.get("nonce")
+        if not isinstance(nonce, int):
+            return {"id": req_id, "error": {"message": "invalid nonce"}}
+
+        vault_address = params.get("vaultAddress")
+        if vault_address is not None:
+            if not isinstance(vault_address, str):
+                return {"id": req_id, "error": {"message": "invalid vaultAddress"}}
+            vault_address = vault_address.lower()
+
+        is_mainnet = params.get("isMainnet")
+        if not isinstance(is_mainnet, bool):
+            return {"id": req_id, "error": {"message": "invalid isMainnet"}}
+
+        wallet = Account.from_key(priv)
+        
+        # Debug: Log wallet address and action being signed
+        sys.stderr.write(f"[HL-PAYLOAD] Wallet: {wallet.address}, is_mainnet={is_mainnet}, vault={vault_address}\n")
+        sys.stderr.write(f"[HL-PAYLOAD] Action keys: {list(action.keys())}\n")
+        if 'orders' in action and len(action['orders']) > 0:
+            sys.stderr.write(f"[HL-PAYLOAD] Order[0] keys: {list(action['orders'][0].keys())}\n")
+        sys.stderr.flush()
+        
+        sig = sign_l1_action(wallet, action, vault_address, nonce, None, is_mainnet)
+        
+        # Debug: Log signature before padding
+        sys.stderr.write(f"[HL-PAYLOAD] Raw sig r={sig.get('r', 'N/A')}, s={sig.get('s', 'N/A')}, v={sig.get('v', 'N/A')}\n")
+        sys.stderr.flush()
+        
+        # Ensure r and s are properly zero-padded to 32 bytes (64 hex chars)
+        if "r" in sig:
+            r_val = sig["r"]
+            if r_val.startswith("0x"):
+                r_val = r_val[2:]
+            sig["r"] = "0x" + r_val.zfill(64)
+        
+        if "s" in sig:
+            s_val = sig["s"]
+            if s_val.startswith("0x"):
+                s_val = s_val[2:]
+            sig["s"] = "0x" + s_val.zfill(64)
+        
+        # Debug: Log signature after padding
+        sys.stderr.write(f"[HL-PAYLOAD] Padded sig r={sig['r']}, s={sig['s']}, v={sig['v']}\n")
+        sys.stderr.flush()
+        
+        # Build complete payload JSON
+        payload = {
+            "action": action,
+            "nonce": nonce,
+            "signature": sig
+        }
+        if vault_address is not None:
+            payload["vaultAddress"] = vault_address
+            
+        # Return as JSON string
+        return {"id": req_id, "result": json.dumps(payload, separators=(",", ":"))}
     except Exception as e:
         return {"id": req_id, "error": {"message": f"{type(e).__name__}: {e}"}}
 
@@ -78,6 +183,8 @@ def main():
                 _print_line({"id": req_id, "result": "pong"})
             elif method == "sign_l1":
                 _print_line(_handle_sign_l1(req_id, params))
+            elif method == "build_payload":
+                _print_line(_handle_build_payload(req_id, params))
             else:
                 _print_line({"id": req_id, "error": {"message": f"unknown method: {method}"}})
         except Exception as e:

@@ -1,30 +1,48 @@
 #!/usr/bin/env python3
 """Verify which wallet address corresponds to a private key"""
 
+import sys
 from eth_account import Account
 
-# Your private key from config
-private_key = "0x2e5aacf85446088b3121eec4eab06beda234decc4d16ffe3cb0d2a5ec25ea60b"
+# Your target wallet address (derived from your private key)
+target_address = "0x85c9cF5AEdd0B1C642Ac0023F780Fbb06B94A754"
 
-# Derive the actual wallet address
-wallet = Account.from_key(private_key)
-derived_address = wallet.address
-
-print("=" * 60)
-print("WALLET ADDRESS VERIFICATION")
-print("=" * 60)
-print(f"Private Key:      {private_key}")
-print(f"Derived Address:  {derived_address}")
-print(f"Config Address:   0x44Fd91bEd5c87A4fFA222462798BB9d7Ef3669be")
-print("=" * 60)
-
-if derived_address.lower() == "0x44Fd91bEd5c87A4fFA222462798BB9d7Ef3669be".lower():
-    print("✅ MATCH: Private key matches config wallet address")
+# Prompt for private key (don't hardcode it)
+if len(sys.argv) > 1:
+    private_key = sys.argv[1]
 else:
-    print("❌ MISMATCH: Private key does NOT match config wallet address")
-    print(f"\nThe private key actually corresponds to: {derived_address}")
-    print(f"You need to either:")
-    print(f"  1. Use the correct private key for 0x44Fd91bEd5c87A4fFA222462798BB9d7Ef3669be")
-    print(f"  2. Update config to use {derived_address} as wallet_address")
-    print(f"  3. Get a new wallet with both private key and address")
-print("=" * 60)
+    print("Usage: python3 verify_wallet.py <private_key>")
+    print(f"\nTarget wallet: {target_address}")
+    print("\nProvide the private key to verify it matches this address")
+    sys.exit(1)
+
+if not private_key.startswith("0x"):
+    private_key = "0x" + private_key
+
+try:
+    # Derive the actual wallet address
+    wallet = Account.from_key(private_key)
+    derived_address = wallet.address
+
+    print("=" * 60)
+    print("WALLET ADDRESS VERIFICATION")
+    print("=" * 60)
+    print(f"Private Key:      {private_key[:10]}...{private_key[-8:]}")  # Partial display for security
+    print(f"Derived Address:  {derived_address}")
+    print(f"Target Address:   {target_address}")
+    print("=" * 60)
+
+    if derived_address.lower() == target_address.lower():
+        print("✅ MATCH: Private key matches target wallet address")
+        print("\nYou can now use this in your config:")
+        print(f"  wallet_address: \"{derived_address}\"")
+        print(f"  private_key: \"{private_key}\"")
+    else:
+        print("❌ MISMATCH: Private key does NOT match target wallet address")
+        print(f"\nThe private key actually corresponds to: {derived_address}")
+        print(f"\nYou need the correct private key for: {target_address}")
+    print("=" * 60)
+    
+except Exception as e:
+    print(f"Error: {e}")
+    sys.exit(1)

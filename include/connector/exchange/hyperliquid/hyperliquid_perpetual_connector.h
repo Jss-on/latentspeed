@@ -145,8 +145,8 @@ private:
     // REST API HELPERS
     // ========================================================================
 
-    nlohmann::json api_post_with_auth(const std::string& endpoint, const nlohmann::json& action);
-    nlohmann::json rest_post(const std::string& endpoint, const nlohmann::json& data);
+    nlohmann::json api_post_with_auth(const std::string& endpoint, const nlohmann::ordered_json& action);
+    nlohmann::json rest_post(const std::string& endpoint, const std::string& body);
     void fetch_trading_rules();
 
     // ========================================================================

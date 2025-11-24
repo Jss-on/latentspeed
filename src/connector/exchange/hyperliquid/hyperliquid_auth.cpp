@@ -39,8 +39,8 @@ HyperliquidAuth::HyperliquidAuth(
     spdlog::info("[HyperliquidAuth] Initialized for address: {} with Python signer", api_key_);
 }
 
-nlohmann::json HyperliquidAuth::sign_l1_action(
-    const nlohmann::json& action,
+std::string HyperliquidAuth::sign_l1_action(
+    const nlohmann::ordered_json& action,
     uint64_t nonce,
     bool is_mainnet
 ) {
@@ -51,42 +51,33 @@ nlohmann::json HyperliquidAuth::sign_l1_action(
     }
     
     try {
-        // Use Python signer for actual signing
+        // Use Python signer for actual signing (CRITICAL: use build_action_payload to avoid divergence)
         std::optional<std::string> vault_addr;
         if (use_vault_) {
             vault_addr = api_key_;
         }
         
         std::string action_str = action.dump();
-        auto sig = signer_->sign_l1_action(
+        
+        // Log action string for debugging
+        spdlog::info("[HyperliquidAuth] Action string to sign: {}", action_str.substr(0, std::min<size_t>(200, action_str.length())));
+        
+        // Use build_action_payload instead of manual construction
+        // This ensures ZERO divergence between signing and posting
+        auto payload_str = signer_->build_action_payload(
             api_secret_,      // private key
             action_str,       // action JSON
             vault_addr,       // vault address (optional)
             nonce,            // nonce
-            std::nullopt,     // expires_after (optional)
             is_mainnet        // mainnet flag
         );
         
-        if (!sig) {
-            throw HyperliquidAuthException("Python signer returned no signature");
+        if (!payload_str) {
+            throw HyperliquidAuthException("Python signer failed to build action payload");
         }
-        
-        // Build signed action with signature from Python signer
-        nlohmann::json signed_action = {
-            {"action", action},
-            {"nonce", nonce},
-            {"signature", {
-                {"r", sig->r},
-                {"s", sig->s},
-                {"v", std::stoi(sig->v)}
-            }}
-        };
-        
-        if (use_vault_) {
-            signed_action["vaultAddress"] = api_key_;
-        }
-        
-        return signed_action;
+
+        // Return the raw payload string from Python unchanged to preserve key order
+        return *payload_str;
         
     } catch (const std::exception& e) {
         throw HyperliquidAuthException(
@@ -95,8 +86,8 @@ nlohmann::json HyperliquidAuth::sign_l1_action(
     }
 }
 
-nlohmann::json HyperliquidAuth::sign_l1_action(
-    const nlohmann::json& action,
+std::string HyperliquidAuth::sign_l1_action(
+    const nlohmann::ordered_json& action,
     bool is_mainnet
 ) {
     // Auto-generate nonce using timestamp in milliseconds
@@ -105,12 +96,12 @@ nlohmann::json HyperliquidAuth::sign_l1_action(
     ).count();
     
     spdlog::debug("[HyperliquidAuth] Auto-generated nonce: {}", nonce);
-    
+
     return sign_l1_action(action, nonce, is_mainnet);
 }
 
-nlohmann::json HyperliquidAuth::sign_cancel_action(
-    const nlohmann::json& cancel_action,
+std::string HyperliquidAuth::sign_cancel_action(
+    const nlohmann::ordered_json& cancel_action,
     uint64_t nonce,
     bool is_mainnet
 ) {

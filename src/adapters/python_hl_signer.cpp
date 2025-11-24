@@ -148,16 +148,27 @@ void PythonHyperliquidSigner::reader_loop() {
                     if (it != pending_.end()) p = it->second;
                 }
                 if (!p) continue;
-                if (d.HasMember("result") && d["result"].IsObject()) {
+                if (d.HasMember("result")) {
                     auto& r = d["result"];
-                    HlSignature sig;
-                    if (r.HasMember("r") && r["r"].IsString()) sig.r = r["r"].GetString();
-                    if (r.HasMember("s") && r["s"].IsString()) sig.s = r["s"].GetString();
-                    if (r.HasMember("v") && r["v"].IsInt()) sig.v = std::to_string(r["v"].GetInt());
-                    {
-                        std::lock_guard<std::mutex> lk(corr_mutex_);
-                        p->sig = sig; p->ready = true; p->cv.notify_all();
-                        pending_.erase(id);
+                    // Check if result is a signature object or a string payload
+                    if (r.IsObject()) {
+                        HlSignature sig;
+                        if (r.HasMember("r") && r["r"].IsString()) sig.r = r["r"].GetString();
+                        if (r.HasMember("s") && r["s"].IsString()) sig.s = r["s"].GetString();
+                        if (r.HasMember("v") && r["v"].IsInt()) sig.v = std::to_string(r["v"].GetInt());
+                        {
+                            std::lock_guard<std::mutex> lk(corr_mutex_);
+                            p->sig = sig; p->ready = true; p->cv.notify_all();
+                            pending_.erase(id);
+                        }
+                    } else if (r.IsString()) {
+                        // Payload response for build_action_payload
+                        std::string payload = r.GetString();
+                        {
+                            std::lock_guard<std::mutex> lk(corr_mutex_);
+                            p->resp = payload; p->ready = true; p->cv.notify_all();
+                            pending_.erase(id);
+                        }
                     }
                 } else if (d.HasMember("error") && d["error"].IsObject()) {
                     std::string msg;
@@ -250,6 +261,68 @@ std::optional<HlSignature> PythonHyperliquidSigner::sign_l1_action(const std::st
     }
     spdlog::debug("[PythonHyperliquidSigner] Signature generated successfully (id={})", id);
     return pending->sig;
+}
+
+std::optional<std::string> PythonHyperliquidSigner::build_action_payload(
+    const std::string& private_key_hex_lower,
+    const std::string& action_json,
+    const std::optional<std::string>& vault_address_lower,
+    std::uint64_t nonce,
+    bool is_mainnet) {
+    
+    if (!ensure_started()) {
+        spdlog::error("[PythonHyperliquidSigner] Failed to start Python subprocess: {} {}", python_exe_, script_path_);
+        return std::nullopt;
+    }
+    
+    uint64_t id;
+    {
+        std::lock_guard<std::mutex> lk(corr_mutex_);
+        id = next_id_++;
+    }
+    
+    rapidjson::Document params(rapidjson::kObjectType);
+    auto& alloc = params.GetAllocator();
+    params.AddMember("privateKey", rapidjson::Value(private_key_hex_lower.c_str(), alloc), alloc);
+    params.AddMember("action", rapidjson::Value(action_json.c_str(), alloc), alloc);
+    params.AddMember("nonce", rapidjson::Value(static_cast<uint64_t>(nonce)), alloc);
+    if (vault_address_lower.has_value())
+        params.AddMember("vaultAddress", rapidjson::Value(vault_address_lower->c_str(), alloc), alloc);
+    else
+        params.AddMember("vaultAddress", rapidjson::Value(rapidjson::kNullType), alloc);
+    params.AddMember("isMainnet", rapidjson::Value(is_mainnet), alloc);
+    
+    rapidjson::Document msg(rapidjson::kObjectType);
+    msg.AddMember("id", rapidjson::Value(static_cast<uint64_t>(id)), msg.GetAllocator());
+    msg.AddMember("method", rapidjson::Value("build_payload", msg.GetAllocator()), msg.GetAllocator());
+    msg.AddMember("params", params, msg.GetAllocator());
+    rapidjson::StringBuffer sb; rapidjson::Writer<rapidjson::StringBuffer> wr(sb); msg.Accept(wr);
+    std::string line = sb.GetString();
+    line.push_back('\n');
+    
+    auto pending = std::make_shared<Pending>();
+    {
+        std::lock_guard<std::mutex> lk(corr_mutex_);
+        pending_[id] = pending;
+    }
+    if (!send_line(line)) {
+        std::lock_guard<std::mutex> lk(corr_mutex_);
+        pending_.erase(id);
+        return std::nullopt;
+    }
+    
+    std::unique_lock<std::mutex> lk(corr_mutex_);
+    if (!pending->cv.wait_for(lk, std::chrono::milliseconds(2000), [&]{ return pending->ready; })) {
+        spdlog::error("[PythonHyperliquidSigner] Timeout waiting for payload response (id={})", id);
+        pending_.erase(id);
+        return std::nullopt;
+    }
+    if (!pending->resp.has_value()) {
+        spdlog::error("[PythonHyperliquidSigner] No payload in response (id={}), error: {}", id, pending->error);
+        return std::nullopt;
+    }
+    spdlog::debug("[PythonHyperliquidSigner] Payload generated successfully (id={})", id);
+    return pending->resp;
 }
 
 } // namespace latentspeed
